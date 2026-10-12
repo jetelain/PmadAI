@@ -225,6 +225,27 @@ using var chatClient = LlamaSharpChatClient.CreateFromFile(
 public sealed class CustomDialect : ChatDialect { ... }
 ```
 
+### 8. Tool Calling Benchmark Suite
+
+A standalone benchmarking tool is provided under `benchmarks/Pmad.AI.Benchmark` to showcase and validate tool calling with mocked multi-turn user interactions, measuring speed (tokens/sec), latency (ms), and function execution accuracy:
+
+```bash
+# 1. Run in mock simulation mode (validates all scenarios & reporting immediately without model weights):
+dotnet run --project benchmarks/Pmad.AI.Benchmark -- --mock
+
+# 2. Benchmark a specific preset with automated download and Markdown report export:
+dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --download --output benchmark_report.md
+
+# 3. Benchmark all supported model presets:
+dotnet run --project benchmarks/Pmad.AI.Benchmark -- --all --download
+```
+
+Scenarios evaluated:
+- **`weather`**: Multi-entity function calling (`get_weather` for Paris and Tokyo) followed by multi-turn contextual reasoning.
+- **`calculator`**: Arithmetic calculation tool invocation (`calculate`) with monetary discount percentages.
+- **`support`**: Chained multi-turn pipeline (order lookup `lookup_order` -> shipment tracking `track_package`).
+- **`direct`**: Negative test verifying the model does *not* hallucinate unnecessary tool calls when direct answering is expected.
+
 ---
 
 ## Model Presets

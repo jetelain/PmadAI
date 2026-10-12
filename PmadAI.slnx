@@ -2,6 +2,9 @@
   <Folder Name="/src/">
     <Project Path="src/Pmad.AI.LlamaSharp/Pmad.AI.LlamaSharp.csproj" />
   </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/Pmad.AI.Benchmark/Pmad.AI.Benchmark.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Pmad.AI.LlamaSharp.Tests/Pmad.AI.LlamaSharp.Tests.csproj" />
   </Folder>

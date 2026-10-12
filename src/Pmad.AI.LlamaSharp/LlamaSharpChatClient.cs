@@ -149,6 +149,8 @@ public sealed class LlamaSharpChatClient : IChatClient
         _dialect = dialect ?? _options.Dialect ?? ChatDialect.FromName(_options.PromptFormat);
         _clipModel = clipModel;
         _ownsWeights = ownsWeights;
+        
+        EnsureNativeLogHookInstalled();
 
         var modelUri = new Uri(Path.GetFullPath(modelPath));
         _metadata = new ChatClientMetadata("llamasharp", modelUri, Path.GetFileName(modelPath));
