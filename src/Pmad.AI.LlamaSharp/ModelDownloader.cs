@@ -177,36 +177,55 @@ public sealed class ModelDownloader
         long lastProgressBytes = 0;
         int bytesRead;
 
-        while ((bytesRead = await contentStream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+        try
         {
-            await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), ct).ConfigureAwait(false);
-            downloaded += bytesRead;
-
-            if (progressSw.ElapsedMilliseconds >= 250 || downloaded - lastProgressBytes >= 5 * 1024 * 1024)
+            while ((bytesRead = await contentStream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
             {
-                effectiveProgress?.Report(new ModelDownloadProgress(downloaded, totalBytes, fileName));
-                lastProgressBytes = downloaded;
-                progressSw.Restart();
+                await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), ct).ConfigureAwait(false);
+                downloaded += bytesRead;
+
+                if (progressSw.ElapsedMilliseconds >= 250 || downloaded - lastProgressBytes >= 5 * 1024 * 1024)
+                {
+                    effectiveProgress?.Report(new ModelDownloadProgress(downloaded, totalBytes, fileName));
+                    lastProgressBytes = downloaded;
+                    progressSw.Restart();
+                }
+
+                if (downloaded - lastReportedBytes >= 50 * 1024 * 1024 || sw.ElapsedMilliseconds >= 3000)
+                {
+                    if (totalBytes.HasValue && totalBytes.Value > 0)
+                    {
+                        var pct = (double)downloaded / totalBytes.Value * 100.0;
+                        LogStatus($"     {FormatBytes(downloaded)} / {FormatBytes(totalBytes.Value)} ({pct:F1}%)", statusLogger);
+                    }
+                    else
+                    {
+                        LogStatus($"     {FormatBytes(downloaded)} downloaded", statusLogger);
+                    }
+                    lastReportedBytes = downloaded;
+                    sw.Restart();
+                }
             }
 
-            if (downloaded - lastReportedBytes >= 50 * 1024 * 1024 || sw.ElapsedMilliseconds >= 3000)
-            {
-                if (totalBytes.HasValue && totalBytes.Value > 0)
-                {
-                    var pct = (double)downloaded / totalBytes.Value * 100.0;
-                    LogStatus($"     {FormatBytes(downloaded)} / {FormatBytes(totalBytes.Value)} ({pct:F1}%)", statusLogger);
-                }
-                else
-                {
-                    LogStatus($"     {FormatBytes(downloaded)} downloaded", statusLogger);
-                }
-                lastReportedBytes = downloaded;
-                sw.Restart();
-            }
+            await fileStream.FlushAsync(ct).ConfigureAwait(false);
+            fileStream.Close();
         }
-
-        await fileStream.FlushAsync(ct).ConfigureAwait(false);
-        fileStream.Close();
+        catch
+        {
+            try
+            {
+                fileStream.Close();
+                if (File.Exists(partPath))
+                {
+                    File.Delete(partPath);
+                }
+            }
+            catch
+            {
+                // Suppress secondary cleanup exceptions
+            }
+            throw;
+        }
 
         File.Move(partPath, localPath, overwrite: true);
 

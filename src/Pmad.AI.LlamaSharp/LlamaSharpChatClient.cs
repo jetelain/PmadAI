@@ -22,6 +22,9 @@ public sealed class LlamaSharpChatClient : IChatClient
     private static bool _nativeVerbose;
     private static bool _nativeLogHookInstalled;
 
+    private readonly SemaphoreSlim _inferenceLock = new(1, 1);
+    private bool _disposed;
+
     private readonly string _modelPath;
     private readonly LlamaSharpOptions _options;
     private readonly ChatDialect _dialect;
@@ -69,6 +72,8 @@ public sealed class LlamaSharpChatClient : IChatClient
         {
             NativeLogConfig.llama_log_set((level, message) =>
             {
+                if (_nativeLogger == null) return;
+
                 ILogger? logger;
                 bool verbose;
                 lock (_nativeLogLock)
@@ -299,12 +304,50 @@ public sealed class LlamaSharpChatClient : IChatClient
     /// <inheritdoc />
     public ChatClientMetadata Metadata => _metadata;
 
+    private InferenceParams BuildInferenceParams(ChatOptions? options, int maxOutputTokens)
+    {
+        var samplingPipeline = new DefaultSamplingPipeline
+        {
+            Temperature = (float)(options?.Temperature ?? _options.DefaultTemperature),
+            TopP = options?.TopP ?? 0.95f,
+            TopK = options?.TopK ?? 40
+        };
+        if (options?.Seed is { } seed)
+        {
+            samplingPipeline.Seed = (uint)seed;
+        }
+
+        var antiPrompts = _dialect.CachedStopTokensList;
+        if (options?.StopSequences is { Count: > 0 } userStopTokens)
+        {
+            var combined = new List<string>(_dialect.CachedStopTokensList);
+            foreach (var s in userStopTokens)
+            {
+                if (!string.IsNullOrEmpty(s) && !combined.Contains(s))
+                {
+                    combined.Add(s);
+                }
+            }
+            antiPrompts = combined;
+        }
+
+        return new InferenceParams
+        {
+            MaxTokens = maxOutputTokens,
+            SamplingPipeline = samplingPipeline,
+            AntiPrompts = antiPrompts,
+            OverflowStrategy = ContextOverflowStrategy.TruncateAndReprefill
+        };
+    }
+
     /// <inheritdoc />
     public async Task<ChatResponse> GetResponseAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         if (_options.RequestTimeoutMinutes > 0)
         {
@@ -314,6 +357,132 @@ public sealed class LlamaSharpChatClient : IChatClient
 
         return await Task.Run(async () =>
         {
+            await _inferenceLock.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+
+                if (HasImageContent(messages) && _clipModel == null)
+                {
+                    throw new InvalidOperationException(
+                        "The chat request contains images, but no multimodal projector (mmproj) was loaded for this local model. " +
+                        "Ensure an mmproj-*.gguf file is available.");
+                }
+
+                var (enableReasoning, reasoningEffort) = LocalModelChatFormatter.ResolveReasoningParameters(options, _options);
+                if (!SupportsReasoning)
+                {
+                    enableReasoning = null;
+                    reasoningEffort = null;
+                }
+                else if (!SupportsReasoningEffort)
+                {
+                    reasoningEffort = null;
+                }
+
+                var promptText = _dialect.FormatPrompt(messages, options?.Tools, enableReasoning, reasoningEffort);
+                int inputTokens = _context.Tokenize(promptText).Length;
+
+                LogOperation("Starting completion for model '{ModelPath}'. Prompt length: {PromptLength} chars, Tokens: {InputTokens}, Reasoning: {ReasoningEnabled}, Effort: {ReasoningEffort}",
+                    _modelPath, promptText.Length, inputTokens, enableReasoning, reasoningEffort ?? "none");
+
+                int maxOutputTokens = options?.MaxOutputTokens ?? _options.DefaultMaxOutputTokens;
+                var inferenceParams = BuildInferenceParams(options, maxOutputTokens);
+
+                var embeds = ExtractMediaEmbeds(messages);
+                try
+                {
+                    var responseBuilder = new StringBuilder();
+                    int outputTokenCount = 0;
+
+                    if (embeds.Count > 0 && _clipModel != null)
+                    {
+                        LogOperation("Executing multimodal inference with {EmbedCount} media embed(s)", embeds.Count);
+                        var interactiveExecutor = new InteractiveExecutor(_context, _clipModel);
+                        interactiveExecutor.Embeds.AddRange(embeds);
+                        await foreach (var token in interactiveExecutor.InferAsync(promptText, inferenceParams, ct))
+                        {
+                            responseBuilder.Append(token);
+                            outputTokenCount++;
+                        }
+                    }
+                    else
+                    {
+                        await foreach (var token in _statelessExecutor.InferAsync(promptText, inferenceParams, ct))
+                        {
+                            responseBuilder.Append(token);
+                            outputTokenCount++;
+                        }
+                    }
+
+                    var text = responseBuilder.ToString().Trim();
+                    var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(text, _dialect, _options.FunctionCallNormalizer);
+
+                    LogOperation("Completed inference. Output tokens: {OutputTokens}, Total tokens: {TotalTokens}",
+                        outputTokenCount, inputTokens + outputTokenCount);
+
+                    ChatFinishReason finishReason;
+                    if (assistantMessage.Contents.OfType<FunctionCallContent>().Any())
+                    {
+                        finishReason = ChatFinishReason.ToolCalls;
+                    }
+                    else if (outputTokenCount >= maxOutputTokens)
+                    {
+                        finishReason = ChatFinishReason.Length;
+                    }
+                    else
+                    {
+                        finishReason = ChatFinishReason.Stop;
+                    }
+
+                    var chatResponse = new ChatResponse(new List<ChatMessage> { assistantMessage })
+                    {
+                        FinishReason = finishReason,
+                        Usage = new UsageDetails
+                        {
+                            InputTokenCount = inputTokens,
+                            OutputTokenCount = outputTokenCount,
+                            TotalTokenCount = inputTokens + outputTokenCount
+                        }
+                    };
+
+                    return chatResponse;
+                }
+                finally
+                {
+                    foreach (var embed in embeds)
+                    {
+                        embed.Dispose();
+                    }
+                }
+            }
+            finally
+            {
+                _inferenceLock.Release();
+            }
+        }, ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+        IEnumerable<ChatMessage> messages,
+        ChatOptions? options = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (_options.RequestTimeoutMinutes > 0)
+        {
+            timeoutCts.CancelAfter(TimeSpan.FromMinutes(_options.RequestTimeoutMinutes));
+        }
+        var ct = timeoutCts.Token;
+
+        await _inferenceLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
             if (HasImageContent(messages) && _clipModel == null)
             {
                 throw new InvalidOperationException(
@@ -333,69 +502,44 @@ public sealed class LlamaSharpChatClient : IChatClient
             }
 
             var promptText = _dialect.FormatPrompt(messages, options?.Tools, enableReasoning, reasoningEffort);
-            int inputTokens = _context.Tokenize(promptText).Length;
-
-            LogOperation("Starting completion for model '{ModelPath}'. Prompt length: {PromptLength} chars, Tokens: {InputTokens}, Reasoning: {ReasoningEnabled}, Effort: {ReasoningEffort}",
-                _modelPath, promptText.Length, inputTokens, enableReasoning, reasoningEffort ?? "none");
-
             int maxOutputTokens = options?.MaxOutputTokens ?? _options.DefaultMaxOutputTokens;
-            var inferenceParams = new InferenceParams
-            {
-                MaxTokens = maxOutputTokens,
-                SamplingPipeline = new DefaultSamplingPipeline
-                {
-                    Temperature = (float)(options?.Temperature ?? _options.DefaultTemperature)
-                },
-                AntiPrompts = _dialect.CachedStopTokensList,
-                OverflowStrategy = ContextOverflowStrategy.TruncateAndReprefill
-            };
+            var inferenceParams = BuildInferenceParams(options, maxOutputTokens);
 
+            var responseBuilder = new StringBuilder();
+            var hasTools = options?.Tools is { Count: > 0 };
             var embeds = ExtractMediaEmbeds(messages);
+            int outputTokenCount = 0;
+
+            LogOperation("Starting streaming inference for model '{ModelPath}'", _modelPath);
+
             try
             {
-                var responseBuilder = new StringBuilder();
-                int outputTokenCount = 0;
-
+                IAsyncEnumerable<string> tokenStream;
                 if (embeds.Count > 0 && _clipModel != null)
                 {
-                    LogOperation("Executing multimodal inference with {EmbedCount} media embed(s)", embeds.Count);
+                    LogOperation("Executing multimodal streaming inference with {EmbedCount} media embed(s)", embeds.Count);
                     var interactiveExecutor = new InteractiveExecutor(_context, _clipModel);
                     interactiveExecutor.Embeds.AddRange(embeds);
-                    await foreach (var token in interactiveExecutor.InferAsync(promptText, inferenceParams, ct))
-                    {
-                        responseBuilder.Append(token);
-                        outputTokenCount++;
-                    }
+                    tokenStream = interactiveExecutor.InferAsync(promptText, inferenceParams, ct);
                 }
                 else
                 {
-                    await foreach (var token in _statelessExecutor.InferAsync(promptText, inferenceParams, ct))
-                    {
-                        responseBuilder.Append(token);
-                        outputTokenCount++;
-                    }
+                    tokenStream = _statelessExecutor.InferAsync(promptText, inferenceParams, ct);
                 }
 
-                var text = responseBuilder.ToString().Trim();
-                var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(text, _dialect, _options.FunctionCallNormalizer);
-
-                LogOperation("Completed inference. Output tokens: {OutputTokens}, Total tokens: {TotalTokens}",
-                    outputTokenCount, inputTokens + outputTokenCount);
-
-                var chatResponse = new ChatResponse(new List<ChatMessage> { assistantMessage })
+                await foreach (var token in tokenStream.WithCancellation(ct))
                 {
-                    FinishReason = assistantMessage.Contents.OfType<FunctionCallContent>().Any()
-                        ? ChatFinishReason.ToolCalls
-                        : ChatFinishReason.Stop,
-                    Usage = new UsageDetails
+                    outputTokenCount++;
+                    responseBuilder.Append(token);
+                    if (!hasTools)
                     {
-                        InputTokenCount = inputTokens,
-                        OutputTokenCount = outputTokenCount,
-                        TotalTokenCount = inputTokens + outputTokenCount
+                        yield return new ChatResponseUpdate
+                        {
+                            Role = ChatRole.Assistant,
+                            Contents = [new TextContent(token)]
+                        };
                     }
-                };
-
-                return chatResponse;
+                }
             }
             finally
             {
@@ -404,106 +548,33 @@ public sealed class LlamaSharpChatClient : IChatClient
                     embed.Dispose();
                 }
             }
-        }, ct);
-    }
 
-    /// <inheritdoc />
-    public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
-        IEnumerable<ChatMessage> messages,
-        ChatOptions? options = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        if (_options.RequestTimeoutMinutes > 0)
-        {
-            timeoutCts.CancelAfter(TimeSpan.FromMinutes(_options.RequestTimeoutMinutes));
-        }
-        var ct = timeoutCts.Token;
-
-        if (HasImageContent(messages) && _clipModel == null)
-        {
-            throw new InvalidOperationException(
-                "The chat request contains images, but no multimodal projector (mmproj) was loaded for this local model. " +
-                "Ensure an mmproj-*.gguf file is available.");
-        }
-
-        var (enableReasoning, reasoningEffort) = LocalModelChatFormatter.ResolveReasoningParameters(options, _options);
-        if (!SupportsReasoning)
-        {
-            enableReasoning = null;
-            reasoningEffort = null;
-        }
-        else if (!SupportsReasoningEffort)
-        {
-            reasoningEffort = null;
-        }
-
-        var promptText = _dialect.FormatPrompt(messages, options?.Tools, enableReasoning, reasoningEffort);
-        int maxOutputTokens = options?.MaxOutputTokens ?? _options.DefaultMaxOutputTokens;
-        var inferenceParams = new InferenceParams
-        {
-            MaxTokens = maxOutputTokens,
-            SamplingPipeline = new DefaultSamplingPipeline
+            if (hasTools)
             {
-                Temperature = (float)(options?.Temperature ?? _options.DefaultTemperature)
-            },
-            AntiPrompts = _dialect.CachedStopTokensList,
-            OverflowStrategy = ContextOverflowStrategy.TruncateAndReprefill
-        };
+                var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(responseBuilder.ToString().Trim(), _dialect, _options.FunctionCallNormalizer);
+                ChatFinishReason finishReason = assistantMessage.Contents.OfType<FunctionCallContent>().Any()
+                    ? ChatFinishReason.ToolCalls
+                    : (outputTokenCount >= maxOutputTokens ? ChatFinishReason.Length : ChatFinishReason.Stop);
 
-        var responseBuilder = new StringBuilder();
-        var hasTools = options?.Tools is { Count: > 0 };
-        var embeds = ExtractMediaEmbeds(messages);
-
-        LogOperation("Starting streaming inference for model '{ModelPath}'", _modelPath);
-
-        try
-        {
-            IAsyncEnumerable<string> tokenStream;
-            if (embeds.Count > 0 && _clipModel != null)
-            {
-                LogOperation("Executing multimodal streaming inference with {EmbedCount} media embed(s)", embeds.Count);
-                var interactiveExecutor = new InteractiveExecutor(_context, _clipModel);
-                interactiveExecutor.Embeds.AddRange(embeds);
-                tokenStream = interactiveExecutor.InferAsync(promptText, inferenceParams, ct);
+                yield return new ChatResponseUpdate
+                {
+                    Role = ChatRole.Assistant,
+                    Contents = assistantMessage.Contents.ToList(),
+                    FinishReason = finishReason
+                };
             }
             else
             {
-                tokenStream = _statelessExecutor.InferAsync(promptText, inferenceParams, ct);
-            }
-
-            await foreach (var token in tokenStream.WithCancellation(ct))
-            {
-                responseBuilder.Append(token);
-                if (!hasTools)
+                yield return new ChatResponseUpdate
                 {
-                    yield return new ChatResponseUpdate
-                    {
-                        Role = ChatRole.Assistant,
-                        Contents = [new TextContent(token)]
-                    };
-                }
+                    Role = ChatRole.Assistant,
+                    FinishReason = outputTokenCount >= maxOutputTokens ? ChatFinishReason.Length : ChatFinishReason.Stop
+                };
             }
         }
         finally
         {
-            foreach (var embed in embeds)
-            {
-                embed.Dispose();
-            }
-        }
-
-        if (hasTools)
-        {
-            var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(responseBuilder.ToString().Trim(), _dialect, _options.FunctionCallNormalizer);
-            yield return new ChatResponseUpdate
-            {
-                Role = ChatRole.Assistant,
-                Contents = assistantMessage.Contents.ToList(),
-                FinishReason = assistantMessage.Contents.OfType<FunctionCallContent>().Any()
-                    ? ChatFinishReason.ToolCalls
-                    : ChatFinishReason.Stop
-            };
+            _inferenceLock.Release();
         }
     }
 
@@ -545,9 +616,20 @@ public sealed class LlamaSharpChatClient : IChatClient
                     else if (content is UriContent uriContent &&
                              (uriContent.MediaType == null || uriContent.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)))
                     {
-                        if (uriContent.Uri.IsFile && File.Exists(uriContent.Uri.LocalPath))
+                        if (uriContent.Uri.IsFile)
                         {
-                            embeds.Add(_clipModel.LoadMedia(uriContent.Uri.LocalPath));
+                            if (File.Exists(uriContent.Uri.LocalPath))
+                            {
+                                embeds.Add(_clipModel.LoadMedia(uriContent.Uri.LocalPath));
+                            }
+                            else
+                            {
+                                throw new FileNotFoundException($"Local image file was not found at '{uriContent.Uri.LocalPath}'.", uriContent.Uri.LocalPath);
+                            }
+                        }
+                        else
+                        {
+                            throw new NotSupportedException($"Only local file URIs are supported for multimodal image inputs, got '{uriContent.Uri}'.");
                         }
                     }
                 }
@@ -577,8 +659,18 @@ public sealed class LlamaSharpChatClient : IChatClient
     /// <inheritdoc />
     public object? GetService(Type serviceType, object? serviceKey = null)
     {
+        ArgumentNullException.ThrowIfNull(serviceType);
+
         if (serviceKey is null)
         {
+            if (serviceType == typeof(ChatClientMetadata))
+            {
+                return _metadata;
+            }
+            if (serviceType.IsInstanceOfType(this))
+            {
+                return this;
+            }
             if (serviceType == typeof(ILogger) || serviceType == typeof(ILogger<LlamaSharpChatClient>))
             {
                 return _logger;
@@ -610,11 +702,30 @@ public sealed class LlamaSharpChatClient : IChatClient
     /// <inheritdoc />
     public void Dispose()
     {
-        if (_ownsWeights)
+        if (_disposed) return;
+        _disposed = true;
+
+        try
         {
-            _clipModel?.Dispose();
-            _context.Dispose();
-            _weights.Dispose();
+            _inferenceLock.Wait();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Already disposed
+        }
+
+        try
+        {
+            if (_ownsWeights)
+            {
+                _clipModel?.Dispose();
+                _context.Dispose();
+                _weights.Dispose();
+            }
+        }
+        finally
+        {
+            _inferenceLock.Dispose();
         }
     }
 }

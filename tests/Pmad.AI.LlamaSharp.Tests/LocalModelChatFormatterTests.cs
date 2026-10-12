@@ -584,4 +584,40 @@ public class LocalModelChatFormatterTests
         Assert.DoesNotContain("Reasoning effort is set to", promptChatml);
         Assert.EndsWith("<|im_start|>assistant\n<think>\n", promptChatml);
     }
+
+    [Fact]
+    public void ParseAssistantResponse_WithArrayOfToolCalls_ParsesAllCalls()
+    {
+        var raw = "<tool_call>[{\"name\":\"call_one\",\"arguments\":{\"a\":1}},{\"name\":\"call_two\",\"arguments\":{\"b\":2}}]</tool_call>";
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var calls = msg.Contents.OfType<FunctionCallContent>().ToList();
+        Assert.Equal(2, calls.Count);
+        Assert.Equal("call_one", calls[0].Name);
+        Assert.Equal("1", calls[0].Arguments?["a"]?.ToString());
+        Assert.Equal("call_two", calls[1].Name);
+        Assert.Equal("2", calls[1].Arguments?["b"]?.ToString());
+    }
+
+    [Fact]
+    public void ParseAssistantResponse_PreservesModelCallId()
+    {
+        var raw = "<tool_call>{\"id\":\"custom_id_123\",\"name\":\"do_something\",\"arguments\":{}}</tool_call>";
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var call = Assert.Single(msg.Contents.OfType<FunctionCallContent>());
+        Assert.Equal("custom_id_123", call.CallId);
+        Assert.Equal("do_something", call.Name);
+    }
+
+    [Fact]
+    public void ParseAssistantResponse_WithNonJsonStringArguments_StoresUnderInputKey()
+    {
+        var raw = "<tool_call>{\"name\":\"raw_executor\",\"arguments\":\"SELECT * FROM table\"}</tool_call>";
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var call = Assert.Single(msg.Contents.OfType<FunctionCallContent>());
+        Assert.Equal("raw_executor", call.Name);
+        Assert.Equal("SELECT * FROM table", call.Arguments?["input"]);
+    }
 }

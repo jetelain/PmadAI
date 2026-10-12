@@ -258,6 +258,31 @@ public static partial class LocalModelChatFormatter
             if (string.IsNullOrWhiteSpace(callBlock)) continue;
 
             callBlock = StripStrayTokens(callBlock, dialect);
+
+            if (callBlock.StartsWith('[') && callBlock.EndsWith(']'))
+            {
+                try
+                {
+                    using var arrayDoc = JsonDocument.Parse(callBlock);
+                    if (arrayDoc.RootElement.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var item in arrayDoc.RootElement.EnumerateArray())
+                        {
+                            var itemParsed = TryParseFunctionCall(item.GetRawText(), normalizer);
+                            if (itemParsed != null)
+                            {
+                                contents.Add(itemParsed);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                catch
+                {
+                    // Fall back to direct TryParseFunctionCall
+                }
+            }
+
             var parsed = TryParseFunctionCall(callBlock, normalizer);
             if (parsed != null)
             {
@@ -364,6 +389,10 @@ public static partial class LocalModelChatFormatter
         {
             using var doc = JsonDocument.Parse(jsonText);
             var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
 
             string? functionName = null;
             if (root.TryGetProperty("name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String)
@@ -436,7 +465,7 @@ public static partial class LocalModelChatFormatter
                         }
                         catch
                         {
-                            arguments["command"] = innerJson;
+                            arguments["input"] = innerJson;
                         }
                     }
                 }
@@ -452,8 +481,14 @@ public static partial class LocalModelChatFormatter
                 }
             }
 
+            string callId = root.TryGetProperty("id", out var idProp) && idProp.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(idProp.GetString())
+                ? idProp.GetString()!
+                : (root.TryGetProperty("call_id", out var cidProp) && cidProp.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(cidProp.GetString())
+                    ? cidProp.GetString()!
+                    : $"call_{Guid.NewGuid():N}");
+
             return new FunctionCallContent(
-                callId: $"call_{Guid.NewGuid():N}",
+                callId: callId,
                 name: functionName,
                 arguments: arguments);
         }

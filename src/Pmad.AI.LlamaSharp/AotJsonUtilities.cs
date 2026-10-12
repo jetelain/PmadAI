@@ -89,6 +89,20 @@ internal static class AotJsonUtilities
     }
 
     /// <summary>
+    /// Writes a generic or non-generic dictionary as a JSON object without reflection.
+    /// </summary>
+    public static void WriteObject(Utf8JsonWriter writer, IDictionary dictionary)
+    {
+        writer.WriteStartObject();
+        foreach (DictionaryEntry kvp in dictionary)
+        {
+            writer.WritePropertyName(kvp.Key?.ToString() ?? string.Empty);
+            WriteValue(writer, kvp.Value);
+        }
+        writer.WriteEndObject();
+    }
+
+    /// <summary>
     /// Writes a value without reflection by dispatching on supported primitive types, JsonElement, or collections.
     /// </summary>
     public static void WriteValue(Utf8JsonWriter writer, object? value)
@@ -143,6 +157,9 @@ internal static class AotJsonUtilities
             case IDictionary<string, object?> dict:
                 WriteObject(writer, dict);
                 break;
+            case IDictionary legacyDict:
+                WriteObject(writer, legacyDict);
+                break;
             case IEnumerable list when value is not string:
                 writer.WriteStartArray();
                 foreach (var item in list)
@@ -168,10 +185,26 @@ internal static class AotJsonUtilities
             string s => s,
             JsonElement je => je.GetRawText(),
             bool b => b ? "true" : "false",
-            int or long or double or float or decimal or short or byte or uint or ulong => Convert.ToString(result, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
+            int or long or double or float or decimal or short or byte or uint or ulong or sbyte or ushort => Convert.ToString(result, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
             IDictionary<string, object?> dict => SerializeArguments(dict),
+            IDictionary legacyDict => SerializeDictionary(legacyDict),
             _ => FormatComplexResult(result)
         };
+    }
+
+    private static string SerializeDictionary(IDictionary dictionary)
+    {
+        if (dictionary.Count == 0)
+        {
+            return "{}";
+        }
+
+        var bufferWriter = new ArrayBufferWriter<byte>(256);
+        using (var writer = new Utf8JsonWriter(bufferWriter, _compactOptions))
+        {
+            WriteObject(writer, dictionary);
+        }
+        return Encoding.UTF8.GetString(bufferWriter.WrittenSpan);
     }
 
     private static string FormatComplexResult(object result)

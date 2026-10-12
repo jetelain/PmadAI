@@ -425,4 +425,25 @@ public class ChatDialectTests
         Assert.DoesNotContain("<think>", prompt);
         Assert.DoesNotContain("Reasoning effort is set to", prompt);
     }
+
+    [Fact]
+    public void Dialects_RenderAssistantMessage_EscapesQuotesInFunctionName()
+    {
+        var toolCalls = new List<FunctionCallContent>
+        {
+            new("c1", "search\"tool", new Dictionary<string, object?> { ["query"] = "test" })
+        };
+
+        var sbChatML = new System.Text.StringBuilder();
+        ChatDialect.ChatML.RenderAssistantMessage(sbChatML, "Executing", toolCalls);
+        Assert.Contains("search\\u0022tool", sbChatML.ToString());
+
+        var sbPhi3 = new System.Text.StringBuilder();
+        ChatDialect.Phi3.RenderAssistantMessage(sbPhi3, "Executing", toolCalls);
+        Assert.Contains("search\\u0022tool", sbPhi3.ToString());
+
+        var sbGemma4 = new System.Text.StringBuilder();
+        ChatDialect.Gemma4.RenderAssistantMessage(sbGemma4, "Executing", toolCalls);
+        Assert.Contains("search\\u0022tool", sbGemma4.ToString());
+    }
 }

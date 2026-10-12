@@ -93,6 +93,31 @@ public class AotJsonUtilitiesTests
     }
 
     [Fact]
+    public void FormatFunctionResult_HandlesTypedAndNonGenericDictionaries()
+    {
+        var stringDict = new Dictionary<string, string> { ["status"] = "ok" };
+        var formattedStringDict = AotJsonUtilities.FormatFunctionResult(stringDict);
+        Assert.Equal("{\"status\":\"ok\"}", formattedStringDict);
+
+        var intDict = new Dictionary<string, int> { ["count"] = 42 };
+        var formattedIntDict = AotJsonUtilities.FormatFunctionResult(intDict);
+        Assert.Equal("{\"count\":42}", formattedIntDict);
+
+        var hashtable = new System.Collections.Hashtable { ["flag"] = true };
+        var formattedHashtable = AotJsonUtilities.FormatFunctionResult(hashtable);
+        Assert.Equal("{\"flag\":true}", formattedHashtable);
+    }
+
+    [Fact]
+    public void FormatFunctionResult_HandlesSByteAndUShort()
+    {
+        sbyte sb = -12;
+        ushort us = 65530;
+        Assert.Equal("-12", AotJsonUtilities.FormatFunctionResult(sb));
+        Assert.Equal("65530", AotJsonUtilities.FormatFunctionResult(us));
+    }
+
+    [Fact]
     public void FormatFunctionResult_HandlesList()
     {
         var list = new List<object?> { "item1", 123 };

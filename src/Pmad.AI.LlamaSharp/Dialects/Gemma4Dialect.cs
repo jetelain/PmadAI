@@ -71,7 +71,8 @@ public class Gemma4Dialect : ChatDialect
             foreach (var call in toolCalls)
             {
                 var argsJson = AotJsonUtilities.SerializeArguments(call.Arguments);
-                sb.Append("\n<tool_call>\n{\"name\": \"").Append(call.Name).Append("\", \"arguments\": ").Append(argsJson).Append("}\n</tool_call>");
+                var escapedName = JsonEncodedText.Encode(call.Name).Value;
+                sb.Append("\n<tool_call>\n{\"name\": \"").Append(escapedName).Append("\", \"arguments\": ").Append(argsJson).Append("}\n</tool_call>");
             }
         }
 
