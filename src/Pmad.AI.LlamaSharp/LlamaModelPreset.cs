@@ -14,7 +14,9 @@ public sealed record LlamaModelPreset(
     int ContextLength = 49152,
     string? BaseUrl = null,
     IReadOnlyList<string>? Aliases = null,
-    string? MmprojFileName = "mmproj-bf16.gguf"
+    string? MmprojFileName = "mmproj-bf16.gguf",
+    bool SupportsReasoning = false,
+    bool SupportsReasoningEffort = false
 )
 {
     /// <summary>
@@ -57,7 +59,9 @@ public sealed record LlamaModelPreset(
             Description: "Compact and fast Qwen 3.5 2B instruct GGUF model.",
             PromptFormat: "chatml",
             ContextLength: 49152,
-            Aliases: ["qwen3.5-2b-gguf", "qwen3.5-2b-q4", "qwen3.5"]
+            Aliases: ["qwen3.5-2b-gguf", "qwen3.5-2b-q4", "qwen3.5"],
+            SupportsReasoning: true,
+            SupportsReasoningEffort: false
         ),
         new(
             Id: "qwen3.5-4b",
@@ -67,7 +71,9 @@ public sealed record LlamaModelPreset(
             Description: "Balanced Qwen 3.5 4B instruct GGUF model with strong reasoning.",
             PromptFormat: "chatml",
             ContextLength: 49152,
-            Aliases: ["qwen3.5-4b-gguf", "qwen3.5-4b-q4"]
+            Aliases: ["qwen3.5-4b-gguf", "qwen3.5-4b-q4"],
+            SupportsReasoning: true,
+            SupportsReasoningEffort: false
         ),
         new(
             Id: "gemma-4-e2b",
@@ -77,7 +83,9 @@ public sealed record LlamaModelPreset(
             Description: "Google Gemma 4 E2B instruct GGUF model.",
             PromptFormat: "gemma4",
             ContextLength: 49152,
-            Aliases: ["gemma-4-e2b-gguf", "gemma-4-e2b-it", "gemma4-e2b", "gemma-4", "gemma-2b"]
+            Aliases: ["gemma-4-e2b-gguf", "gemma-4-e2b-it", "gemma4-e2b", "gemma-4", "gemma-2b"],
+            SupportsReasoning: true,
+            SupportsReasoningEffort: false
         ),
         new(
             Id: "gemma-4-e4b",
@@ -87,7 +95,9 @@ public sealed record LlamaModelPreset(
             Description: "Google Gemma 4 E4B instruct GGUF model for advanced generation.",
             PromptFormat: "gemma4",
             ContextLength: 49152,
-            Aliases: ["gemma-4-e4b-gguf", "gemma-4-e4b-it", "gemma4-e4b", "gemma-4b"]
+            Aliases: ["gemma-4-e4b-gguf", "gemma-4-e4b-it", "gemma4-e4b", "gemma-4b"],
+            SupportsReasoning: true,
+            SupportsReasoningEffort: false
         )
     ];
 

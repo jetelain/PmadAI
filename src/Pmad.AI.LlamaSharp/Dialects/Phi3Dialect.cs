@@ -19,6 +19,12 @@ public class Phi3Dialect : ChatDialect
     public override string Name => "phi3";
 
     /// <inheritdoc />
+    public override bool SupportsReasoning => false;
+
+    /// <inheritdoc />
+    public override bool SupportsReasoningEffort => false;
+
+    /// <inheritdoc />
     public override IReadOnlyList<string> StopTokens { get; } = ["<|end|>"];
 
     /// <inheritdoc />

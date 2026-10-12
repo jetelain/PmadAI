@@ -11,15 +11,45 @@ namespace Pmad.AI.LlamaSharp;
 public class ChatMLDialect : ChatDialect
 {
     /// <summary>
-    /// Singleton instance of <see cref="ChatMLDialect"/>.
+    /// Singleton instance of <see cref="ChatMLDialect"/> (supports reasoning toggle; reasoning effort disabled by default).
     /// </summary>
-    public static ChatMLDialect Instance { get; } = new();
+    public static ChatMLDialect Instance { get; } = new(supportsReasoning: true, supportsReasoningEffort: false);
+
+    /// <summary>
+    /// Initializes a new instance of <see cref="ChatMLDialect"/>.
+    /// </summary>
+    public ChatMLDialect(bool supportsReasoning = true, bool supportsReasoningEffort = false)
+    {
+        SupportsReasoning = supportsReasoning;
+        SupportsReasoningEffort = supportsReasoningEffort;
+    }
 
     /// <inheritdoc />
     public override string Name => "chatml";
 
     /// <inheritdoc />
+    public override bool SupportsReasoning { get; }
+
+    /// <inheritdoc />
+    public override bool SupportsReasoningEffort { get; }
+
+    /// <inheritdoc />
     public override IReadOnlyList<string> StopTokens { get; } = ["<|im_end|>"];
+
+    /// <inheritdoc />
+    public override string? GetReasoningInstructions(string? reasoningEffort)
+    {
+        if (string.IsNullOrWhiteSpace(reasoningEffort)) return null;
+
+        var normalized = reasoningEffort.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "xhigh" or "high" => "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.",
+            "low" => "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.",
+            "medium" or "none" or "off" => null,
+            _ => $"Reasoning effort is set to {reasoningEffort}. Please think through the task accordingly."
+        };
+    }
 
     /// <inheritdoc />
     public override void RenderSystemMessage(StringBuilder sb, string content)
@@ -36,7 +66,17 @@ public class ChatMLDialect : ChatDialect
     /// <inheritdoc />
     public override void RenderAssistantMessage(StringBuilder sb, string? text, IReadOnlyList<FunctionCallContent>? toolCalls)
     {
+        RenderAssistantMessage(sb, text, toolCalls, reasoning: null);
+    }
+
+    /// <inheritdoc />
+    public override void RenderAssistantMessage(StringBuilder sb, string? text, IReadOnlyList<FunctionCallContent>? toolCalls, string? reasoning)
+    {
         sb.Append("<|im_start|>assistant");
+        if (!string.IsNullOrWhiteSpace(reasoning))
+        {
+            sb.Append("\n<think>\n").Append(reasoning.Trim()).Append("\n</think>\n");
+        }
         if (!string.IsNullOrWhiteSpace(text))
         {
             sb.Append('\n').Append(text);
@@ -73,6 +113,20 @@ public class ChatMLDialect : ChatDialect
     /// <inheritdoc />
     public override void RenderAssistantPrompt(StringBuilder sb)
     {
+        RenderAssistantPrompt(sb, enableReasoning: null);
+    }
+
+    /// <inheritdoc />
+    public override void RenderAssistantPrompt(StringBuilder sb, bool? enableReasoning)
+    {
         sb.Append("<|im_start|>assistant\n");
+        if (enableReasoning == false)
+        {
+            sb.Append("<think>\n\n</think>\n\n");
+        }
+        else if (enableReasoning == true)
+        {
+            sb.Append("<think>\n");
+        }
     }
 }

@@ -201,4 +201,210 @@ public class ChatDialectTests
 
         Assert.Same(ChatDialect.Phi3, options.Dialect);
     }
+
+    [Fact]
+    public void ChatDialect_ReasoningCapabilities_ReturnExpectedValues()
+    {
+        Assert.True(ChatDialect.ChatML.SupportsReasoning);
+        Assert.False(ChatDialect.ChatML.SupportsReasoningEffort);
+
+        Assert.True(ChatDialect.Qwen38.SupportsReasoning);
+        Assert.True(ChatDialect.Qwen38.SupportsReasoningEffort);
+
+        Assert.True(ChatDialect.Gemma4.SupportsReasoning);
+        Assert.False(ChatDialect.Gemma4.SupportsReasoningEffort);
+
+        Assert.False(ChatDialect.Phi3.SupportsReasoning);
+        Assert.False(ChatDialect.Phi3.SupportsReasoningEffort);
+    }
+
+    [Fact]
+    public void ChatDialect_FromName_ResolvesQwen38Correctly()
+    {
+        Assert.Same(ChatDialect.Qwen38, ChatDialect.FromName("qwen3.8"));
+        Assert.Same(ChatDialect.Qwen38, ChatDialect.FromName("qwen-3.8"));
+        Assert.Same(ChatDialect.Qwen38, ChatDialect.FromName("qwen38"));
+    }
+
+    [Fact]
+    public void ChatMLDialect_FormatPrompt_WithReasoningDisabled_PrefillsClosedThinkBlock()
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "What is 2+2?")
+        };
+
+        var prompt = ChatDialect.ChatML.FormatPrompt(messages, enableReasoning: false);
+
+        Assert.EndsWith("<|im_start|>assistant\n<think>\n\n</think>\n\n", prompt);
+    }
+
+    [Fact]
+    public void ChatMLDialect_FormatPrompt_WithReasoningEnabled_PrefillsOpenThinkBlock()
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "What is 2+2?")
+        };
+
+        var prompt = ChatDialect.ChatML.FormatPrompt(messages, enableReasoning: true);
+
+        Assert.EndsWith("<|im_start|>assistant\n<think>\n", prompt);
+    }
+
+    [Fact]
+    public void ChatMLDialect_FormatPrompt_WithReasoningDefault_OutputsStandardAssistantPrompt()
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "What is 2+2?")
+        };
+
+        var prompt = ChatDialect.ChatML.FormatPrompt(messages, enableReasoning: null);
+
+        Assert.EndsWith("<|im_start|>assistant\n", prompt);
+    }
+
+    [Theory]
+    [InlineData("xhigh", "Reasoning effort is set to xhigh.")]
+    [InlineData("high", "Reasoning effort is set to xhigh.")]
+    [InlineData("low", "Reasoning effort is set to low.")]
+    public void Qwen38Dialect_FormatPrompt_WithReasoningEffort_InjectsInstructionIntoSystemPrompt(string effort, string expectedInstruction)
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.System, "Be accurate."),
+            new(ChatRole.User, "Solve problem.")
+        };
+
+        var prompt = ChatDialect.Qwen38.FormatPrompt(messages, reasoningEffort: effort);
+
+        Assert.Contains(expectedInstruction, prompt);
+        Assert.Contains("Be accurate.", prompt);
+    }
+
+    [Fact]
+    public void ChatMLDialect_Standard_DoesNotInjectReasoningEffort()
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.System, "Be accurate."),
+            new(ChatRole.User, "Solve problem.")
+        };
+
+        // Standard ChatML (Qwen 3.5) does not inject effort instructions
+        var prompt = ChatDialect.ChatML.FormatPrompt(messages, reasoningEffort: "high");
+
+        Assert.DoesNotContain("Reasoning effort is set to", prompt);
+        Assert.Contains("Be accurate.", prompt);
+    }
+
+    [Fact]
+    public void ChatMLDialect_FormatPrompt_WithMediumEffort_DoesNotInjectExtraInstruction()
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.System, "Be accurate."),
+            new(ChatRole.User, "Solve problem.")
+        };
+
+        var prompt = ChatDialect.ChatML.FormatPrompt(messages, reasoningEffort: "medium");
+
+        Assert.DoesNotContain("Reasoning effort is set to", prompt);
+        Assert.Contains("Be accurate.", prompt);
+    }
+
+    [Fact]
+    public void Qwen38Dialect_FormatPrompt_WithReasoningEffortAndTools_InjectsInstructionBeforeTools()
+    {
+        var fn = AIFunctionFactory.Create(() => "ok", "ping", "Ping test");
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "Test tools")
+        };
+
+        var prompt = ChatDialect.Qwen38.FormatPrompt(messages, tools: [fn], reasoningEffort: "low");
+
+        Assert.Contains("Reasoning effort is set to low.", prompt);
+        Assert.Contains("<tools>", prompt);
+        int effortIndex = prompt.IndexOf("Reasoning effort is set to low.");
+        int toolsIndex = prompt.IndexOf("<tools>");
+        Assert.True(effortIndex < toolsIndex, "Reasoning effort instructions should precede tools definition block.");
+    }
+
+    [Fact]
+    public void Qwen38Dialect_FormatPrompt_WithReasoningEffortWithoutSystemMessage_CreatesSystemBlock()
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "Solve riddle")
+        };
+
+        var prompt = ChatDialect.Qwen38.FormatPrompt(messages, reasoningEffort: "high");
+
+        Assert.Contains("<|im_start|>system\nReasoning effort is set to xhigh.", prompt);
+    }
+
+    [Fact]
+    public void ChatMLDialect_FormatPrompt_WithReasoningInHistory_PreservesThinkBlockInAssistantTurn()
+    {
+        var assistantMsg = new ChatMessage(ChatRole.Assistant, new List<AIContent>
+        {
+            new TextReasoningContent("Calculating 2 + 2 = 4"),
+            new TextContent("The answer is 4.")
+        });
+
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "What is 2+2?"),
+            assistantMsg,
+            new(ChatRole.User, "Now multiply by 3.")
+        };
+
+        var prompt = ChatDialect.ChatML.FormatPrompt(messages);
+
+        Assert.Contains("<|im_start|>assistant\n<think>\nCalculating 2 + 2 = 4\n</think>\n\nThe answer is 4.<|im_end|>\n", prompt);
+    }
+
+    [Fact]
+    public void Gemma4Dialect_FormatPrompt_WithReasoningDisabled_PrefillsClosedThinkBlock()
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "Tell me a joke")
+        };
+
+        var prompt = ChatDialect.Gemma4.FormatPrompt(messages, enableReasoning: false);
+
+        Assert.EndsWith("<|turn|>model\n<think>\n\n</think>\n\n", prompt);
+    }
+
+    [Fact]
+    public void Gemma4Dialect_FormatPrompt_DoesNotInjectReasoningEffortInstructions()
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.System, "System prompt"),
+            new(ChatRole.User, "Hello")
+        };
+
+        var prompt = ChatDialect.Gemma4.FormatPrompt(messages, reasoningEffort: "high");
+
+        Assert.DoesNotContain("Reasoning effort is set to", prompt);
+    }
+
+    [Fact]
+    public void Phi3Dialect_FormatPrompt_IgnoresReasoningParameters()
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "Hello")
+        };
+
+        var prompt = ChatDialect.Phi3.FormatPrompt(messages, enableReasoning: false, reasoningEffort: "low");
+
+        Assert.EndsWith("<|assistant|>\n", prompt);
+        Assert.DoesNotContain("<think>", prompt);
+        Assert.DoesNotContain("Reasoning effort is set to", prompt);
+    }
 }

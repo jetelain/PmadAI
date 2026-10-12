@@ -157,4 +157,28 @@ public class LlamaModelPresetTests
 
         Assert.Equal(expected, mmprojPath);
     }
+
+    [Fact]
+    public void Presets_ReasoningCapabilities_ConfiguredAsExpected()
+    {
+        var qwen2b = LlamaModelPreset.Find("qwen3.5-2b");
+        Assert.NotNull(qwen2b);
+        Assert.True(qwen2b.SupportsReasoning);
+        Assert.False(qwen2b.SupportsReasoningEffort);
+
+        var qwen4b = LlamaModelPreset.Find("qwen3.5-4b");
+        Assert.NotNull(qwen4b);
+        Assert.True(qwen4b.SupportsReasoning);
+        Assert.False(qwen4b.SupportsReasoningEffort);
+
+        var gemma2b = LlamaModelPreset.Find("gemma-4-e2b");
+        Assert.NotNull(gemma2b);
+        Assert.True(gemma2b.SupportsReasoning);
+        Assert.False(gemma2b.SupportsReasoningEffort);
+
+        var gemma4b = LlamaModelPreset.Find("gemma-4-e4b");
+        Assert.NotNull(gemma4b);
+        Assert.True(gemma4b.SupportsReasoning);
+        Assert.False(gemma4b.SupportsReasoningEffort);
+    }
 }

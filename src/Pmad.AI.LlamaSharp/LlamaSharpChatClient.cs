@@ -32,6 +32,7 @@ public sealed class LlamaSharpChatClient : IChatClient
     private readonly StatelessExecutor _statelessExecutor;
     private readonly bool _ownsWeights;
     private readonly ILogger _logger;
+    private readonly LlamaModelPreset? _preset;
 
     /// <summary>
     /// Configures process-wide logging for native llama.cpp execution using an <see cref="ILogger"/>.
@@ -149,6 +150,7 @@ public sealed class LlamaSharpChatClient : IChatClient
         _dialect = dialect ?? _options.Dialect ?? ChatDialect.FromName(_options.PromptFormat);
         _clipModel = clipModel;
         _ownsWeights = ownsWeights;
+        _preset = LlamaModelPreset.Find(Path.GetFileName(modelPath)) ?? LlamaModelPreset.Find(Path.GetFileNameWithoutExtension(modelPath));
         
         EnsureNativeLogHookInstalled();
 
@@ -279,6 +281,21 @@ public sealed class LlamaSharpChatClient : IChatClient
     /// </summary>
     public ChatDialect Dialect => _dialect;
 
+    /// <summary>
+    /// Gets whether reasoning / chain-of-thought is supported by this client configuration.
+    /// </summary>
+    public bool SupportsReasoning => _options.SupportsReasoning ?? _preset?.SupportsReasoning ?? _dialect.SupportsReasoning;
+
+    /// <summary>
+    /// Gets whether reasoning effort parameter tuning is supported by this client configuration.
+    /// </summary>
+    public bool SupportsReasoningEffort => _options.SupportsReasoningEffort ?? _preset?.SupportsReasoningEffort ?? _dialect.SupportsReasoningEffort;
+
+    /// <summary>
+    /// Gets the detected preset metadata for this model, or null if unrecognized or custom.
+    /// </summary>
+    public LlamaModelPreset? Preset => _preset;
+
     /// <inheritdoc />
     public ChatClientMetadata Metadata => _metadata;
 
@@ -304,11 +321,22 @@ public sealed class LlamaSharpChatClient : IChatClient
                     "Ensure an mmproj-*.gguf file is available.");
             }
 
-            var promptText = _dialect.FormatPrompt(messages, options?.Tools);
+            var (enableReasoning, reasoningEffort) = LocalModelChatFormatter.ResolveReasoningParameters(options, _options);
+            if (!SupportsReasoning)
+            {
+                enableReasoning = null;
+                reasoningEffort = null;
+            }
+            else if (!SupportsReasoningEffort)
+            {
+                reasoningEffort = null;
+            }
+
+            var promptText = _dialect.FormatPrompt(messages, options?.Tools, enableReasoning, reasoningEffort);
             int inputTokens = _context.Tokenize(promptText).Length;
 
-            LogOperation("Starting completion for model '{ModelPath}'. Prompt length: {PromptLength} chars, Tokens: {InputTokens}",
-                _modelPath, promptText.Length, inputTokens);
+            LogOperation("Starting completion for model '{ModelPath}'. Prompt length: {PromptLength} chars, Tokens: {InputTokens}, Reasoning: {ReasoningEnabled}, Effort: {ReasoningEffort}",
+                _modelPath, promptText.Length, inputTokens, enableReasoning, reasoningEffort ?? "none");
 
             int maxOutputTokens = options?.MaxOutputTokens ?? _options.DefaultMaxOutputTokens;
             var inferenceParams = new InferenceParams
@@ -399,7 +427,18 @@ public sealed class LlamaSharpChatClient : IChatClient
                 "Ensure an mmproj-*.gguf file is available.");
         }
 
-        var promptText = _dialect.FormatPrompt(messages, options?.Tools);
+        var (enableReasoning, reasoningEffort) = LocalModelChatFormatter.ResolveReasoningParameters(options, _options);
+        if (!SupportsReasoning)
+        {
+            enableReasoning = null;
+            reasoningEffort = null;
+        }
+        else if (!SupportsReasoningEffort)
+        {
+            reasoningEffort = null;
+        }
+
+        var promptText = _dialect.FormatPrompt(messages, options?.Tools, enableReasoning, reasoningEffort);
         int maxOutputTokens = options?.MaxOutputTokens ?? _options.DefaultMaxOutputTokens;
         var inferenceParams = new InferenceParams
         {
@@ -559,6 +598,10 @@ public sealed class LlamaSharpChatClient : IChatClient
             if (serviceType == typeof(LLamaContext))
             {
                 return _context;
+            }
+            if (serviceType == typeof(LlamaModelPreset) && _preset != null)
+            {
+                return _preset;
             }
         }
         return null;

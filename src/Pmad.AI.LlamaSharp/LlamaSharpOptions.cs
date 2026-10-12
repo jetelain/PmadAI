@@ -68,6 +68,29 @@ public sealed class LlamaSharpOptions
     public int DefaultMaxOutputTokens { get; set; } = 2048;
 
     /// <summary>
+    /// Controls whether internal reasoning / chain-of-thought is enabled for models that support it.
+    /// When null (default), the model or dialect default is used.
+    /// </summary>
+    public bool? EnableReasoning { get; set; }
+
+    /// <summary>
+    /// Default reasoning effort level for models that support it (e.g. "low", "medium", "high", "xhigh").
+    /// </summary>
+    public string? ReasoningEffort { get; set; }
+
+    /// <summary>
+    /// Explicit override for whether the active model supports reasoning.
+    /// When null (default), determined by dialect or preset metadata.
+    /// </summary>
+    public bool? SupportsReasoning { get; set; }
+
+    /// <summary>
+    /// Explicit override for whether the active model supports reasoning effort tuning.
+    /// When null (default), determined by dialect or preset metadata.
+    /// </summary>
+    public bool? SupportsReasoningEffort { get; set; }
+
+    /// <summary>
     /// Maximum duration (in minutes) allowed for a local request before it is aborted.
     /// </summary>
     public int RequestTimeoutMinutes { get; set; } = 10;

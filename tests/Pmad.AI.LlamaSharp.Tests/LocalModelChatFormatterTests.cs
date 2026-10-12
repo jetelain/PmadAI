@@ -406,4 +406,129 @@ public class LocalModelChatFormatterTests
         Assert.Contains("Result 1", prompt);
         Assert.Contains("Result 2", prompt);
     }
+
+    [Fact]
+    public void ParseAssistantResponse_PrefilledThinking_ExtractsReasoningAndText()
+    {
+        var raw = "Calculated 15 * 3 = 45.</think>\n\nThe product is 45.";
+
+        var parsed = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var reasoning = parsed.Contents.OfType<TextReasoningContent>().FirstOrDefault();
+        var text = parsed.Contents.OfType<TextContent>().FirstOrDefault();
+
+        Assert.NotNull(reasoning);
+        Assert.Equal("Calculated 15 * 3 = 45.", reasoning.Text);
+        Assert.NotNull(text);
+        Assert.Equal("The product is 45.", text.Text);
+    }
+
+    [Fact]
+    public void ParseAssistantResponse_UnclosedThinkingBlock_ExtractsReasoning()
+    {
+        var raw = "<think>Generating response and got cut off";
+
+        var parsed = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var reasoning = parsed.Contents.OfType<TextReasoningContent>().FirstOrDefault();
+
+        Assert.NotNull(reasoning);
+        Assert.Equal("Generating response and got cut off", reasoning.Text);
+    }
+
+    [Fact]
+    public void ResolveReasoningParameters_FromChatOptionsReasoningEffort_ResolvesCorrectly()
+    {
+        var options = new ChatOptions
+        {
+            Reasoning = new ReasoningOptions { Effort = ReasoningEffort.Low }
+        };
+
+        var (enable, effort) = LocalModelChatFormatter.ResolveReasoningParameters(options);
+
+        Assert.True(enable);
+        Assert.Equal("low", effort);
+    }
+
+    [Fact]
+    public void ResolveReasoningParameters_FromChatOptionsReasoningEffortNone_DisablesReasoning()
+    {
+        var options = new ChatOptions
+        {
+            Reasoning = new ReasoningOptions { Effort = ReasoningEffort.None }
+        };
+
+        var (enable, effort) = LocalModelChatFormatter.ResolveReasoningParameters(options);
+
+        Assert.False(enable);
+        Assert.Equal("none", effort);
+    }
+
+    [Fact]
+    public void ResolveReasoningParameters_FromChatOptionsOutputNone_DisablesReasoning()
+    {
+        var options = new ChatOptions
+        {
+            Reasoning = new ReasoningOptions { Output = ReasoningOutput.None }
+        };
+
+        var (enable, _) = LocalModelChatFormatter.ResolveReasoningParameters(options);
+
+        Assert.False(enable);
+    }
+
+    [Fact]
+    public void ResolveReasoningParameters_FromAdditionalProperties_ResolvesFlags()
+    {
+        var options = new ChatOptions
+        {
+            AdditionalProperties = new()
+            {
+                ["enable_thinking"] = false,
+                ["reasoning_effort"] = "high"
+            }
+        };
+
+        var (enable, effort) = LocalModelChatFormatter.ResolveReasoningParameters(options);
+
+        Assert.False(enable);
+        Assert.Equal("high", effort);
+    }
+
+    [Fact]
+    public void ResolveReasoningParameters_FallsBackToLlamaSharpOptions()
+    {
+        var llamaOptions = new LlamaSharpOptions
+        {
+            EnableReasoning = true,
+            ReasoningEffort = "medium"
+        };
+
+        var (enable, effort) = LocalModelChatFormatter.ResolveReasoningParameters(null, llamaOptions);
+
+        Assert.True(enable);
+        Assert.Equal("medium", effort);
+    }
+
+    [Fact]
+    public void FormatPrompt_WithChatOptions_AppliesReasoning()
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "Hello")
+        };
+        var options = new ChatOptions
+        {
+            Reasoning = new ReasoningOptions { Effort = ReasoningEffort.High }
+        };
+
+        var promptQwen38 = LocalModelChatFormatter.FormatPrompt(messages, "qwen3.8", options);
+        Assert.Contains("Reasoning effort is set to xhigh.", promptQwen38);
+        Assert.EndsWith("<|im_start|>assistant\n<think>\n", promptQwen38);
+
+        // Standard ChatML (Qwen 3.5) supports reasoning prompt but ignores reasoning effort instruction
+        var promptChatml = LocalModelChatFormatter.FormatPrompt(messages, "chatml", options);
+        Assert.DoesNotContain("Reasoning effort is set to", promptChatml);
+        Assert.EndsWith("<|im_start|>assistant\n<think>\n", promptChatml);
+    }
 }

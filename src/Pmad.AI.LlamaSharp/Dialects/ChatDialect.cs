@@ -21,6 +21,16 @@ public abstract class ChatDialect
     public abstract IReadOnlyList<string> StopTokens { get; }
 
     /// <summary>
+    /// Gets whether this dialect supports reasoning / chain-of-thought controls.
+    /// </summary>
+    public virtual bool SupportsReasoning => false;
+
+    /// <summary>
+    /// Gets whether this dialect supports reasoning effort parameter tuning.
+    /// </summary>
+    public virtual bool SupportsReasoningEffort => false;
+
+    /// <summary>
     /// Predefined ChatML dialect instance.
     /// </summary>
     public static ChatDialect ChatML => ChatMLDialect.Instance;
@@ -34,6 +44,11 @@ public abstract class ChatDialect
     /// Predefined Gemma 4 dialect instance.
     /// </summary>
     public static ChatDialect Gemma4 => Gemma4Dialect.Instance;
+
+    /// <summary>
+    /// Predefined Qwen 3.8 dialect instance (ChatML with reasoning effort tuning enabled).
+    /// </summary>
+    public static ChatDialect Qwen38 { get; } = new ChatMLDialect(supportsReasoning: true, supportsReasoningEffort: true);
 
     /// <summary>
     /// Default dialect used when none is specified (ChatML).
@@ -67,8 +82,20 @@ public abstract class ChatDialect
             return Gemma4;
         }
 
+        if (trimmed.Equals("qwen3.8", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("qwen-3.8", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("qwen38", StringComparison.OrdinalIgnoreCase))
+        {
+            return Qwen38;
+        }
+
         return ChatML;
     }
+
+    /// <summary>
+    /// Gets the reasoning instruction directive to inject for the specified effort level, or null if not applicable.
+    /// </summary>
+    public virtual string? GetReasoningInstructions(string? reasoningEffort) => null;
 
     /// <summary>
     /// Renders a system message turn.
@@ -86,6 +113,14 @@ public abstract class ChatDialect
     public abstract void RenderAssistantMessage(StringBuilder sb, string? text, IReadOnlyList<FunctionCallContent>? toolCalls);
 
     /// <summary>
+    /// Renders an assistant message turn including text, function calls, and optional reasoning content.
+    /// </summary>
+    public virtual void RenderAssistantMessage(StringBuilder sb, string? text, IReadOnlyList<FunctionCallContent>? toolCalls, string? reasoning)
+    {
+        RenderAssistantMessage(sb, text, toolCalls);
+    }
+
+    /// <summary>
     /// Renders a tool response message inside a tool response turn.
     /// </summary>
     public abstract void RenderToolMessage(StringBuilder sb, string toolContent, bool isFirstInGroup, bool isLastInGroup);
@@ -94,6 +129,15 @@ public abstract class ChatDialect
     /// Renders the assistant generation prefix that prompts the model to generate the next response.
     /// </summary>
     public abstract void RenderAssistantPrompt(StringBuilder sb);
+
+    /// <summary>
+    /// Renders the assistant generation prefix that prompts the model to generate the next response,
+    /// optionally configuring reasoning / thinking generation.
+    /// </summary>
+    public virtual void RenderAssistantPrompt(StringBuilder sb, bool? enableReasoning)
+    {
+        RenderAssistantPrompt(sb);
+    }
 
     /// <summary>
     /// Removes any stop tokens associated with this dialect from the raw output string.
@@ -110,11 +154,14 @@ public abstract class ChatDialect
 
     /// <summary>
     /// Formats a conversation into a single prompt string matching this dialect's template,
-    /// injecting tool signatures into the system prompt when tools are provided.
+    /// injecting tool signatures into the system prompt when tools are provided,
+    /// and optionally configuring reasoning generation and effort.
     /// </summary>
     public virtual string FormatPrompt(
         IEnumerable<ChatMessage> messages,
-        IList<AITool>? tools = null)
+        IList<AITool>? tools = null,
+        bool? enableReasoning = null,
+        string? reasoningEffort = null)
     {
         ArgumentNullException.ThrowIfNull(messages);
 
@@ -124,6 +171,12 @@ public abstract class ChatDialect
         var functions = tools?.OfType<AIFunction>().ToList();
         var hasTools = functions != null && functions.Count > 0;
         string toolsDefinitionBlock = hasTools ? BuildToolsDefinitionBlock(functions!) : string.Empty;
+
+        string? reasoningInstructions = null;
+        if (SupportsReasoning && SupportsReasoningEffort && enableReasoning != false)
+        {
+            reasoningInstructions = GetReasoningInstructions(reasoningEffort);
+        }
 
         int firstSystemIndex = -1;
         for (int i = 0; i < msgList.Count; i++)
@@ -139,13 +192,22 @@ public abstract class ChatDialect
         if (hasTools)
         {
             var baseSystemText = firstSystemIndex >= 0 ? GetMessageText(msgList[firstSystemIndex]) : "You are a helpful assistant.";
-            var combinedSystemText = $"{baseSystemText}{toolsDefinitionBlock}";
+            var combinedSystemText = !string.IsNullOrWhiteSpace(reasoningInstructions)
+                ? $"{reasoningInstructions}\n\n{baseSystemText}{toolsDefinitionBlock}"
+                : $"{baseSystemText}{toolsDefinitionBlock}";
             RenderSystemMessage(sb, combinedSystemText);
         }
         else if (firstSystemIndex >= 0)
         {
             var text = GetMessageText(msgList[firstSystemIndex]) ?? string.Empty;
-            RenderSystemMessage(sb, text);
+            var combinedSystemText = !string.IsNullOrWhiteSpace(reasoningInstructions)
+                ? (string.IsNullOrWhiteSpace(text) ? reasoningInstructions : $"{reasoningInstructions}\n\n{text}")
+                : text;
+            RenderSystemMessage(sb, combinedSystemText);
+        }
+        else if (!string.IsNullOrWhiteSpace(reasoningInstructions))
+        {
+            RenderSystemMessage(sb, reasoningInstructions);
         }
 
         // Render conversation history
@@ -166,7 +228,8 @@ public abstract class ChatDialect
             {
                 var text = GetMessageText(m);
                 var toolCalls = m.Contents?.OfType<FunctionCallContent>().ToList();
-                RenderAssistantMessage(sb, text, toolCalls);
+                var reasoning = GetMessageReasoning(m);
+                RenderAssistantMessage(sb, text, toolCalls, reasoning);
             }
             else if (m.Role == ChatRole.Tool)
             {
@@ -178,7 +241,7 @@ public abstract class ChatDialect
         }
 
         // Add generation prompt
-        RenderAssistantPrompt(sb);
+        RenderAssistantPrompt(sb, enableReasoning);
 
         return sb.ToString();
     }
@@ -238,6 +301,24 @@ public abstract class ChatDialect
 
         var text = string.Concat(message.Contents.OfType<TextContent>().Select(c => c.Text ?? string.Empty)).Trim();
         return string.IsNullOrEmpty(text) ? null : text;
+    }
+
+    /// <summary>
+    /// Extracts reasoning content from a chat message if available.
+    /// </summary>
+    protected static string? GetMessageReasoning(ChatMessage message)
+    {
+        if (message.Contents is null)
+        {
+            return null;
+        }
+
+        var list = message.Contents.OfType<TextReasoningContent>()
+            .Select(r => r.Text)
+            .Where(t => !string.IsNullOrWhiteSpace(t))
+            .ToList();
+
+        return list.Count > 0 ? string.Join("\n\n", list) : null;
     }
 
     /// <summary>

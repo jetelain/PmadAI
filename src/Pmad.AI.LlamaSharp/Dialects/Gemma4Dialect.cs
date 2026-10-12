@@ -15,8 +15,22 @@ public class Gemma4Dialect : ChatDialect
     /// </summary>
     public static Gemma4Dialect Instance { get; } = new();
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="Gemma4Dialect"/>.
+    /// </summary>
+    public Gemma4Dialect(bool supportsReasoning = true)
+    {
+        SupportsReasoning = supportsReasoning;
+    }
+
     /// <inheritdoc />
     public override string Name => "gemma4";
+
+    /// <inheritdoc />
+    public override bool SupportsReasoning { get; }
+
+    /// <inheritdoc />
+    public override bool SupportsReasoningEffort => false;
 
     /// <inheritdoc />
     public override IReadOnlyList<string> StopTokens { get; } = ["<turn|>", "<end_of_turn>"];
@@ -36,7 +50,17 @@ public class Gemma4Dialect : ChatDialect
     /// <inheritdoc />
     public override void RenderAssistantMessage(StringBuilder sb, string? text, IReadOnlyList<FunctionCallContent>? toolCalls)
     {
+        RenderAssistantMessage(sb, text, toolCalls, reasoning: null);
+    }
+
+    /// <inheritdoc />
+    public override void RenderAssistantMessage(StringBuilder sb, string? text, IReadOnlyList<FunctionCallContent>? toolCalls, string? reasoning)
+    {
         sb.Append("<|turn|>model");
+        if (!string.IsNullOrWhiteSpace(reasoning))
+        {
+            sb.Append("\n<think>\n").Append(reasoning.Trim()).Append("\n</think>\n");
+        }
         if (!string.IsNullOrWhiteSpace(text))
         {
             sb.Append('\n').Append(text);
@@ -73,6 +97,16 @@ public class Gemma4Dialect : ChatDialect
     /// <inheritdoc />
     public override void RenderAssistantPrompt(StringBuilder sb)
     {
+        RenderAssistantPrompt(sb, enableReasoning: null);
+    }
+
+    /// <inheritdoc />
+    public override void RenderAssistantPrompt(StringBuilder sb, bool? enableReasoning)
+    {
         sb.Append("<|turn|>model\n");
+        if (enableReasoning == false)
+        {
+            sb.Append("<think>\n\n</think>\n\n");
+        }
     }
 }

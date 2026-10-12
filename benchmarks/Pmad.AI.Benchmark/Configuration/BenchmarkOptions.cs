@@ -53,6 +53,16 @@ public sealed class BenchmarkOptions
     public string? OutputJsonPath { get; set; }
 
     /// <summary>
+    /// Reasoning effort level (e.g. "low", "medium", "high", "xhigh", "none").
+    /// </summary>
+    public string? ReasoningEffort { get; set; }
+
+    /// <summary>
+    /// When set, explicitly enables or disables internal reasoning / chain-of-thought for models supporting it.
+    /// </summary>
+    public bool? EnableReasoning { get; set; }
+
+    /// <summary>
     /// When true, outputs verbose logging including formatted prompts, raw generation chunks, and full turns.
     /// </summary>
     public bool Verbose { get; set; }
@@ -115,6 +125,18 @@ public sealed class BenchmarkOptions
             {
                 options.OutputJsonPath = args[++i];
             }
+            else if (arg is "-re" or "--reasoning-effort" or "--reasoning" && i + 1 < args.Length)
+            {
+                options.ReasoningEffort = args[++i];
+            }
+            else if (arg is "--enable-reasoning")
+            {
+                options.EnableReasoning = true;
+            }
+            else if (arg is "--no-reasoning" or "--disable-reasoning")
+            {
+                options.EnableReasoning = false;
+            }
             else if (arg is "-v" or "--verbose")
             {
                 options.Verbose = true;
@@ -142,6 +164,9 @@ Options:
   -d, --download           Download models automatically if missing from local cache.
   --mock, --dry-run        Run with mock simulated chat client (showcases tool calling & metrics immediately).
   -s, --scenario <name>    Filter scenario to run: 'weather', 'calculator', 'support', 'direct', or 'all' (default: all).
+  -re, --reasoning-effort  Reasoning effort level ('low', 'medium', 'high', 'xhigh', 'none').
+  --no-reasoning           Explicitly disable reasoning / thinking tokens for reasoning models.
+  --enable-reasoning       Explicitly enable reasoning / thinking tokens.
   -g, --gpu <layers>       GPU layers to offload (default: 99; use 0 for CPU).
   -c, --context <tokens>   Context size (default: 8192).
   -o, --output <file>      Export benchmark report to a Markdown file.

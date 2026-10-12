@@ -92,7 +92,9 @@ public static class Program
                 {
                     ContextSize = options.ContextSize,
                     GpuLayerCount = options.GpuLayerCount,
-                    PromptFormat = preset.PromptFormat
+                    PromptFormat = preset.PromptFormat,
+                    EnableReasoning = options.EnableReasoning,
+                    ReasoningEffort = options.ReasoningEffort
                 };
 
                 using var client = LlamaSharpChatClient.CreateFromFile(
@@ -117,7 +119,9 @@ public static class Program
                 var clientOptions = new LlamaSharpOptions
                 {
                     ContextSize = options.ContextSize,
-                    GpuLayerCount = options.GpuLayerCount
+                    GpuLayerCount = options.GpuLayerCount,
+                    EnableReasoning = options.EnableReasoning,
+                    ReasoningEffort = options.ReasoningEffort
                 };
 
                 using var client = LlamaSharpChatClient.CreateFromFile(

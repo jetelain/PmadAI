@@ -26,10 +26,25 @@ public static class LocalModelChatFormatter
     public static string FormatPrompt(
         IEnumerable<ChatMessage> messages,
         string format = "chatml",
-        IList<AITool>? tools = null)
+        IList<AITool>? tools = null,
+        bool? enableReasoning = null,
+        string? reasoningEffort = null)
     {
         var dialect = ChatDialect.FromName(format);
-        return dialect.FormatPrompt(messages, tools);
+        return dialect.FormatPrompt(messages, tools, enableReasoning, reasoningEffort);
+    }
+
+    /// <summary>
+    /// Formats a conversation into a single prompt string matching the target model's template and options,
+    /// extracting tools and reasoning parameters from <paramref name="options"/>.
+    /// </summary>
+    public static string FormatPrompt(
+        IEnumerable<ChatMessage> messages,
+        string format,
+        ChatOptions? options)
+    {
+        var dialect = ChatDialect.FromName(format);
+        return FormatPrompt(messages, dialect, options);
     }
 
     /// <summary>
@@ -39,10 +54,107 @@ public static class LocalModelChatFormatter
     public static string FormatPrompt(
         IEnumerable<ChatMessage> messages,
         ChatDialect dialect,
-        IList<AITool>? tools = null)
+        IList<AITool>? tools = null,
+        bool? enableReasoning = null,
+        string? reasoningEffort = null)
     {
         ArgumentNullException.ThrowIfNull(dialect);
-        return dialect.FormatPrompt(messages, tools);
+        return dialect.FormatPrompt(messages, tools, enableReasoning, reasoningEffort);
+    }
+
+    /// <summary>
+    /// Formats a conversation into a single prompt string matching the specified dialect and options,
+    /// extracting tools and reasoning parameters from <paramref name="options"/>.
+    /// </summary>
+    public static string FormatPrompt(
+        IEnumerable<ChatMessage> messages,
+        ChatDialect dialect,
+        ChatOptions? options)
+    {
+        ArgumentNullException.ThrowIfNull(dialect);
+        var (enableReasoning, reasoningEffort) = ResolveReasoningParameters(options);
+        return dialect.FormatPrompt(messages, options?.Tools, enableReasoning, reasoningEffort);
+    }
+
+    /// <summary>
+    /// Resolves reasoning configuration (enable toggle and effort level) from <see cref="ChatOptions"/> and/or <see cref="LlamaSharpOptions"/>.
+    /// </summary>
+    public static (bool? EnableReasoning, string? ReasoningEffort) ResolveReasoningParameters(
+        ChatOptions? chatOptions,
+        LlamaSharpOptions? llamaOptions = null)
+    {
+        bool? enableReasoning = null;
+        string? reasoningEffort = null;
+
+        if (chatOptions?.Reasoning is { } reasoning)
+        {
+            if (reasoning.Effort.HasValue)
+            {
+                if (reasoning.Effort.Value == ReasoningEffort.None)
+                {
+                    enableReasoning = false;
+                    reasoningEffort = "none";
+                }
+                else
+                {
+                    enableReasoning = true;
+                    reasoningEffort = reasoning.Effort.Value switch
+                    {
+                        ReasoningEffort.Low => "low",
+                        ReasoningEffort.Medium => "medium",
+                        ReasoningEffort.High => "high",
+                        ReasoningEffort.ExtraHigh => "xhigh",
+                        _ => reasoning.Effort.Value.ToString().ToLowerInvariant()
+                    };
+                }
+            }
+
+            if (reasoning.Output.HasValue && reasoning.Output.Value == ReasoningOutput.None)
+            {
+                enableReasoning = false;
+            }
+        }
+
+        if (chatOptions?.AdditionalProperties is { } props)
+        {
+            if (props.TryGetValue("enable_thinking", out var et) && et is bool b1)
+            {
+                enableReasoning = b1;
+            }
+            else if (props.TryGetValue("enable_reasoning", out var er) && er is bool b2)
+            {
+                enableReasoning = b2;
+            }
+            else if (props.TryGetValue("reasoning", out var r) && r is bool b3)
+            {
+                enableReasoning = b3;
+            }
+
+            if (props.TryGetValue("reasoning_effort", out var re) && re != null)
+            {
+                reasoningEffort = re.ToString();
+            }
+        }
+
+        enableReasoning ??= llamaOptions?.EnableReasoning;
+        reasoningEffort ??= llamaOptions?.ReasoningEffort;
+
+        if (!string.IsNullOrWhiteSpace(reasoningEffort))
+        {
+            var trimmedEffort = reasoningEffort.Trim();
+            if (string.Equals(trimmedEffort, "none", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmedEffort, "off", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmedEffort, "false", StringComparison.OrdinalIgnoreCase))
+            {
+                enableReasoning = false;
+            }
+            else if (enableReasoning == null)
+            {
+                enableReasoning = true;
+            }
+        }
+
+        return (enableReasoning, reasoningEffort);
     }
 
     /// <summary>
@@ -80,6 +192,34 @@ public static class LocalModelChatFormatter
         if (thinkMatches.Count > 0)
         {
             text = Regex.Replace(text, @"<(think|thought)>(.*?)</\1>", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
+        }
+        else
+        {
+            // Fallback for pre-filled thinking prompt (e.g. "<|im_start|>assistant\n<think>\n") where the model only outputs "...</think>"
+            var closeMatch = Regex.Match(text, @"^(.*?)</(think|thought)>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            if (closeMatch.Success)
+            {
+                var reasoning = closeMatch.Groups[1].Value.Trim();
+                if (!string.IsNullOrWhiteSpace(reasoning))
+                {
+                    contents.Add(new TextReasoningContent(reasoning));
+                }
+                text = text.Substring(closeMatch.Length).Trim();
+            }
+            else
+            {
+                // Fallback for unclosed thinking block (e.g. generation aborted or truncated inside <think>)
+                var unclosedMatch = Regex.Match(text, @"<(think|thought)>(.*)$", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                if (unclosedMatch.Success)
+                {
+                    var reasoning = unclosedMatch.Groups[2].Value.Trim();
+                    if (!string.IsNullOrWhiteSpace(reasoning))
+                    {
+                        contents.Add(new TextReasoningContent(reasoning));
+                    }
+                    text = text.Substring(0, unclosedMatch.Index).Trim();
+                }
+            }
         }
 
         // 2. Extract <tool_call>...</tool_call>

@@ -53,6 +53,27 @@ public class LlamaSharpOptionsAndLoggingTests
         Assert.Equal(0.7f, options.DefaultTemperature);
         Assert.Equal(2048, options.DefaultMaxOutputTokens);
         Assert.Equal(10, options.RequestTimeoutMinutes);
+        Assert.Null(options.EnableReasoning);
+        Assert.Null(options.ReasoningEffort);
+        Assert.Null(options.SupportsReasoning);
+        Assert.Null(options.SupportsReasoningEffort);
+    }
+
+    [Fact]
+    public void LlamaSharpOptions_CanConfigureReasoningOptions()
+    {
+        var options = new LlamaSharpOptions
+        {
+            EnableReasoning = true,
+            ReasoningEffort = "low",
+            SupportsReasoning = true,
+            SupportsReasoningEffort = true
+        };
+
+        Assert.True(options.EnableReasoning);
+        Assert.Equal("low", options.ReasoningEffort);
+        Assert.True(options.SupportsReasoning);
+        Assert.True(options.SupportsReasoningEffort);
     }
 
     [Fact]

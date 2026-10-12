@@ -225,7 +225,42 @@ using var chatClient = LlamaSharpChatClient.CreateFromFile(
 public sealed class CustomDialect : ChatDialect { ... }
 ```
 
-### 8. Tool Calling Benchmark Suite
+### 8. Reasoning & Thinking Mode Configuration
+
+For open-weights models supporting internal chain-of-thought (e.g. Qwen 3.5, Google Gemma 4), reasoning behavior can be toggled on/off and tuned for depth:
+
+```csharp
+using Microsoft.Extensions.AI;
+using Pmad.AI.LlamaSharp;
+
+// 1. Configure reasoning effort per-request via standard Microsoft.Extensions.AI ChatOptions
+var chatOptions = new ChatOptions
+{
+    Reasoning = new ReasoningOptions
+    {
+        Effort = ReasoningEffort.Medium // None, Low, Medium, High, ExtraHigh
+    }
+};
+
+var response = await chatClient.GetResponseAsync("Solve this logic puzzle.", chatOptions);
+
+// 2. Or disable reasoning to get instant, low-latency direct responses
+var fastOptions = new ChatOptions
+{
+    Reasoning = new ReasoningOptions { Effort = ReasoningEffort.None }
+};
+
+// 3. You can also configure client-wide defaults via LlamaSharpOptions
+var clientOptions = new LlamaSharpOptions
+{
+    EnableReasoning = true,
+    ReasoningEffort = "medium" // "low", "medium", "high", "xhigh", or "none"
+};
+```
+
+When reasoning is disabled (`enable = false` or `effort = none`), dialects pre-fill a closed `<think>\n\n</think>\n\n` block to instruct the model to skip internal deliberations. For models supporting tiered effort (introduced in Qwen 3.8 via `ChatDialect.Qwen38` or `SupportsReasoningEffort = true`), effort instructions (`low`, `medium`, `xhigh`) are automatically injected into the system prompt matching upstream chat templates.
+
+### 9. Tool Calling Benchmark Suite
 
 A standalone benchmarking tool is provided under `benchmarks/Pmad.AI.Benchmark` to showcase and validate tool calling with mocked multi-turn user interactions, measuring speed (tokens/sec), latency (ms), and function execution accuracy:
 
@@ -233,10 +268,13 @@ A standalone benchmarking tool is provided under `benchmarks/Pmad.AI.Benchmark` 
 # 1. Run in mock simulation mode (validates all scenarios & reporting immediately without model weights):
 dotnet run --project benchmarks/Pmad.AI.Benchmark -- --mock
 
-# 2. Benchmark a specific preset with automated download and Markdown report export:
+# 2. Benchmark with reasoning effort override ('low', 'medium', 'high', 'none'):
+dotnet run --project benchmarks/Pmad.AI.Benchmark -- --mock --reasoning-effort low
+
+# 3. Benchmark a specific preset with automated download and Markdown report export:
 dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --download --output benchmark_report.md
 
-# 3. Benchmark all supported model presets:
+# 4. Benchmark all supported model presets:
 dotnet run --project benchmarks/Pmad.AI.Benchmark -- --all --download
 ```
 
@@ -250,14 +288,14 @@ Scenarios evaluated:
 
 ## Model Presets
 
-The library includes verified presets with tested prompt templates and context configurations:
+The library includes verified presets with tested prompt templates, reasoning capabilities, and context configurations:
 
-| Preset ID | Aliases | Model Name | Format | Context Size | Approx Size | Vision |
-|:---|:---|:---|:---|:---:|:---:|:---:|
-| `qwen3.5-2b` *(Default)* | `qwen3.5`, `qwen3.5-2b-gguf` | Qwen 3.5 2B (Q4_K_XL) | ChatML | 48k | ~1.2 GB | Yes (`mmproj-bf16`) |
-| `qwen3.5-4b` | `qwen3.5-4b-gguf`, `qwen3.5-4b-q4` | Qwen 3.5 4B (Q4_K_XL) | ChatML | 48k | ~2.7 GB | Yes (`mmproj-bf16`) |
-| `gemma-4-e2b` | `gemma4-e2b`, `gemma-4-e2b-it` | Gemma 4 E2B (Q4_K_XL) | Gemma 4 | 48k | ~3.0 GB | Yes (`mmproj-bf16`) |
-| `gemma-4-e4b` | `gemma4-e4b`, `gemma-4-e4b-it` | Gemma 4 E4B (Q4_K_XL) | Gemma 4 | 48k | ~4.8 GB | Yes (`mmproj-bf16`) |
+| Preset ID | Aliases | Model Name | Format | Context Size | Approx Size | Vision | Reasoning | Effort Tuning |
+|:---|:---|:---|:---|:---:|:---:|:---:|:---:|:---:|
+| `qwen3.5-2b` *(Default)* | `qwen3.5`, `qwen3.5-2b-gguf` | Qwen 3.5 2B (Q4_K_XL) | ChatML | 48k | ~1.2 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
+| `qwen3.5-4b` | `qwen3.5-4b-gguf`, `qwen3.5-4b-q4` | Qwen 3.5 4B (Q4_K_XL) | ChatML | 48k | ~2.7 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
+| `gemma-4-e2b` | `gemma4-e2b`, `gemma-4-e2b-it` | Gemma 4 E2B (Q4_K_XL) | Gemma 4 | 48k | ~3.0 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
+| `gemma-4-e4b` | `gemma4-e4b`, `gemma-4-e4b-it` | Gemma 4 E4B (Q4_K_XL) | Gemma 4 | 48k | ~4.8 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
 
 ---
 
