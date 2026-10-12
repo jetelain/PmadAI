@@ -32,8 +32,8 @@ public sealed class LlamaSharpChatClient : IChatClient
     private readonly LLamaWeights _weights;
     private readonly LLamaContext _context;
     private readonly MtmdWeights? _clipModel;
-    private readonly StatelessExecutor _statelessExecutor;
     private readonly bool _ownsWeights;
+    private readonly bool _ownsContext;
     private readonly ILogger _logger;
     private readonly LlamaModelPreset? _preset;
 
@@ -112,11 +112,11 @@ public sealed class LlamaSharpChatClient : IChatClient
     }
 
     /// <summary>
-    /// Initializes a new instance of <see cref="LlamaSharpChatClient"/> from existing weights and context.
+    /// Initializes a new instance of <see cref="LlamaSharpChatClient"/> from existing weights and optional context.
     /// </summary>
     public LlamaSharpChatClient(
         LLamaWeights weights,
-        LLamaContext context,
+        LLamaContext? context,
         string modelPath,
         LlamaSharpOptions? options = null,
         string promptFormat = "chatml",
@@ -136,11 +136,26 @@ public sealed class LlamaSharpChatClient : IChatClient
     }
 
     /// <summary>
-    /// Initializes a new instance of <see cref="LlamaSharpChatClient"/> from existing weights and context using a specific <see cref="ChatDialect"/>.
+    /// Initializes a new instance of <see cref="LlamaSharpChatClient"/> from existing weights without requiring an explicit context.
     /// </summary>
     public LlamaSharpChatClient(
         LLamaWeights weights,
-        LLamaContext context,
+        string modelPath,
+        LlamaSharpOptions? options = null,
+        string promptFormat = "chatml",
+        MtmdWeights? clipModel = null,
+        bool ownsWeights = false,
+        ILogger? logger = null)
+        : this(weights, null, modelPath, options, promptFormat, clipModel, ownsWeights, logger)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of <see cref="LlamaSharpChatClient"/> from existing weights and optional context using a specific <see cref="ChatDialect"/>.
+    /// </summary>
+    public LlamaSharpChatClient(
+        LLamaWeights weights,
+        LLamaContext? context,
         string modelPath,
         ChatDialect dialect,
         LlamaSharpOptions? options = null,
@@ -149,7 +164,6 @@ public sealed class LlamaSharpChatClient : IChatClient
         ILogger? logger = null)
     {
         _weights = weights ?? throw new ArgumentNullException(nameof(weights));
-        _context = context ?? throw new ArgumentNullException(nameof(context));
         _modelPath = modelPath;
         _options = options ?? new LlamaSharpOptions();
         _dialect = dialect ?? _options.Dialect ?? ChatDialect.FromName(_options.PromptFormat);
@@ -167,13 +181,22 @@ public sealed class LlamaSharpChatClient : IChatClient
             ?? _options.LoggerFactory?.CreateLogger<LlamaSharpChatClient>()
             ?? NullLogger<LlamaSharpChatClient>.Instance;
 
-        var modelParams = new ModelParams(modelPath)
+        if (context != null)
         {
-            ContextSize = (uint)_options.ContextSize,
-            GpuLayerCount = _options.GpuLayerCount,
-            BatchSize = _options.BatchSize
-        };
-        _statelessExecutor = new StatelessExecutor(_weights, modelParams);
+            _context = context;
+            _ownsContext = false;
+        }
+        else
+        {
+            var modelParams = new ModelParams(modelPath)
+            {
+                ContextSize = (uint)_options.ContextSize,
+                GpuLayerCount = _options.GpuLayerCount,
+                BatchSize = _options.BatchSize
+            };
+            _context = _weights.CreateContext(modelParams);
+            _ownsContext = true;
+        }
     }
 
     /// <summary>
@@ -392,27 +415,28 @@ public sealed class LlamaSharpChatClient : IChatClient
                 var embeds = ExtractMediaEmbeds(messages);
                 try
                 {
+                    if (!_context.NativeHandle.IsClosed && !_context.NativeHandle.IsInvalid)
+                    {
+                        _context.NativeHandle.MemoryClear(true);
+                    }
+
+                    var executor = _clipModel != null
+                        ? new InteractiveExecutor(_context, _clipModel)
+                        : new InteractiveExecutor(_context);
+
+                    if (embeds.Count > 0)
+                    {
+                        LogOperation("Executing multimodal inference with {EmbedCount} media embed(s)", embeds.Count);
+                        executor.Embeds.AddRange(embeds);
+                    }
+
                     var responseBuilder = new StringBuilder();
                     int outputTokenCount = 0;
 
-                    if (embeds.Count > 0 && _clipModel != null)
+                    await foreach (var token in executor.InferAsync(promptText, inferenceParams, ct))
                     {
-                        LogOperation("Executing multimodal inference with {EmbedCount} media embed(s)", embeds.Count);
-                        var interactiveExecutor = new InteractiveExecutor(_context, _clipModel);
-                        interactiveExecutor.Embeds.AddRange(embeds);
-                        await foreach (var token in interactiveExecutor.InferAsync(promptText, inferenceParams, ct))
-                        {
-                            responseBuilder.Append(token);
-                            outputTokenCount++;
-                        }
-                    }
-                    else
-                    {
-                        await foreach (var token in _statelessExecutor.InferAsync(promptText, inferenceParams, ct))
-                        {
-                            responseBuilder.Append(token);
-                            outputTokenCount++;
-                        }
+                        responseBuilder.Append(token);
+                        outputTokenCount++;
                     }
 
                     var text = responseBuilder.ToString().Trim();
@@ -514,18 +538,22 @@ public sealed class LlamaSharpChatClient : IChatClient
 
             try
             {
-                IAsyncEnumerable<string> tokenStream;
-                if (embeds.Count > 0 && _clipModel != null)
+                if (!_context.NativeHandle.IsClosed && !_context.NativeHandle.IsInvalid)
+                {
+                    _context.NativeHandle.MemoryClear(true);
+                }
+
+                var executor = _clipModel != null
+                    ? new InteractiveExecutor(_context, _clipModel)
+                    : new InteractiveExecutor(_context);
+
+                if (embeds.Count > 0)
                 {
                     LogOperation("Executing multimodal streaming inference with {EmbedCount} media embed(s)", embeds.Count);
-                    var interactiveExecutor = new InteractiveExecutor(_context, _clipModel);
-                    interactiveExecutor.Embeds.AddRange(embeds);
-                    tokenStream = interactiveExecutor.InferAsync(promptText, inferenceParams, ct);
+                    executor.Embeds.AddRange(embeds);
                 }
-                else
-                {
-                    tokenStream = _statelessExecutor.InferAsync(promptText, inferenceParams, ct);
-                }
+
+                var tokenStream = executor.InferAsync(promptText, inferenceParams, ct);
 
                 await foreach (var token in tokenStream.WithCancellation(ct))
                 {
@@ -716,10 +744,13 @@ public sealed class LlamaSharpChatClient : IChatClient
 
         try
         {
-            if (_ownsWeights)
+            if (_ownsWeights || _ownsContext)
             {
                 _clipModel?.Dispose();
                 _context.Dispose();
+            }
+            if (_ownsWeights)
+            {
                 _weights.Dispose();
             }
         }
