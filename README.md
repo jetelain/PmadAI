@@ -307,6 +307,16 @@ The library includes verified presets with tested prompt templates, reasoning ca
 | `gemma-4-e2b` | `gemma4-e2b`, `gemma-4-e2b-it` | Gemma 4 E2B (Q4_K_XL) | Gemma 4 | 48k | ~3.0 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
 | `gemma-4-e4b` | `gemma4-e4b`, `gemma-4-e4b-it` | Gemma 4 E4B (Q4_K_XL) | Gemma 4 | 48k | ~4.8 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
 
+### Recommended Models by Target Platform
+
+Based on tool calling, reasoning, and hardware acceleration evaluations (see full [Benchmark Report](docs/benchmark.md) and [Transcript](docs/transcript.md)):
+
+| Target Platform | Recommended Model | Backend | Reasoning | Pass Rate | Memory Footprint | Avg Speed / Duration | Key Benefit |
+|---|---|---|---|---|---|---|---|
+| **Tablet (Android)** | **Gemma 4 E2B (Q4_K_XL)** | Vulkan (or CPU) | **Enabled** | **100%** | ~1.8 – 1.9 GB RAM (~4.4 GB VRAM) | **154 tok/s (GPU)** / 24.6 tok/s (CPU) | Fits mobile RAM limits, no token runaway, fast & reliable |
+| **Desktop (Fast / Snappy)** | **Gemma 4 E4B (Q4_K_XL)** | Vulkan | **Enabled** | **100%** | 3.3 GB RAM / 6.1 GB VRAM | **100 tok/s** (3.88s total) | 100% pass rate across all tests, zero reasoning token bloat |
+| **Desktop (Deep Reasoning)** | **Qwen 3.5 4B (Q4_K_XL)** | Vulkan | **Enabled** | **100%** | 3.0 GB RAM / 5.65 GB VRAM | **135 tok/s** (11.38s total) | Thorough chain-of-thought for complex multi-turn logic |
+
 ---
 
 ## License

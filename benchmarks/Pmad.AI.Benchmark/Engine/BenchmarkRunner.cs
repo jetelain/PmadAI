@@ -56,7 +56,7 @@ public sealed class BenchmarkRunner
         var summary = new ModelBenchmarkSummary
         {
             ModelId = _modelId,
-            ModelName = _client.GetService<ChatClientMetadata>()?.DefaultModelId ?? _modelId,
+            ModelName = !string.IsNullOrWhiteSpace(_modelId) ? _modelId : (_client.GetService<ChatClientMetadata>()?.DefaultModelId ?? "Unknown"),
             Backend = _backend,
             GpuLayers = _gpuLayers,
             ReasoningEnabled = _reasoningEnabled,

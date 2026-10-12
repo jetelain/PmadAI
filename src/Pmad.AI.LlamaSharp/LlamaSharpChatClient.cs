@@ -174,7 +174,7 @@ public sealed class LlamaSharpChatClient : IChatClient
         EnsureNativeLogHookInstalled();
 
         var modelUri = new Uri(Path.GetFullPath(modelPath));
-        _metadata = new ChatClientMetadata("llamasharp", modelUri, Path.GetFileName(modelPath));
+        _metadata = new ChatClientMetadata("llamasharp", modelUri, _preset?.Name ?? Path.GetFileName(modelPath));
 
         _logger = logger
             ?? _options.Logger
@@ -467,7 +467,8 @@ public sealed class LlamaSharpChatClient : IChatClient
                             InputTokenCount = inputTokens,
                             OutputTokenCount = outputTokenCount,
                             TotalTokenCount = inputTokens + outputTokenCount
-                        }
+                        },
+                        ModelId = _preset?.Name ?? Path.GetFileName(_modelPath)
                     };
 
                     return chatResponse;
