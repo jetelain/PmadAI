@@ -38,13 +38,13 @@ public class Gemma4Dialect : ChatDialect
     /// <inheritdoc />
     public override void RenderSystemMessage(StringBuilder sb, string content)
     {
-        sb.Append($"<|turn|>system\n{content}<turn|>\n");
+        sb.Append("<|turn|>system\n").Append(content).Append("<turn|>\n");
     }
 
     /// <inheritdoc />
     public override void RenderUserMessage(StringBuilder sb, string content)
     {
-        sb.Append($"<|turn|>user\n{content}<turn|>\n");
+        sb.Append("<|turn|>user\n").Append(content).Append("<turn|>\n");
     }
 
     /// <inheritdoc />
@@ -70,8 +70,8 @@ public class Gemma4Dialect : ChatDialect
         {
             foreach (var call in toolCalls)
             {
-                var argsJson = call.Arguments != null ? JsonSerializer.Serialize(call.Arguments) : "{}";
-                sb.Append($"\n<tool_call>\n{{\"name\": \"{call.Name}\", \"arguments\": {argsJson}}}\n</tool_call>");
+                var argsJson = AotJsonUtilities.SerializeArguments(call.Arguments);
+                sb.Append("\n<tool_call>\n{\"name\": \"").Append(call.Name).Append("\", \"arguments\": ").Append(argsJson).Append("}\n</tool_call>");
             }
         }
 
@@ -86,7 +86,7 @@ public class Gemma4Dialect : ChatDialect
             sb.Append("<|turn|>user");
         }
 
-        sb.Append($"\n<tool_response>\n{toolContent}\n</tool_response>");
+        sb.Append("\n<tool_response>\n").Append(toolContent).Append("\n</tool_response>");
 
         if (isLastInGroup)
         {

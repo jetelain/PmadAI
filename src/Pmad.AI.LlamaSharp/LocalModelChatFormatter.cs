@@ -10,9 +10,24 @@ namespace Pmad.AI.LlamaSharp;
 /// Handles template rendering (ChatML, Gemma4, Phi-3), function signature injection, reasoning trace extraction,
 /// and function call normalization.
 /// </summary>
-public static class LocalModelChatFormatter
+public static partial class LocalModelChatFormatter
 {
     private static readonly string[] _allStopTokens = ["<|im_end|>", "<|end|>", "<turn|>", "<end_of_turn>"];
+
+    [GeneratedRegex(@"<(think|thought)>(.*?)</\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex ThinkRegex();
+
+    [GeneratedRegex(@"^(.*?)</(think|thought)>", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex CloseThinkRegex();
+
+    [GeneratedRegex(@"<(think|thought)>(.*)$", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex UnclosedThinkRegex();
+
+    [GeneratedRegex(@"<tool_call>\s*(.*?)\s*(?:</tool_call>|(?=<tool_call>)|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex ToolCallRegex();
+
+    [GeneratedRegex(@"```(?:json|tool_call)?\s*(\{\s*.*?\})\s*```", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex JsonCodeBlockRegex();
 
     /// <summary>
     /// Resolves a <see cref="ChatDialect"/> by format name, falling back to <see cref="ChatDialect.Default"/> if null or unknown.
@@ -180,7 +195,7 @@ public static class LocalModelChatFormatter
         var text = rawText;
 
         // 1. Extract reasoning: <think>...</think> or <thought>...</thought>
-        var thinkMatches = Regex.Matches(text, @"<(think|thought)>(.*?)</\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        var thinkMatches = ThinkRegex().Matches(text);
         foreach (Match match in thinkMatches)
         {
             var reasoning = match.Groups[2].Value.Trim();
@@ -191,12 +206,12 @@ public static class LocalModelChatFormatter
         }
         if (thinkMatches.Count > 0)
         {
-            text = Regex.Replace(text, @"<(think|thought)>(.*?)</\1>", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
+            text = ThinkRegex().Replace(text, string.Empty).Trim();
         }
         else
         {
             // Fallback for pre-filled thinking prompt (e.g. "<|im_start|>assistant\n<think>\n") where the model only outputs "...</think>"
-            var closeMatch = Regex.Match(text, @"^(.*?)</(think|thought)>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            var closeMatch = CloseThinkRegex().Match(text);
             if (closeMatch.Success)
             {
                 var reasoning = closeMatch.Groups[1].Value.Trim();
@@ -209,7 +224,7 @@ public static class LocalModelChatFormatter
             else
             {
                 // Fallback for unclosed thinking block (e.g. generation aborted or truncated inside <think>)
-                var unclosedMatch = Regex.Match(text, @"<(think|thought)>(.*)$", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                var unclosedMatch = UnclosedThinkRegex().Match(text);
                 if (unclosedMatch.Success)
                 {
                     var reasoning = unclosedMatch.Groups[2].Value.Trim();
@@ -223,7 +238,7 @@ public static class LocalModelChatFormatter
         }
 
         // 2. Extract <tool_call>...</tool_call>
-        var toolCallMatches = Regex.Matches(text, @"<tool_call>\s*(.*?)\s*(?:</tool_call>|(?=<tool_call>)|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        var toolCallMatches = ToolCallRegex().Matches(text);
         foreach (Match match in toolCallMatches)
         {
             var callBlock = match.Groups[1].Value.Trim();
@@ -240,13 +255,13 @@ public static class LocalModelChatFormatter
         // Remove matched <tool_call> blocks from text
         if (toolCallMatches.Count > 0)
         {
-            text = Regex.Replace(text, @"<tool_call>\s*.*?\s*(?:</tool_call>|(?=<tool_call>)|$)", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
+            text = ToolCallRegex().Replace(text, string.Empty).Trim();
         }
 
         // 3. Fallback: markdown code blocks ```tool_call or ```json containing JSON object
         if (!contents.OfType<FunctionCallContent>().Any())
         {
-            var jsonCodeBlockMatch = Regex.Match(text, @"```(?:json|tool_call)?\s*(\{\s*.*?\})\s*```", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            var jsonCodeBlockMatch = JsonCodeBlockRegex().Match(text);
             if (jsonCodeBlockMatch.Success)
             {
                 var blockContent = jsonCodeBlockMatch.Groups[1].Value.Trim();
@@ -285,7 +300,10 @@ public static class LocalModelChatFormatter
 
         foreach (var stopToken in _allStopTokens)
         {
-            text = text.Replace(stopToken, string.Empty);
+            if (text.Contains(stopToken, StringComparison.Ordinal))
+            {
+                text = text.Replace(stopToken, string.Empty);
+            }
         }
         return text.Trim();
     }
@@ -421,12 +439,42 @@ public static class LocalModelChatFormatter
             return message.Text;
         }
 
-        if (message.Contents is null)
+        if (message.Contents is null || message.Contents.Count == 0)
         {
             return null;
         }
 
-        var text = string.Concat(message.Contents.OfType<TextContent>().Select(c => c.Text ?? string.Empty)).Trim();
-        return string.IsNullOrEmpty(text) ? null : text;
+        string? singleText = null;
+        StringBuilder? sb = null;
+
+        foreach (var content in message.Contents)
+        {
+            if (content is TextContent tc && !string.IsNullOrEmpty(tc.Text))
+            {
+                if (singleText == null)
+                {
+                    singleText = tc.Text;
+                }
+                else
+                {
+                    sb ??= new StringBuilder(singleText);
+                    sb.Append(tc.Text);
+                }
+            }
+        }
+
+        if (sb != null)
+        {
+            var trimmed = sb.ToString().Trim();
+            return string.IsNullOrEmpty(trimmed) ? null : trimmed;
+        }
+
+        if (singleText != null)
+        {
+            var trimmed = singleText.Trim();
+            return string.IsNullOrEmpty(trimmed) ? null : trimmed;
+        }
+
+        return null;
     }
 }

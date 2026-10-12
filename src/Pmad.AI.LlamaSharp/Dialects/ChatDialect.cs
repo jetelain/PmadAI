@@ -139,6 +139,13 @@ public abstract class ChatDialect
         RenderAssistantPrompt(sb);
     }
 
+    private List<string>? _cachedStopTokensList;
+
+    /// <summary>
+    /// Gets the stop sequences as a cached <see cref="List{String}"/> to avoid per-turn allocations.
+    /// </summary>
+    internal List<string> CachedStopTokensList => _cachedStopTokensList ??= (StopTokens as List<string> ?? StopTokens.ToList());
+
     /// <summary>
     /// Removes any stop tokens associated with this dialect from the raw output string.
     /// </summary>
@@ -147,7 +154,10 @@ public abstract class ChatDialect
         if (string.IsNullOrEmpty(text)) return text;
         foreach (var stopToken in StopTokens)
         {
-            text = text.Replace(stopToken, string.Empty);
+            if (text.Contains(stopToken, StringComparison.Ordinal))
+            {
+                text = text.Replace(stopToken, string.Empty);
+            }
         }
         return text.Trim();
     }
@@ -254,29 +264,7 @@ public abstract class ChatDialect
         var toolsSb = new StringBuilder();
         foreach (var fn in functions)
         {
-            object parametersObj = new Dictionary<string, object?>
-            {
-                ["type"] = "object",
-                ["properties"] = new Dictionary<string, object?>()
-            };
-
-            if (fn.JsonSchema.ValueKind == JsonValueKind.Object)
-            {
-                parametersObj = fn.JsonSchema;
-            }
-
-            var toolObj = new Dictionary<string, object?>
-            {
-                ["type"] = "function",
-                ["function"] = new Dictionary<string, object?>
-                {
-                    ["name"] = fn.Name,
-                    ["description"] = fn.Description ?? string.Empty,
-                    ["parameters"] = parametersObj
-                }
-            };
-
-            toolsSb.Append('\n').Append(JsonSerializer.Serialize(toolObj));
+            toolsSb.Append('\n').Append(AotJsonUtilities.SerializeFunctionDefinition(fn));
         }
 
         return "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>" +
@@ -294,13 +282,43 @@ public abstract class ChatDialect
             return message.Text;
         }
 
-        if (message.Contents is null)
+        if (message.Contents is null || message.Contents.Count == 0)
         {
             return null;
         }
 
-        var text = string.Concat(message.Contents.OfType<TextContent>().Select(c => c.Text ?? string.Empty)).Trim();
-        return string.IsNullOrEmpty(text) ? null : text;
+        string? singleText = null;
+        StringBuilder? sb = null;
+
+        foreach (var content in message.Contents)
+        {
+            if (content is TextContent tc && !string.IsNullOrEmpty(tc.Text))
+            {
+                if (singleText == null)
+                {
+                    singleText = tc.Text;
+                }
+                else
+                {
+                    sb ??= new StringBuilder(singleText);
+                    sb.Append(tc.Text);
+                }
+            }
+        }
+
+        if (sb != null)
+        {
+            var trimmed = sb.ToString().Trim();
+            return string.IsNullOrEmpty(trimmed) ? null : trimmed;
+        }
+
+        if (singleText != null)
+        {
+            var trimmed = singleText.Trim();
+            return string.IsNullOrEmpty(trimmed) ? null : trimmed;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -308,17 +326,31 @@ public abstract class ChatDialect
     /// </summary>
     protected static string? GetMessageReasoning(ChatMessage message)
     {
-        if (message.Contents is null)
+        if (message.Contents is null || message.Contents.Count == 0)
         {
             return null;
         }
 
-        var list = message.Contents.OfType<TextReasoningContent>()
-            .Select(r => r.Text)
-            .Where(t => !string.IsNullOrWhiteSpace(t))
-            .ToList();
+        string? single = null;
+        StringBuilder? sb = null;
 
-        return list.Count > 0 ? string.Join("\n\n", list) : null;
+        foreach (var content in message.Contents)
+        {
+            if (content is TextReasoningContent trc && !string.IsNullOrWhiteSpace(trc.Text))
+            {
+                if (single == null)
+                {
+                    single = trc.Text;
+                }
+                else
+                {
+                    sb ??= new StringBuilder(single);
+                    sb.Append("\n\n").Append(trc.Text);
+                }
+            }
+        }
+
+        return sb?.ToString() ?? single;
     }
 
     /// <summary>
@@ -342,13 +374,7 @@ public abstract class ChatDialect
 
     private static string FormatFunctionResult(object? result)
     {
-        return result switch
-        {
-            null => string.Empty,
-            string s => s,
-            JsonElement je => je.GetRawText(),
-            _ => JsonSerializer.Serialize(result)
-        };
+        return AotJsonUtilities.FormatFunctionResult(result);
     }
 }
 

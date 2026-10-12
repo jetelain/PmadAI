@@ -346,7 +346,7 @@ public sealed class LlamaSharpChatClient : IChatClient
                 {
                     Temperature = (float)(options?.Temperature ?? _options.DefaultTemperature)
                 },
-                AntiPrompts = _dialect.StopTokens.ToList(),
+                AntiPrompts = _dialect.CachedStopTokensList,
                 OverflowStrategy = ContextOverflowStrategy.TruncateAndReprefill
             };
 
@@ -447,7 +447,7 @@ public sealed class LlamaSharpChatClient : IChatClient
             {
                 Temperature = (float)(options?.Temperature ?? _options.DefaultTemperature)
             },
-            AntiPrompts = _dialect.StopTokens.ToList(),
+            AntiPrompts = _dialect.CachedStopTokensList,
             OverflowStrategy = ContextOverflowStrategy.TruncateAndReprefill
         };
 
