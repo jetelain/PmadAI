@@ -13,11 +13,19 @@ public sealed class MockBenchmarkChatClient : IChatClient
     private readonly string _modelId;
     private readonly ChatClientMetadata _metadata;
     private readonly int _simulatedDelayMs;
+    private readonly bool _enableReasoning;
+    private readonly string _backend;
 
-    public MockBenchmarkChatClient(string modelId = "mock-qwen-3.5", int simulatedDelayMs = 25)
+    public MockBenchmarkChatClient(
+        string modelId = "mock-qwen-3.5",
+        int? simulatedDelayMs = null,
+        bool enableReasoning = false,
+        string backend = "Vulkan")
     {
         _modelId = modelId;
-        _simulatedDelayMs = simulatedDelayMs;
+        _enableReasoning = enableReasoning;
+        _backend = backend;
+        _simulatedDelayMs = simulatedDelayMs ?? (backend.Equals("CPU", StringComparison.OrdinalIgnoreCase) ? 35 : 10);
         _metadata = new ChatClientMetadata("mock", new Uri("http://localhost/mock"), modelId);
     }
 
@@ -34,11 +42,13 @@ public sealed class MockBenchmarkChatClient : IChatClient
         }
 
         var messageList = messages.ToList();
-        var lastUser = messageList.LastOrDefault(m => m.Role == ChatRole.User);
-        var lastTool = messageList.LastOrDefault(m => m.Role == ChatRole.Tool);
-        var lastUserText = lastUser?.Text ?? string.Empty;
-
         var (contents, finishReason, promptTokens, outputTokens) = GenerateMockResponse(messageList, options);
+
+        if (_enableReasoning)
+        {
+            contents.Insert(0, new TextReasoningContent("Evaluating user request and planning optimal tool actions..."));
+            outputTokens += 40;
+        }
 
         var assistantMsg = new ChatMessage(ChatRole.Assistant, contents);
         return new ChatResponse([assistantMsg])

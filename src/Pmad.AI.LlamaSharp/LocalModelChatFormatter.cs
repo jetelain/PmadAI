@@ -12,7 +12,11 @@ namespace Pmad.AI.LlamaSharp;
 /// </summary>
 public static partial class LocalModelChatFormatter
 {
-    private static readonly string[] _allStopTokens = ["<|im_end|>", "<|end|>", "<turn|>", "<end_of_turn>"];
+    private static readonly string[] _allStopTokens = [
+        "<|im_end|>", "<|end|>", "<turn|>", "<end_of_turn>",
+        "<|tool_call>", "<tool_call|>", "<|tool_code>", "<tool_code|>",
+        "<|tool_response>", "<tool_response|>"
+    ];
 
     [GeneratedRegex(@"<(think|thought)>(.*?)</\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
     private static partial Regex ThinkRegex();
@@ -23,11 +27,20 @@ public static partial class LocalModelChatFormatter
     [GeneratedRegex(@"<(think|thought)>(.*)$", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
     private static partial Regex UnclosedThinkRegex();
 
-    [GeneratedRegex(@"<tool_call>\s*(.*?)\s*(?:</tool_call>|(?=<tool_call>)|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"<\|?(?:tool_call|tool_code)>\s*(.*?)\s*(?:</(?:tool_call|tool_code)>|<(?:tool_call|tool_code)\|>|</\|(?:tool_call|tool_code)>|(?=<\|?(?:tool_call|tool_code)>)|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
     private static partial Regex ToolCallRegex();
 
-    [GeneratedRegex(@"```(?:json|tool_call)?\s*(\{\s*.*?\})\s*```", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"```(?:json|tool_call|tool_code)?\s*(\{\s*.*?\})\s*```", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
     private static partial Regex JsonCodeBlockRegex();
+
+    [GeneratedRegex(@"(?:call:)([a-zA-Z0-9_\-]+)\s*(\{.*?\}|\(.*?\))", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex RawCallRegex();
+
+    [GeneratedRegex(@"(?<=[{,]\s*)([a-zA-Z0-9_\-]+)\s*:", RegexOptions.Singleline)]
+    private static partial Regex UnquotedKeyRegex();
+
+    [GeneratedRegex(@"(?<=:\s*)(?!true\b|false\b|null\b|[0-9\-])([a-zA-Z_][a-zA-Z0-9_\-]*)(?=\s*[,}])", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex UnquotedValueRegex();
 
     /// <summary>
     /// Resolves a <see cref="ChatDialect"/> by format name, falling back to <see cref="ChatDialect.Default"/> if null or unknown.
@@ -274,6 +287,24 @@ public static partial class LocalModelChatFormatter
             }
         }
 
+        // 4. Fallback: raw call:function_name{args} syntax (e.g. Gemma native output without XML tags)
+        if (!contents.OfType<FunctionCallContent>().Any())
+        {
+            var rawCallMatches = RawCallRegex().Matches(text);
+            foreach (Match match in rawCallMatches)
+            {
+                var parsed = TryParseCallSyntax(match.Value, normalizer);
+                if (parsed != null)
+                {
+                    contents.Add(parsed);
+                }
+            }
+            if (rawCallMatches.Count > 0)
+            {
+                text = RawCallRegex().Replace(text, string.Empty).Trim();
+            }
+        }
+
         // 4. Strip stray chatml / template end tokens
         text = StripStrayTokens(text, dialect);
 
@@ -310,9 +341,25 @@ public static partial class LocalModelChatFormatter
 
     /// <summary>
     /// Attempts to parse a JSON payload representing a function call and optionally normalizes it via <paramref name="normalizer"/>.
+    /// Supports standard JSON as well as Gemma native <c>call:func{arg:&lt;|"|&gt;val&lt;|"|&gt;}</c> syntax.
     /// </summary>
     public static FunctionCallContent? TryParseFunctionCall(string jsonText, FunctionCallNormalizer? normalizer = null)
     {
+        if (string.IsNullOrWhiteSpace(jsonText))
+        {
+            return null;
+        }
+
+        var trimmed = jsonText.Trim();
+        if (trimmed.StartsWith("call:", StringComparison.OrdinalIgnoreCase))
+        {
+            var callParsed = TryParseCallSyntax(trimmed, normalizer);
+            if (callParsed != null)
+            {
+                return callParsed;
+            }
+        }
+
         try
         {
             using var doc = JsonDocument.Parse(jsonText);
@@ -414,6 +461,72 @@ public static partial class LocalModelChatFormatter
         {
             return null;
         }
+    }
+
+    private static FunctionCallContent? TryParseCallSyntax(string text, FunctionCallNormalizer? normalizer)
+    {
+        var trimmed = text.Trim();
+        if (trimmed.StartsWith("call:", StringComparison.OrdinalIgnoreCase))
+        {
+            var openBraceIndex = trimmed.IndexOf('{');
+            if (openBraceIndex < 0)
+            {
+                openBraceIndex = trimmed.IndexOf('(');
+            }
+
+            if (openBraceIndex > 5)
+            {
+                var functionName = trimmed.Substring(5, openBraceIndex - 5).Trim();
+                var closeBraceIndex = trimmed.LastIndexOf(trimmed[openBraceIndex] == '{' ? '}' : ')');
+                var argsStr = closeBraceIndex > openBraceIndex
+                    ? trimmed.Substring(openBraceIndex, closeBraceIndex - openBraceIndex + 1)
+                    : trimmed.Substring(openBraceIndex);
+
+                // Replace Gemma's <|"|> with "
+                argsStr = argsStr.Replace("<|\"|>", "\"");
+
+                // If argsStr is { ... }, ensure unquoted keys and string values are quoted
+                if (argsStr.StartsWith('{') && argsStr.EndsWith('}'))
+                {
+                    argsStr = UnquotedKeyRegex().Replace(argsStr, "\"$1\":");
+                    argsStr = UnquotedValueRegex().Replace(argsStr, "\"$1\"");
+                }
+
+                try
+                {
+                    using var doc = JsonDocument.Parse(argsStr);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                    {
+                        IDictionary<string, object?> arguments = new Dictionary<string, object?>(StringComparer.Ordinal);
+                        foreach (var prop in doc.RootElement.EnumerateObject())
+                        {
+                            arguments[prop.Name] = UnwrapJsonElement(prop.Value);
+                        }
+
+                        if (normalizer != null)
+                        {
+                            var normalized = normalizer(functionName, arguments);
+                            if (normalized.HasValue)
+                            {
+                                functionName = normalized.Value.Name;
+                                arguments = normalized.Value.Arguments;
+                            }
+                        }
+
+                        return new FunctionCallContent(
+                            callId: $"call_{Guid.NewGuid():N}",
+                            name: functionName,
+                            arguments: arguments);
+                    }
+                }
+                catch
+                {
+                    // Fall back
+                }
+            }
+        }
+
+        return null;
     }
 
     private static object? UnwrapJsonElement(JsonElement element)

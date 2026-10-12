@@ -367,7 +367,7 @@ public class ChatDialectTests
     }
 
     [Fact]
-    public void Gemma4Dialect_FormatPrompt_WithReasoningDisabled_PrefillsClosedThinkBlock()
+    public void Gemma4Dialect_FormatPrompt_WithReasoningDisabled_DoesNotPrefillThinkBlock()
     {
         var messages = new List<ChatMessage>
         {
@@ -376,7 +376,25 @@ public class ChatDialectTests
 
         var prompt = ChatDialect.Gemma4.FormatPrompt(messages, enableReasoning: false);
 
-        Assert.EndsWith("<|turn|>model\n<think>\n\n</think>\n\n", prompt);
+        Assert.EndsWith("<|turn|>model\n", prompt);
+        Assert.DoesNotContain("<think>", prompt);
+    }
+
+    [Fact]
+    public void Gemma4Dialect_FormatPrompt_WithReasoningInHistory_RendersThoughtBlock()
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "What is 2+2?"),
+            new(ChatRole.Assistant, new List<AIContent>
+            {
+                new TextReasoningContent("2 + 2 = 4"),
+                new TextContent("The answer is 4.")
+            })
+        };
+
+        var prompt = ChatDialect.Gemma4.FormatPrompt(messages);
+        Assert.Contains("<|turn|>model\n<thought>\n2 + 2 = 4\n</thought>\n\nThe answer is 4.<turn|>\n", prompt);
     }
 
     [Fact]

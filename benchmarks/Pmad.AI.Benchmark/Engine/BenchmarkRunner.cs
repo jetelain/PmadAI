@@ -15,13 +15,32 @@ public sealed class BenchmarkRunner
     private readonly string _modelId;
     private readonly bool _verbose;
     private readonly Action<string>? _logAction;
+    private readonly string? _backend;
+    private readonly int _gpuLayers;
+    private readonly bool? _reasoningEnabled;
+    private readonly string? _reasoningEffort;
+    private readonly string? _configurationLabel;
 
-    public BenchmarkRunner(IChatClient client, string modelId, bool verbose = false, Action<string>? logAction = null)
+    public BenchmarkRunner(
+        IChatClient client,
+        string modelId,
+        bool verbose = false,
+        Action<string>? logAction = null,
+        string? backend = null,
+        int gpuLayers = 0,
+        bool? reasoningEnabled = null,
+        string? reasoningEffort = null,
+        string? configurationLabel = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _modelId = modelId ?? throw new ArgumentNullException(nameof(modelId));
         _verbose = verbose;
         _logAction = logAction;
+        _backend = backend;
+        _gpuLayers = gpuLayers;
+        _reasoningEnabled = reasoningEnabled;
+        _reasoningEffort = reasoningEffort;
+        _configurationLabel = configurationLabel;
     }
 
     /// <summary>
@@ -31,11 +50,21 @@ public sealed class BenchmarkRunner
         IReadOnlyList<BenchmarkScenario> scenarios,
         CancellationToken cancellationToken = default)
     {
+        var isGpu = _gpuLayers > 0 || string.Equals(_backend, "Vulkan", StringComparison.OrdinalIgnoreCase);
+        var baselineVram = isGpu ? (NvidiaSmiMonitor.GetUsedVramMb() ?? 0) : 0;
+
         var summary = new ModelBenchmarkSummary
         {
             ModelId = _modelId,
             ModelName = _client.GetService<ChatClientMetadata>()?.DefaultModelId ?? _modelId,
-            PeakMemoryMb = GetCurrentWorkingSetMb()
+            Backend = _backend,
+            GpuLayers = _gpuLayers,
+            ReasoningEnabled = _reasoningEnabled,
+            ReasoningEffort = _reasoningEffort,
+            ConfigurationLabel = _configurationLabel,
+            PeakMemoryMb = GetCurrentWorkingSetMb(),
+            BaselineVramMb = baselineVram,
+            PeakVramMb = baselineVram
         };
 
         foreach (var scenario in scenarios)
@@ -62,12 +91,26 @@ public sealed class BenchmarkRunner
             {
                 summary.PeakMemoryMb = result.PeakMemoryMb;
             }
+
+            if (result.PeakVramMb > summary.PeakVramMb)
+            {
+                summary.PeakVramMb = result.PeakVramMb;
+            }
         }
 
         var currentMem = GetCurrentWorkingSetMb();
         if (currentMem > summary.PeakMemoryMb)
         {
             summary.PeakMemoryMb = currentMem;
+        }
+
+        if (isGpu)
+        {
+            var currentVram = NvidiaSmiMonitor.GetUsedVramMb() ?? 0;
+            if (currentVram > summary.PeakVramMb)
+            {
+                summary.PeakVramMb = currentVram;
+            }
         }
 
         if (summary.TotalTimeMs > 0)
@@ -87,12 +130,14 @@ public sealed class BenchmarkRunner
     {
         Log($"\n>>> Running Scenario: [{scenario.Id}] \"{scenario.Name}\"");
 
+        var isGpu = _gpuLayers > 0 || string.Equals(_backend, "Vulkan", StringComparison.OrdinalIgnoreCase);
         var scenarioResult = new BenchmarkScenarioResult
         {
             ScenarioId = scenario.Id,
             ScenarioName = scenario.Name,
             ModelId = _modelId,
-            PeakMemoryMb = GetCurrentWorkingSetMb()
+            PeakMemoryMb = GetCurrentWorkingSetMb(),
+            PeakVramMb = isGpu ? (NvidiaSmiMonitor.GetUsedVramMb() ?? 0) : 0
         };
 
         var scenarioStopwatch = Stopwatch.StartNew();
@@ -190,7 +235,11 @@ public sealed class BenchmarkRunner
                         var resultJson = execResult is string strRes ? strRes : JsonSerializer.Serialize(execResult);
                         Log($"    [Tool executed -> result] {resultJson}");
 
-                        toolResultContents.Add(new FunctionResultContent(call.CallId ?? Guid.NewGuid().ToString("N"), resultJson));
+                        var callId = call.CallId ?? Guid.NewGuid().ToString("N");
+                        var argsJson = JsonSerializer.Serialize(call.Arguments);
+                        turnResult.ToolExecutions.Add(new ToolCallRecord(callId, call.Name, argsJson, resultJson));
+
+                        toolResultContents.Add(new FunctionResultContent(callId, resultJson));
                     }
 
                     // Feed tool outputs back to conversation
@@ -272,6 +321,15 @@ public sealed class BenchmarkRunner
             {
                 scenarioResult.PeakMemoryMb = currentMem;
             }
+
+            if (isGpu)
+            {
+                var vram = NvidiaSmiMonitor.GetUsedVramMb();
+                if (vram.HasValue && vram.Value > scenarioResult.PeakVramMb)
+                {
+                    scenarioResult.PeakVramMb = vram.Value;
+                }
+            }
         }
 
         scenarioStopwatch.Stop();
@@ -283,12 +341,27 @@ public sealed class BenchmarkRunner
             scenarioResult.PeakMemoryMb = endMem;
         }
 
+        if (isGpu)
+        {
+            var endVram = NvidiaSmiMonitor.GetUsedVramMb();
+            if (endVram.HasValue && endVram.Value > scenarioResult.PeakVramMb)
+            {
+                scenarioResult.PeakVramMb = endVram.Value;
+            }
+        }
+
         if (totalExpectedToolCalls > 0)
         {
             scenarioResult.ToolAccuracyPercentage = Math.Round(expectedToolCallMatches * 100.0 / totalExpectedToolCalls, 1);
         }
 
-        Log($"--- Scenario [{scenario.Id}] Completed: {scenarioResult.Status} in {scenarioResult.TotalDurationMs:F0} ms (Gen: {scenarioResult.GenerationTokensPerSecond:F1} tok/s, RAM: {FormatMemory(scenarioResult.PeakMemoryMb)}) ---");
+        var memStr = $"RAM: {FormatMemory(scenarioResult.PeakMemoryMb)}";
+        if (scenarioResult.PeakVramMb > 0)
+        {
+            memStr += $", VRAM: {FormatMemory(scenarioResult.PeakVramMb)}";
+        }
+
+        Log($"--- Scenario [{scenario.Id}] Completed: {scenarioResult.Status} in {scenarioResult.TotalDurationMs:F0} ms (Gen: {scenarioResult.GenerationTokensPerSecond:F1} tok/s, {memStr}) ---");
 
         return scenarioResult;
     }

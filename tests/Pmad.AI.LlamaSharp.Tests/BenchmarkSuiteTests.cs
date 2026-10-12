@@ -171,8 +171,215 @@ public class BenchmarkSuiteTests
         Assert.Contains("# Pmad.AI Tool Calling Benchmark Report", md);
         Assert.Contains("Qwen 3.5 2B (Q4_K_XL)", md);
         Assert.Contains("Weather Multi-City", md);
-        Assert.Contains("Peak RAM", md);
+        Assert.Contains("RAM", md);
         Assert.Contains("✅ PASS", md);
+    }
+
+    [Fact]
+    public void BenchmarkOptions_Parse_ComparisonFlags_SetsExpectedProperties()
+    {
+        var compareBackends = BenchmarkOptions.Parse(["--compare-backends"]);
+        Assert.True(compareBackends.CompareBackends);
+
+        var compareReasoning = BenchmarkOptions.Parse(["--compare-reasoning"]);
+        Assert.True(compareReasoning.CompareReasoning);
+
+        var compareAll = BenchmarkOptions.Parse(["--compare-all"]);
+        Assert.True(compareAll.CompareAll);
+        Assert.True(compareAll.CompareBackends);
+        Assert.True(compareAll.CompareReasoning);
+
+        var matrix = BenchmarkOptions.Parse(["--matrix"]);
+        Assert.True(matrix.CompareAll);
+        Assert.True(matrix.CompareBackends);
+        Assert.True(matrix.CompareReasoning);
+
+        var backendCpu = BenchmarkOptions.Parse(["-b", "cpu"]);
+        Assert.Equal("cpu", backendCpu.Backend);
+        Assert.False(backendCpu.CompareBackends);
+
+        var backendVulkan = BenchmarkOptions.Parse(["--backend", "vulkan"]);
+        Assert.Equal("vulkan", backendVulkan.Backend);
+
+        var backendAll = BenchmarkOptions.Parse(["--backends", "all"]);
+        Assert.True(backendAll.CompareBackends);
+    }
+
+    [Fact]
+    public void NvidiaSmiMonitor_SmokeTest_DoesNotThrow()
+    {
+        var available = NvidiaSmiMonitor.IsAvailable;
+        var vram = NvidiaSmiMonitor.GetUsedVramMb();
+
+        if (available)
+        {
+            Assert.NotNull(vram);
+            Assert.True(vram.Value > 0);
+        }
+    }
+
+    [Fact]
+    public async Task MockBenchmarkChatClient_ReasoningToggle_AffectsTokensAndReasoningContent()
+    {
+        using var clientNoReas = new MockBenchmarkChatClient(enableReasoning: false);
+        var respNoReas = await clientNoReas.GetResponseAsync([new ChatMessage(ChatRole.User, "What is the capital of France?")]);
+        Assert.DoesNotContain(respNoReas.Messages[0].Contents, c => c is TextReasoningContent);
+        var noReasTokens = respNoReas.Usage!.OutputTokenCount!.Value;
+
+        using var clientReas = new MockBenchmarkChatClient(enableReasoning: true);
+        var respReas = await clientReas.GetResponseAsync([new ChatMessage(ChatRole.User, "What is the capital of France?")]);
+        Assert.Contains(respReas.Messages[0].Contents, c => c is TextReasoningContent);
+        var reasTokens = respReas.Usage!.OutputTokenCount!.Value;
+
+        Assert.True(reasTokens > noReasTokens);
+    }
+
+    [Fact]
+    public void ReportFormatters_ComparisonTables_GenerateProperOutput()
+    {
+        var cpuNoReas = new ModelBenchmarkSummary
+        {
+            ModelId = "qwen3.5-2b",
+            ModelName = "Qwen 3.5 2B",
+            Backend = "CPU",
+            GpuLayers = 0,
+            ReasoningEnabled = false,
+            ConfigurationLabel = "CPU | No Reasoning",
+            ScenariosRun = 1,
+            ScenariosPassed = 1,
+            TotalOutputTokens = 100,
+            AverageGenerationTokensPerSecond = 10.0,
+            TotalTimeMs = 10000,
+            PeakMemoryMb = 1500,
+            PeakVramMb = 0
+        };
+
+        var vulkanNoReas = new ModelBenchmarkSummary
+        {
+            ModelId = "qwen3.5-2b",
+            ModelName = "Qwen 3.5 2B",
+            Backend = "Vulkan",
+            GpuLayers = 99,
+            ReasoningEnabled = false,
+            ConfigurationLabel = "Vulkan | No Reasoning",
+            ScenariosRun = 1,
+            ScenariosPassed = 1,
+            TotalOutputTokens = 100,
+            AverageGenerationTokensPerSecond = 40.0,
+            TotalTimeMs = 2500,
+            PeakMemoryMb = 1400,
+            PeakVramMb = 3500
+        };
+
+        var vulkanReas = new ModelBenchmarkSummary
+        {
+            ModelId = "qwen3.5-2b",
+            ModelName = "Qwen 3.5 2B",
+            Backend = "Vulkan",
+            GpuLayers = 99,
+            ReasoningEnabled = true,
+            ConfigurationLabel = "Vulkan | Reasoning",
+            ScenariosRun = 1,
+            ScenariosPassed = 1,
+            TotalOutputTokens = 350,
+            AverageGenerationTokensPerSecond = 35.0,
+            TotalTimeMs = 10000,
+            PeakMemoryMb = 1450,
+            PeakVramMb = 3600
+        };
+
+        var summaries = new[] { cpuNoReas, vulkanNoReas, vulkanReas };
+
+        // Test Console tables do not throw
+        ConsoleReportFormatter.PrintModelsComparisonTable(summaries);
+        ConsoleReportFormatter.PrintBackendComparisonTable(summaries);
+        ConsoleReportFormatter.PrintReasoningComparisonTable(summaries);
+
+        // Test Markdown report contains comparison sections
+        var md = MarkdownReportWriter.GenerateMarkdown(summaries);
+        Assert.Contains("Hardware Acceleration Comparison", md);
+        Assert.Contains("Vulkan Speedup", md);
+        Assert.Contains("Reasoning Impact Comparison", md);
+        Assert.Contains("GPU VRAM", md);
+        Assert.Contains("Environment", md);
+        Assert.Contains("CPU", md);
+    }
+
+    [Fact]
+    public void SystemHardwareInfo_DetectsSystemProperties()
+    {
+        var hw = SystemHardwareInfo.Current;
+        Assert.NotNull(hw);
+        Assert.NotEmpty(hw.CpuName);
+        Assert.True(hw.LogicalCores > 0);
+        Assert.NotEmpty(hw.OsDescription);
+        Assert.NotEmpty(hw.CpuSummary);
+        Assert.NotEmpty(hw.GpuSummary);
+    }
+
+    [Fact]
+    public void TranscriptReportWriter_GeneratesFullTurnTranscriptAndFailureIndex()
+    {
+        var scResult = new BenchmarkScenarioResult
+        {
+            ScenarioId = "calc",
+            ScenarioName = "Calculator Math",
+            ModelId = "qwen",
+            Status = BenchmarkStatus.Failed,
+            ErrorMessage = "Turn 1 failed."
+        };
+
+        scResult.TurnResults.Add(new TurnResult
+        {
+            TurnIndex = 1,
+            UserPrompt = "Compute 2 + 2",
+            Status = BenchmarkStatus.Failed,
+            AssistantReasoning = "Thinking about addition...",
+            AssistantFinalText = "5",
+            ValidationMessage = "Expected 4, got 5.",
+            ToolExecutions =
+            [
+                new ToolCallRecord("c1", "calculate", "{\"expr\":\"2+2\"}", "{\"result\":4}")
+            ]
+        });
+
+        var summary = new ModelBenchmarkSummary
+        {
+            ModelId = "qwen",
+            ModelName = "Qwen Test",
+            Backend = "Vulkan",
+            GpuLayers = 99,
+            ReasoningEnabled = true,
+            ConfigurationLabel = "Vulkan | Reasoning",
+            ScenariosRun = 1,
+            ScenariosPassed = 0,
+            ScenariosFailed = 1,
+            TotalOutputTokens = 50,
+            AverageGenerationTokensPerSecond = 20.0,
+            TotalTimeMs = 2500,
+            ScenarioResults = [scResult]
+        };
+
+        var transcript = TranscriptReportWriter.GenerateMarkdown([summary]);
+
+        Assert.Contains("# Pmad.AI Benchmark Execution Transcript & Failure Analysis", transcript);
+        Assert.Contains("System Environment", transcript);
+        Assert.Contains("Failure Analysis Index", transcript);
+        Assert.Contains("Expected 4, got 5", transcript);
+        Assert.Contains("Thinking about addition...", transcript);
+        Assert.Contains("calculate", transcript);
+        Assert.Contains("{\"result\":4}", transcript);
+        Assert.Contains("FAILED:", transcript);
+    }
+
+    [Fact]
+    public void BenchmarkOptions_Parse_TranscriptOption_SetsProperty()
+    {
+        var shortOpt = BenchmarkOptions.Parse(["-t", "my-transcript.md"]);
+        Assert.Equal("my-transcript.md", shortOpt.OutputTranscriptPath);
+
+        var longOpt = BenchmarkOptions.Parse(["--transcript", "full-transcript.md"]);
+        Assert.Equal("full-transcript.md", longOpt.OutputTranscriptPath);
     }
 
     private sealed class BadMockClient : IChatClient

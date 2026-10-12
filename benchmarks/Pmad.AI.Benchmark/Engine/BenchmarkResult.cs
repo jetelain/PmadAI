@@ -14,6 +14,16 @@ public enum BenchmarkStatus
 }
 
 /// <summary>
+/// Detailed record of an invoked tool call and its execution result.
+/// </summary>
+public sealed record ToolCallRecord(
+    string CallId,
+    string ToolName,
+    string ArgumentsJson,
+    string? ResultJson
+);
+
+/// <summary>
 /// Detailed result metrics for a single turn in a benchmark scenario.
 /// </summary>
 public sealed class TurnResult
@@ -26,6 +36,7 @@ public sealed class TurnResult
     public int OutputTokens { get; set; }
     public double TokensPerSecond => DurationMs > 0 ? (OutputTokens / (DurationMs / 1000.0)) : 0;
     public List<FunctionCallContent> ToolCalls { get; init; } = [];
+    public List<ToolCallRecord> ToolExecutions { get; init; } = [];
     public string AssistantFinalText { get; set; } = string.Empty;
     public string? AssistantReasoning { get; set; }
     public string? ValidationMessage { get; set; }
@@ -48,6 +59,7 @@ public sealed class BenchmarkScenarioResult
     public int TotalToolCalls { get; set; }
     public double ToolAccuracyPercentage { get; set; } = 100.0;
     public double PeakMemoryMb { get; set; }
+    public double PeakVramMb { get; set; }
     public List<TurnResult> TurnResults { get; init; } = [];
     public string? ErrorMessage { get; set; }
 }
@@ -59,6 +71,39 @@ public sealed class ModelBenchmarkSummary
 {
     public required string ModelId { get; init; }
     public required string ModelName { get; init; }
+
+    /// <summary>
+    /// Hardware backend used for inference (e.g. "CPU", "Vulkan", "Mock").
+    /// </summary>
+    public string? Backend { get; set; }
+
+    /// <summary>
+    /// Number of GPU layers offloaded (0 for pure CPU).
+    /// </summary>
+    public int GpuLayers { get; set; }
+
+    /// <summary>
+    /// Whether chain-of-thought reasoning was enabled for this benchmark run.
+    /// </summary>
+    public bool? ReasoningEnabled { get; set; }
+
+    /// <summary>
+    /// Configured reasoning effort level (e.g. "low", "medium", "high", etc.).
+    /// </summary>
+    public string? ReasoningEffort { get; set; }
+
+    /// <summary>
+    /// Short label describing the execution configuration, e.g. "Vulkan | Reasoning" or "CPU | No Reasoning".
+    /// </summary>
+    public string? ConfigurationLabel { get; set; }
+
+    /// <summary>
+    /// Combined model name and configuration label for display.
+    /// </summary>
+    public string DisplayName => string.IsNullOrWhiteSpace(ConfigurationLabel)
+        ? ModelName
+        : $"{ModelName} [{ConfigurationLabel}]";
+
     public int ScenariosRun { get; set; }
     public int ScenariosPassed { get; set; }
     public int ScenariosFailed { get; set; }
@@ -69,5 +114,21 @@ public sealed class ModelBenchmarkSummary
     public double AverageGenerationTokensPerSecond { get; set; }
     public int TotalToolCalls { get; set; }
     public double PeakMemoryMb { get; set; }
+
+    /// <summary>
+    /// Peak GPU VRAM in MiB observed via nvidia-smi when running on GPU.
+    /// </summary>
+    public double PeakVramMb { get; set; }
+
+    /// <summary>
+    /// Baseline VRAM in MiB before model execution was started.
+    /// </summary>
+    public double BaselineVramMb { get; set; }
+
+    /// <summary>
+    /// Estimated VRAM in MiB allocated specifically by this model (Peak - Baseline).
+    /// </summary>
+    public double ModelVramMb => PeakVramMb > BaselineVramMb ? (PeakVramMb - BaselineVramMb) : 0.0;
+
     public List<BenchmarkScenarioResult> ScenarioResults { get; init; } = [];
 }

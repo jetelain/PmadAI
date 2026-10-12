@@ -59,7 +59,7 @@ public class Gemma4Dialect : ChatDialect
         sb.Append("<|turn|>model");
         if (!string.IsNullOrWhiteSpace(reasoning))
         {
-            sb.Append("\n<think>\n").Append(reasoning.Trim()).Append("\n</think>\n");
+            sb.Append("\n<thought>\n").Append(reasoning.Trim()).Append("\n</thought>\n");
         }
         if (!string.IsNullOrWhiteSpace(text))
         {
@@ -97,16 +97,12 @@ public class Gemma4Dialect : ChatDialect
     /// <inheritdoc />
     public override void RenderAssistantPrompt(StringBuilder sb)
     {
-        RenderAssistantPrompt(sb, enableReasoning: null);
+        sb.Append("<|turn|>model\n");
     }
 
     /// <inheritdoc />
     public override void RenderAssistantPrompt(StringBuilder sb, bool? enableReasoning)
     {
         sb.Append("<|turn|>model\n");
-        if (enableReasoning == false)
-        {
-            sb.Append("<think>\n\n</think>\n\n");
-        }
     }
 }

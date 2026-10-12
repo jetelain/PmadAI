@@ -222,6 +222,59 @@ public class LocalModelChatFormatterTests
     }
 
     [Fact]
+    public void ParseAssistantResponse_ParsesToolCodeXmlBlock_UsedByGemma()
+    {
+        var raw = @"<tool_code>
+{""name"": ""get_weather"", ""arguments"": {""city"": ""Paris""}}
+</tool_code>
+<tool_code>
+{""name"": ""get_weather"", ""arguments"": {""city"": ""Tokyo""}}
+</tool_code>";
+
+        var parsed = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var calls = parsed.Contents.OfType<FunctionCallContent>().ToList();
+        Assert.Equal(2, calls.Count);
+        Assert.Equal("get_weather", calls[0].Name);
+        Assert.Equal("Paris", calls[0].Arguments?["city"]?.ToString());
+        Assert.Equal("get_weather", calls[1].Name);
+        Assert.Equal("Tokyo", calls[1].Arguments?["city"]?.ToString());
+    }
+
+    [Fact]
+    public void ParseAssistantResponse_ParsesGemmaNativeToolCallSyntax()
+    {
+        var raw = "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|><|tool_call>call:get_weather{city:<|\"|>Tokyo<|\"|>}<tool_call|>";
+
+        var parsed = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var calls = parsed.Contents.OfType<FunctionCallContent>().ToList();
+        Assert.Equal(2, calls.Count);
+        Assert.Equal("get_weather", calls[0].Name);
+        Assert.Equal("Paris", calls[0].Arguments?["city"]?.ToString());
+        Assert.Equal("get_weather", calls[1].Name);
+        Assert.Equal("Tokyo", calls[1].Arguments?["city"]?.ToString());
+
+        // Make sure no stray tokens remained as text
+        var text = parsed.Contents.OfType<TextContent>().FirstOrDefault();
+        Assert.True(text == null || string.IsNullOrWhiteSpace(text.Text));
+    }
+
+    [Fact]
+    public void ParseAssistantResponse_ParsesRawCallSyntaxWithoutXmlTags()
+    {
+        var raw = "call:get_weather{city:<|\"|>London<|\"|>,unit:<|\"|>celsius<|\"|>}";
+
+        var parsed = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var call = parsed.Contents.OfType<FunctionCallContent>().FirstOrDefault();
+        Assert.NotNull(call);
+        Assert.Equal("get_weather", call.Name);
+        Assert.Equal("London", call.Arguments?["city"]?.ToString());
+        Assert.Equal("celsius", call.Arguments?["unit"]?.ToString());
+    }
+
+    [Fact]
     public void ParseAssistantResponse_FallbackJsonCodeBlock_ParsesFunctionCall()
     {
         var raw = "Here is the call:\n```json\n{\n  \"name\": \"calculate\",\n  \"arguments\": {\"expr\": \"10 * 10\"}\n}\n```";

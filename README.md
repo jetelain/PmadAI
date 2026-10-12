@@ -262,20 +262,26 @@ When reasoning is disabled (`enable = false` or `effort = none`), dialects pre-f
 
 ### 9. Tool Calling Benchmark Suite
 
-A standalone benchmarking tool is provided under `benchmarks/Pmad.AI.Benchmark` to showcase and validate tool calling with mocked multi-turn user interactions, measuring speed (tokens/sec), latency (ms), and function execution accuracy:
+A standalone benchmarking tool is provided under `benchmarks/Pmad.AI.Benchmark` to showcase and validate tool calling with mocked or real multi-turn user interactions, measuring speed (tokens/sec), latency (ms), function execution accuracy, RAM usage, and GPU VRAM via `nvidia-smi`:
 
 ```bash
 # 1. Run in mock simulation mode (validates all scenarios & reporting immediately without model weights):
 dotnet run --project benchmarks/Pmad.AI.Benchmark -- --mock
 
-# 2. Benchmark with reasoning effort override ('low', 'medium', 'high', 'none'):
-dotnet run --project benchmarks/Pmad.AI.Benchmark -- --mock --reasoning-effort low
+# 2. Compare CPU vs Vulkan GPU acceleration:
+dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --compare-backends
 
-# 3. Benchmark a specific preset with automated download and Markdown report export:
-dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --download --output benchmark_report.md
+# 3. Compare with vs without internal reasoning (measures thinking tokens overhead & speed impact):
+dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --compare-reasoning
 
-# 4. Benchmark all supported model presets:
-dotnet run --project benchmarks/Pmad.AI.Benchmark -- --all --download
+# 4. Full 2x2 comparison matrix (CPU vs Vulkan AND With vs Without reasoning):
+dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --compare-all -o benchmark_report.md
+
+# 5. Benchmark all presets across backends and export markdown & JSON reports:
+dotnet run --project benchmarks/Pmad.AI.Benchmark -- --all --compare-backends -o report.md -j report.json
+
+# 6. Benchmark all presets across backends, download models and export markdown (results in docs):
+dotnet run --project benchmarks/Pmad.AI.Benchmark -- --all --download --compare-all -o docs/benchmark.md -t docs/transcript.md
 ```
 
 Scenarios evaluated:
@@ -283,6 +289,10 @@ Scenarios evaluated:
 - **`calculator`**: Arithmetic calculation tool invocation (`calculate`) with monetary discount percentages.
 - **`support`**: Chained multi-turn pipeline (order lookup `lookup_order` -> shipment tracking `track_package`).
 - **`direct`**: Negative test verifying the model does *not* hallucinate unnecessary tool calls when direct answering is expected.
+
+Hardware & Memory Diagnostics:
+- Automatically offloads to Vulkan GPU when GPU layers > 0.
+- Queries `nvidia-smi` on NVIDIA systems to measure real-time GPU VRAM utilization and peak allocation alongside system process RAM.
 
 ---
 

@@ -53,6 +53,12 @@ public sealed class BenchmarkOptions
     public string? OutputJsonPath { get; set; }
 
     /// <summary>
+    /// Optional file path to export full turn-by-turn execution transcript and failure analysis.
+    /// Defaults to companion .transcript.md file when OutputMarkdownPath is provided.
+    /// </summary>
+    public string? OutputTranscriptPath { get; set; }
+
+    /// <summary>
     /// Reasoning effort level (e.g. "low", "medium", "high", "xhigh", "none").
     /// </summary>
     public string? ReasoningEffort { get; set; }
@@ -61,6 +67,26 @@ public sealed class BenchmarkOptions
     /// When set, explicitly enables or disables internal reasoning / chain-of-thought for models supporting it.
     /// </summary>
     public bool? EnableReasoning { get; set; }
+
+    /// <summary>
+    /// When true, executes each target both with and without reasoning enabled to compare impact on tokens, speed, and accuracy.
+    /// </summary>
+    public bool CompareReasoning { get; set; }
+
+    /// <summary>
+    /// Hardware backend to target: "cpu", "vulkan", or "all" (runs both CPU and Vulkan).
+    /// </summary>
+    public string? Backend { get; set; }
+
+    /// <summary>
+    /// When true, benchmarks each model target on both CPU (0 GPU layers) and Vulkan GPU acceleration.
+    /// </summary>
+    public bool CompareBackends { get; set; }
+
+    /// <summary>
+    /// When true, executes a full comparison matrix across both backends (CPU vs Vulkan) and reasoning states (With vs Without Reasoning).
+    /// </summary>
+    public bool CompareAll { get; set; }
 
     /// <summary>
     /// When true, outputs verbose logging including formatted prompts, raw generation chunks, and full turns.
@@ -109,6 +135,32 @@ public sealed class BenchmarkOptions
             {
                 options.ScenarioFilter = args[++i];
             }
+            else if (arg is "-b" or "--backend" or "--backends" && i + 1 < args.Length)
+            {
+                var val = args[++i];
+                if (val.Equals("all", StringComparison.OrdinalIgnoreCase) || val.Equals("compare", StringComparison.OrdinalIgnoreCase))
+                {
+                    options.CompareBackends = true;
+                }
+                else
+                {
+                    options.Backend = val;
+                }
+            }
+            else if (arg is "--compare-backends" or "--cpu-vs-vulkan" or "--vulkan-vs-cpu")
+            {
+                options.CompareBackends = true;
+            }
+            else if (arg is "--compare-reasoning" or "--reasoning-compare")
+            {
+                options.CompareReasoning = true;
+            }
+            else if (arg is "--compare-all" or "--matrix" or "--full-matrix")
+            {
+                options.CompareAll = true;
+                options.CompareBackends = true;
+                options.CompareReasoning = true;
+            }
             else if (arg is "-g" or "--gpu" && i + 1 < args.Length && int.TryParse(args[++i], out var gpu))
             {
                 options.GpuLayerCount = gpu;
@@ -124,6 +176,10 @@ public sealed class BenchmarkOptions
             else if (arg is "-j" or "--json" && i + 1 < args.Length)
             {
                 options.OutputJsonPath = args[++i];
+            }
+            else if (arg is "-t" or "--transcript" && i + 1 < args.Length)
+            {
+                options.OutputTranscriptPath = args[++i];
             }
             else if (arg is "-re" or "--reasoning-effort" or "--reasoning" && i + 1 < args.Length)
             {
@@ -141,6 +197,12 @@ public sealed class BenchmarkOptions
             {
                 options.Verbose = true;
             }
+        }
+
+        if (options.CompareAll)
+        {
+            options.CompareBackends = true;
+            options.CompareReasoning = true;
         }
 
         return options;
@@ -164,25 +226,42 @@ Options:
   -d, --download           Download models automatically if missing from local cache.
   --mock, --dry-run        Run with mock simulated chat client (showcases tool calling & metrics immediately).
   -s, --scenario <name>    Filter scenario to run: 'weather', 'calculator', 'support', 'direct', or 'all' (default: all).
-  -re, --reasoning-effort  Reasoning effort level ('low', 'medium', 'high', 'xhigh', 'none').
-  --no-reasoning           Explicitly disable reasoning / thinking tokens for reasoning models.
-  --enable-reasoning       Explicitly enable reasoning / thinking tokens.
+
+Hardware & Backend:
+  -b, --backend <name>     Backend to use: 'cpu', 'vulkan', or 'all' (default: vulkan if GPU layers > 0, else cpu).
+  --compare-backends       Run each model on both CPU (0 GPU layers) and Vulkan GPU acceleration.
   -g, --gpu <layers>       GPU layers to offload (default: 99; use 0 for CPU).
   -c, --context <tokens>   Context size (default: 8192).
+
+Reasoning:
+  --compare-reasoning      Run each model with and without reasoning enabled to compare speed & token overhead.
+  --enable-reasoning       Explicitly enable reasoning / thinking tokens for reasoning models.
+  --no-reasoning           Explicitly disable reasoning / thinking tokens for reasoning models.
+  -re, --reasoning-effort  Reasoning effort level ('low', 'medium', 'high', 'xhigh', 'none').
+
+Comparative Matrix:
+  --compare-all, --matrix  Full 2x2 comparison matrix: CPU vs Vulkan AND With vs Without reasoning.
+
+Reporting & Diagnostics:
   -o, --output <file>      Export benchmark report to a Markdown file.
+  -t, --transcript <file>  Export full turn-by-turn prompts, reasoning traces, tool inputs/outputs, and failure analysis to a Markdown file.
+                           (Defaults to <output>.transcript.md when -o is specified).
   -j, --json <file>        Export benchmark metrics to a JSON file.
   -v, --verbose            Print detailed turn-by-turn prompts, tool calls, and model outputs.
   -h, --help               Display this help message.
 
 Examples:
-  # Quick mock simulation showcasing all scenarios, tool calling loops, and metrics:
-  dotnet run --project benchmarks/Pmad.AI.Benchmark -- --mock
+  # Quick mock simulation comparing CPU vs Vulkan and with/without reasoning:
+  dotnet run --project benchmarks/Pmad.AI.Benchmark -- --mock --compare-all
 
-  # Benchmark a downloaded preset with CPU/GPU and generate a Markdown report:
-  dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --output report.md
+  # Compare a downloaded model on CPU vs Vulkan:
+  dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --compare-backends
 
-  # Download and benchmark all presets:
-  dotnet run --project benchmarks/Pmad.AI.Benchmark -- --all --download --output report.md
+  # Compare reasoning impact on a model and generate Markdown report:
+  dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --compare-reasoning -o report.md
+
+  # Full comparison matrix across all presets:
+  dotnet run --project benchmarks/Pmad.AI.Benchmark -- --all --compare-all -o full-report.md
 ");
     }
 }
