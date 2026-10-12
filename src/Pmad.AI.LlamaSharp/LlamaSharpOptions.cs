@@ -53,6 +53,11 @@ public sealed class LlamaSharpOptions
     public string PromptFormat { get; set; } = "chatml";
 
     /// <summary>
+    /// Optional chat prompt template dialect. When specified, overrides <see cref="PromptFormat"/>.
+    /// </summary>
+    public ChatDialect? Dialect { get; set; }
+
+    /// <summary>
     /// Default sampling temperature. Defaults to 0.7.
     /// </summary>
     public float DefaultTemperature { get; set; } = 0.7f;

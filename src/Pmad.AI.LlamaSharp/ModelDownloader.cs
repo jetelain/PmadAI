@@ -1,6 +1,33 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 
 namespace Pmad.AI.LlamaSharp;
+
+/// <summary>
+/// Represents the progress of a model or projector file download operation.
+/// </summary>
+/// <param name="BytesDownloaded">Total number of bytes transferred so far.</param>
+/// <param name="TotalBytes">Total content length in bytes, or null if unknown.</param>
+/// <param name="FileName">Name of the target file being downloaded, if available.</param>
+public readonly record struct ModelDownloadProgress(
+    long BytesDownloaded,
+    long? TotalBytes,
+    string? FileName = null)
+{
+    /// <summary>
+    /// Gets the completion percentage from 0.0 to 100.0, or null if total size is unknown.
+    /// </summary>
+    public double? ProgressPercentage => TotalBytes.HasValue && TotalBytes.Value > 0
+        ? (double)BytesDownloaded / TotalBytes.Value * 100.0
+        : null;
+
+    /// <summary>
+    /// Gets the completion fraction from 0.0 to 1.0, or null if total size is unknown.
+    /// </summary>
+    public double? ProgressFraction => TotalBytes.HasValue && TotalBytes.Value > 0
+        ? (double)BytesDownloaded / TotalBytes.Value
+        : null;
+}
 
 /// <summary>
 /// Downloads single-file GGUF models and vision projectors from remote HTTP endpoints into local model cache.
@@ -8,13 +35,27 @@ namespace Pmad.AI.LlamaSharp;
 public sealed class ModelDownloader
 {
     private readonly HttpClient _http;
+    private readonly ILogger? _logger;
+    private readonly Action<string>? _statusLogger;
+    private readonly IProgress<ModelDownloadProgress>? _progress;
 
     /// <summary>
     /// Initializes a new instance of <see cref="ModelDownloader"/>.
     /// </summary>
-    public ModelDownloader(HttpClient? http = null)
+    /// <param name="http">Optional custom <see cref="HttpClient"/>.</param>
+    /// <param name="logger">Optional <see cref="ILogger"/> for structured logging.</param>
+    /// <param name="statusLogger">Optional default status logger action invoked for progress text messages.</param>
+    /// <param name="progress">Optional default <see cref="IProgress{T}"/> reporter for transfer progress.</param>
+    public ModelDownloader(
+        HttpClient? http = null,
+        ILogger? logger = null,
+        Action<string>? statusLogger = null,
+        IProgress<ModelDownloadProgress>? progress = null)
     {
         _http = http ?? new HttpClient();
+        _logger = logger;
+        _statusLogger = statusLogger;
+        _progress = progress;
         if (!_http.DefaultRequestHeaders.UserAgent.Any())
         {
             _http.DefaultRequestHeaders.UserAgent.ParseAdd("Pmad.AI.LlamaSharp/1.0 (Local GGUF Engine)");
@@ -30,6 +71,7 @@ public sealed class ModelDownloader
         string destinationDir,
         bool downloadVision = true,
         Action<string>? statusLogger = null,
+        IProgress<ModelDownloadProgress>? progress = null,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(preset);
@@ -38,15 +80,15 @@ public sealed class ModelDownloader
         var targetFile = preset.GetLocalPath(destinationDir);
         var downloadUrl = preset.DownloadUrl;
 
-        statusLogger?.Invoke($"Preparing GGUF model '{preset.Id}' from {downloadUrl}...");
-        var success = await DownloadFileWithProgressAsync(downloadUrl, targetFile, statusLogger, ct).ConfigureAwait(false);
+        LogStatus($"Preparing GGUF model '{preset.Id}' from {downloadUrl}...", statusLogger);
+        var success = await DownloadFileWithProgressAsync(downloadUrl, targetFile, statusLogger, progress, ct).ConfigureAwait(false);
         if (!success) return false;
 
         if (downloadVision && preset.HasVision && !string.IsNullOrEmpty(preset.MmprojDownloadUrl))
         {
             var mmprojTarget = preset.GetMmprojLocalPath(destinationDir)!;
-            statusLogger?.Invoke($"Preparing vision projector for '{preset.Id}' from {preset.MmprojDownloadUrl}...");
-            await DownloadFileWithProgressAsync(preset.MmprojDownloadUrl, mmprojTarget, statusLogger, ct).ConfigureAwait(false);
+            LogStatus($"Preparing vision projector for '{preset.Id}' from {preset.MmprojDownloadUrl}...", statusLogger);
+            await DownloadFileWithProgressAsync(preset.MmprojDownloadUrl, mmprojTarget, statusLogger, progress, ct).ConfigureAwait(false);
         }
 
         return true;
@@ -60,6 +102,7 @@ public sealed class ModelDownloader
         string fileUrl,
         string localPath,
         Action<string>? statusLogger = null,
+        IProgress<ModelDownloadProgress>? progress = null,
         CancellationToken ct = default)
     {
         var localDir = Path.GetDirectoryName(localPath);
@@ -67,6 +110,9 @@ public sealed class ModelDownloader
         {
             Directory.CreateDirectory(localDir);
         }
+
+        var fileName = Path.GetFileName(localPath);
+        var effectiveProgress = progress ?? _progress;
 
         long? totalBytes = null;
         try
@@ -85,7 +131,8 @@ public sealed class ModelDownloader
 
         if (File.Exists(localPath) && totalBytes.HasValue && new FileInfo(localPath).Length == totalBytes.Value)
         {
-            statusLogger?.Invoke($"  -> Already downloaded ({FormatBytes(totalBytes.Value)}), skipping.");
+            LogStatus($"  -> Already downloaded ({FormatBytes(totalBytes.Value)}), skipping.", statusLogger);
+            effectiveProgress?.Report(new ModelDownloadProgress(totalBytes.Value, totalBytes.Value, fileName));
             return true;
         }
 
@@ -101,7 +148,8 @@ public sealed class ModelDownloader
         totalBytes ??= getRes.Content.Headers.ContentLength;
 
         var sizeStr = totalBytes.HasValue ? $" ({FormatBytes(totalBytes.Value)})" : "";
-        statusLogger?.Invoke($"  -> Fetching{sizeStr}...");
+        LogStatus($"  -> Fetching{sizeStr}...", statusLogger);
+        effectiveProgress?.Report(new ModelDownloadProgress(0, totalBytes, fileName));
 
         await using var contentStream = await getRes.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         await using var fileStream = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
@@ -109,7 +157,9 @@ public sealed class ModelDownloader
         var buffer = new byte[81920];
         long downloaded = 0;
         var sw = Stopwatch.StartNew();
+        var progressSw = Stopwatch.StartNew();
         long lastReportedBytes = 0;
+        long lastProgressBytes = 0;
         int bytesRead;
 
         while ((bytesRead = await contentStream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
@@ -117,16 +167,23 @@ public sealed class ModelDownloader
             await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), ct).ConfigureAwait(false);
             downloaded += bytesRead;
 
+            if (progressSw.ElapsedMilliseconds >= 250 || downloaded - lastProgressBytes >= 5 * 1024 * 1024)
+            {
+                effectiveProgress?.Report(new ModelDownloadProgress(downloaded, totalBytes, fileName));
+                lastProgressBytes = downloaded;
+                progressSw.Restart();
+            }
+
             if (downloaded - lastReportedBytes >= 50 * 1024 * 1024 || sw.ElapsedMilliseconds >= 3000)
             {
                 if (totalBytes.HasValue && totalBytes.Value > 0)
                 {
                     var pct = (double)downloaded / totalBytes.Value * 100.0;
-                    statusLogger?.Invoke($"     {FormatBytes(downloaded)} / {FormatBytes(totalBytes.Value)} ({pct:F1}%)");
+                    LogStatus($"     {FormatBytes(downloaded)} / {FormatBytes(totalBytes.Value)} ({pct:F1}%)", statusLogger);
                 }
                 else
                 {
-                    statusLogger?.Invoke($"     {FormatBytes(downloaded)} downloaded");
+                    LogStatus($"     {FormatBytes(downloaded)} downloaded", statusLogger);
                 }
                 lastReportedBytes = downloaded;
                 sw.Restart();
@@ -142,8 +199,15 @@ public sealed class ModelDownloader
         }
         File.Move(partPath, localPath);
 
-        statusLogger?.Invoke($"  -> Model saved: {Path.GetFileName(localPath)} ({FormatBytes(downloaded)})");
+        effectiveProgress?.Report(new ModelDownloadProgress(downloaded, totalBytes ?? downloaded, fileName));
+        LogStatus($"  -> Model saved: {fileName} ({FormatBytes(downloaded)})", statusLogger);
         return true;
+    }
+
+    private void LogStatus(string message, Action<string>? overrideStatusLogger)
+    {
+        (overrideStatusLogger ?? _statusLogger)?.Invoke(message);
+        _logger?.LogInformation("{Status}", message);
     }
 
     /// <summary>

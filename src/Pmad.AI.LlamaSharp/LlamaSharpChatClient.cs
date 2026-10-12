@@ -24,6 +24,7 @@ public sealed class LlamaSharpChatClient : IChatClient
 
     private readonly string _modelPath;
     private readonly LlamaSharpOptions _options;
+    private readonly ChatDialect _dialect;
     private readonly string _promptFormat;
     private readonly LLamaWeights _weights;
     private readonly LLamaContext _context;
@@ -106,6 +107,8 @@ public sealed class LlamaSharpChatClient : IChatClient
 
     /// <summary>
     /// Initializes a new instance of <see cref="LlamaSharpChatClient"/> from existing weights and context.
+    /// <summary>
+    /// Initializes a new instance of <see cref="LlamaSharpChatClient"/> from existing weights and context.
     /// </summary>
     public LlamaSharpChatClient(
         LLamaWeights weights,
@@ -116,12 +119,37 @@ public sealed class LlamaSharpChatClient : IChatClient
         MtmdWeights? clipModel = null,
         bool ownsWeights = false,
         ILogger? logger = null)
+        : this(
+            weights,
+            context,
+            modelPath,
+            options?.Dialect ?? ChatDialect.FromName(options?.PromptFormat ?? promptFormat),
+            options,
+            clipModel,
+            ownsWeights,
+            logger)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of <see cref="LlamaSharpChatClient"/> from existing weights and context using a specific <see cref="ChatDialect"/>.
+    /// </summary>
+    public LlamaSharpChatClient(
+        LLamaWeights weights,
+        LLamaContext context,
+        string modelPath,
+        ChatDialect dialect,
+        LlamaSharpOptions? options = null,
+        MtmdWeights? clipModel = null,
+        bool ownsWeights = false,
+        ILogger? logger = null)
     {
         _weights = weights ?? throw new ArgumentNullException(nameof(weights));
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _modelPath = modelPath;
         _options = options ?? new LlamaSharpOptions();
-        _promptFormat = promptFormat;
+        _dialect = dialect ?? _options.Dialect ?? ChatDialect.FromName(_options.PromptFormat);
+        _promptFormat = _dialect.Name;
         _clipModel = clipModel;
         _ownsWeights = ownsWeights;
 
@@ -148,6 +176,25 @@ public sealed class LlamaSharpChatClient : IChatClient
         LlamaSharpOptions? options = null,
         string? mmprojPath = null,
         string promptFormat = "chatml",
+        ILogger? logger = null)
+    {
+        return CreateFromFile(
+            modelPath,
+            options?.Dialect ?? ChatDialect.FromName(options?.PromptFormat ?? promptFormat),
+            options,
+            mmprojPath,
+            logger);
+    }
+
+    /// <summary>
+    /// Creates a self-contained <see cref="LlamaSharpChatClient"/> by loading model weights and context from file with a specific <see cref="ChatDialect"/>.
+    /// Disposing this client will unload native weights.
+    /// </summary>
+    public static LlamaSharpChatClient CreateFromFile(
+        string modelPath,
+        ChatDialect dialect,
+        LlamaSharpOptions? options = null,
+        string? mmprojPath = null,
         ILogger? logger = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modelPath);
@@ -194,12 +241,17 @@ public sealed class LlamaSharpChatClient : IChatClient
             weights,
             context,
             modelPath,
+            dialect,
             options,
-            promptFormat,
             clipModel,
             ownsWeights: true,
             logger: instanceLogger);
     }
+
+    /// <summary>
+    /// Gets the chat prompt template dialect configured for this client.
+    /// </summary>
+    public ChatDialect Dialect => _dialect;
 
     /// <inheritdoc />
     public ChatClientMetadata Metadata => new("llamasharp", new Uri($"file://{_modelPath}"), Path.GetFileName(_modelPath));
@@ -219,7 +271,7 @@ public sealed class LlamaSharpChatClient : IChatClient
                     "Ensure an mmproj-*.gguf file is available.");
             }
 
-            var promptText = LocalModelChatFormatter.FormatPrompt(messages, _promptFormat, options?.Tools);
+            var promptText = _dialect.FormatPrompt(messages, options?.Tools);
             int inputTokens = _context.Tokenize(promptText).Length;
 
             _logger.LogDebug("Starting completion for model '{ModelPath}'. Prompt length: {PromptLength} chars, Tokens: {InputTokens}",
@@ -233,7 +285,7 @@ public sealed class LlamaSharpChatClient : IChatClient
                 {
                     Temperature = (float)(options?.Temperature ?? _options.DefaultTemperature)
                 },
-                AntiPrompts = new List<string> { "<|im_end|>", "<|end|>", "<turn|>" },
+                AntiPrompts = _dialect.StopTokens.ToList(),
                 OverflowStrategy = ContextOverflowStrategy.TruncateAndReprefill
             };
 
@@ -264,7 +316,7 @@ public sealed class LlamaSharpChatClient : IChatClient
                 }
 
                 var text = responseBuilder.ToString().Trim();
-                var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(text, _options.FunctionCallNormalizer);
+                var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(text, _dialect, _options.FunctionCallNormalizer);
 
                 _logger.LogDebug("Completed inference. Output tokens: {OutputTokens}, Total tokens: {TotalTokens}",
                     outputTokenCount, inputTokens + outputTokenCount);
@@ -304,7 +356,7 @@ public sealed class LlamaSharpChatClient : IChatClient
                 "Ensure an mmproj-*.gguf file is available.");
         }
 
-        var promptText = LocalModelChatFormatter.FormatPrompt(messages, _promptFormat, options?.Tools);
+        var promptText = _dialect.FormatPrompt(messages, options?.Tools);
         int maxOutputTokens = options?.MaxOutputTokens ?? _options.DefaultMaxOutputTokens;
         var inferenceParams = new InferenceParams
         {
@@ -313,7 +365,7 @@ public sealed class LlamaSharpChatClient : IChatClient
             {
                 Temperature = (float)(options?.Temperature ?? _options.DefaultTemperature)
             },
-            AntiPrompts = new List<string> { "<|im_end|>", "<|end|>", "<turn|>" },
+            AntiPrompts = _dialect.StopTokens.ToList(),
             OverflowStrategy = ContextOverflowStrategy.TruncateAndReprefill
         };
 
@@ -361,7 +413,7 @@ public sealed class LlamaSharpChatClient : IChatClient
 
         if (hasTools)
         {
-            var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(responseBuilder.ToString().Trim(), _options.FunctionCallNormalizer);
+            var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(responseBuilder.ToString().Trim(), _dialect, _options.FunctionCallNormalizer);
             yield return new ChatResponseUpdate
             {
                 Role = ChatRole.Assistant,

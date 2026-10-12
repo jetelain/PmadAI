@@ -270,4 +270,85 @@ public class ModelDownloaderTests
             }
         }
     }
+
+    [Fact]
+    public async Task DownloadModelAsync_WithConstructorLoggerAndProgress_ReportsAll()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "test_download_" + Guid.NewGuid().ToString("N"));
+        var preset = LlamaModelPreset.Default;
+        var modelData = Encoding.UTF8.GetBytes("MODEL_TEST_DATA");
+
+        var constructorLogs = new List<string>();
+        var progressUpdates = new List<ModelDownloadProgress>();
+        var progressReporter = new Progress<ModelDownloadProgress>(progressUpdates.Add);
+
+        var handler = new MockHttpMessageHandler(req =>
+        {
+            if (req.Method == HttpMethod.Head)
+            {
+                var headRes = new HttpResponseMessage(HttpStatusCode.OK);
+                headRes.Content = new ByteArrayContent([]);
+                headRes.Content.Headers.ContentLength = modelData.Length;
+                return headRes;
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(modelData)
+            };
+        });
+
+        using var client = new HttpClient(handler);
+        var downloader = new ModelDownloader(
+            http: client,
+            logger: null,
+            statusLogger: constructorLogs.Add,
+            progress: progressReporter);
+
+        try
+        {
+            var success = await downloader.DownloadModelAsync(
+                preset,
+                tempDir,
+                downloadVision: false);
+
+            Assert.True(success);
+            Assert.NotEmpty(constructorLogs);
+            Assert.Contains(constructorLogs, l => l.Contains("Preparing GGUF model"));
+            Assert.Contains(constructorLogs, l => l.Contains("Model saved"));
+
+            Assert.NotEmpty(progressUpdates);
+            var lastProgress = progressUpdates[^1];
+            Assert.Equal(modelData.Length, lastProgress.BytesDownloaded);
+            Assert.Equal(modelData.Length, lastProgress.TotalBytes);
+            Assert.Equal(100.0, lastProgress.ProgressPercentage);
+            Assert.Equal(1.0, lastProgress.ProgressFraction);
+            Assert.Equal(preset.FileName, lastProgress.FileName);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void ModelDownloadProgress_CalculatesPercentageAndFractionCorrectly()
+    {
+        var progress1 = new ModelDownloadProgress(500, 1000, "test.gguf");
+        Assert.Equal(50.0, progress1.ProgressPercentage);
+        Assert.Equal(0.5, progress1.ProgressFraction);
+        Assert.Equal("test.gguf", progress1.FileName);
+
+        var progressUnknown = new ModelDownloadProgress(500, null, "test.gguf");
+        Assert.Null(progressUnknown.ProgressPercentage);
+        Assert.Null(progressUnknown.ProgressFraction);
+
+        var progressZero = new ModelDownloadProgress(0, 0, "empty.gguf");
+        Assert.Null(progressZero.ProgressPercentage);
+        Assert.Null(progressZero.ProgressFraction);
+    }
 }
+

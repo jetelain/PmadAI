@@ -159,12 +159,17 @@ var preset = LlamaModelPreset.Find("qwen3.5-2b") ?? LlamaModelPreset.Default;
 var modelsDir = LocalModelPathResolver.ResolveModelsDirectory(null);
 
 // 3. Download weights and companion vision projector with progress updates
-var downloader = new ModelDownloader();
+var progress = new Progress<ModelDownloadProgress>(p =>
+{
+    if (p.ProgressPercentage.HasValue)
+        Console.WriteLine($"Downloading {p.FileName}: {p.ProgressPercentage:F1}%");
+});
+
+var downloader = new ModelDownloader(statusLogger: Console.WriteLine, progress: progress);
 await downloader.DownloadModelAsync(
     preset,
     destinationDir: modelsDir,
-    downloadVision: true,
-    statusLogger: Console.WriteLine);
+    downloadVision: true);
 
 // 4. Instantiate client with resolved local paths
 using var chatClient = LlamaSharpChatClient.CreateFromFile(
@@ -192,6 +197,32 @@ var options = new LlamaSharpOptions
 };
 
 using var chatClient = LlamaSharpChatClient.CreateFromFile("models/qwen3.5-2b-ud-q4_k_xl.gguf", options);
+```
+
+### 7. Prompt Formatting & Chat Dialects
+
+Prompt formatting uses polymorphic dialects (`ChatDialect`) to cleanly handle model-specific template tokens, stop tokens, tool call wrapping, and generation prompts:
+
+- `ChatMLDialect` (`ChatDialect.ChatML`): For Qwen 3.5, Hermes, and standard ChatML fine-tunes (`<|im_start|>`, `<|im_end|>`).
+- `Phi3Dialect` (`ChatDialect.Phi3`): For Microsoft Phi-3 and Phi-3.5 models (`<|system|>`, `<|user|>`, `<|assistant|>`, `<|end|>`).
+- `Gemma4Dialect` (`ChatDialect.Gemma4`): For Google Gemma 4 models (`<|turn|>system`, `<|turn|>model`, `<turn|>`).
+
+```csharp
+// Format prompts directly using strongly-typed dialect singletons
+var promptChatml = ChatDialect.ChatML.FormatPrompt(messages, tools);
+var promptPhi3   = ChatDialect.Phi3.FormatPrompt(messages, tools);
+var promptGemma  = ChatDialect.Gemma4.FormatPrompt(messages, tools);
+
+// Resolve dialect dynamically by format name
+var dialect = ChatDialect.FromName("phi3"); // Returns Phi3Dialect.Instance
+
+// Pass dialect directly to LlamaSharpChatClient
+using var chatClient = LlamaSharpChatClient.CreateFromFile(
+    modelPath: "models/phi-3-mini.gguf",
+    dialect: ChatDialect.Phi3);
+
+// Custom dialects can be added by subclassing ChatDialect
+public sealed class CustomDialect : ChatDialect { ... }
 ```
 
 ---

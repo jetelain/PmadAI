@@ -12,6 +12,13 @@ namespace Pmad.AI.LlamaSharp;
 /// </summary>
 public static class LocalModelChatFormatter
 {
+    private static readonly string[] _allStopTokens = ["<|im_end|>", "<|end|>", "<turn|>"];
+
+    /// <summary>
+    /// Resolves a <see cref="ChatDialect"/> by format name, falling back to <see cref="ChatDialect.Default"/> if null or unknown.
+    /// </summary>
+    public static ChatDialect GetDialect(string? format) => ChatDialect.FromName(format);
+
     /// <summary>
     /// Formats a conversation into a single prompt string matching the target model's template,
     /// injecting tool signatures into the system prompt when tools are provided.
@@ -21,248 +28,36 @@ public static class LocalModelChatFormatter
         string format = "chatml",
         IList<AITool>? tools = null)
     {
-        var sb = new StringBuilder();
-        var msgList = messages.ToList();
+        var dialect = ChatDialect.FromName(format);
+        return dialect.FormatPrompt(messages, tools);
+    }
 
-        var functions = tools?.OfType<AIFunction>().ToList();
-        var hasTools = functions != null && functions.Count > 0;
-        string toolsDefinitionBlock = string.Empty;
-
-        if (hasTools)
-        {
-            var toolsSb = new StringBuilder();
-            foreach (var fn in functions!)
-            {
-                object parametersObj = new Dictionary<string, object?>
-                {
-                    ["type"] = "object",
-                    ["properties"] = new Dictionary<string, object?>()
-                };
-
-                if (fn.JsonSchema.ValueKind == JsonValueKind.Object)
-                {
-                    parametersObj = fn.JsonSchema;
-                }
-
-                var toolObj = new Dictionary<string, object?>
-                {
-                    ["type"] = "function",
-                    ["function"] = new Dictionary<string, object?>
-                    {
-                        ["name"] = fn.Name,
-                        ["description"] = fn.Description ?? string.Empty,
-                        ["parameters"] = parametersObj
-                    }
-                };
-
-                toolsSb.Append('\n').Append(JsonSerializer.Serialize(toolObj));
-            }
-
-            toolsDefinitionBlock = "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>" +
-                toolsSb.ToString() +
-                "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>";
-        }
-
-        var isPhi3 = format.Equals("phi3", StringComparison.OrdinalIgnoreCase);
-        var isGemma4 = format.Equals("gemma4", StringComparison.OrdinalIgnoreCase);
-
-        int firstSystemIndex = -1;
-        for (int i = 0; i < msgList.Count; i++)
-        {
-            if (msgList[i].Role == ChatRole.System)
-            {
-                firstSystemIndex = i;
-                break;
-            }
-        }
-
-        // Render system prompt block
-        if (hasTools)
-        {
-            var baseSystemText = firstSystemIndex >= 0 ? GetMessageText(msgList[firstSystemIndex]) : "You are a helpful assistant.";
-            var combinedSystemText = $"{baseSystemText}{toolsDefinitionBlock}";
-
-            if (isPhi3)
-            {
-                sb.Append($"<|system|>\n{combinedSystemText}<|end|>\n");
-            }
-            else if (isGemma4)
-            {
-                sb.Append($"<|turn|>system\n{combinedSystemText}<turn|>\n");
-            }
-            else
-            {
-                sb.Append($"<|im_start|>system\n{combinedSystemText}<|im_end|>\n");
-            }
-        }
-        else if (firstSystemIndex >= 0)
-        {
-            var text = GetMessageText(msgList[firstSystemIndex]);
-            if (isPhi3)
-            {
-                sb.Append($"<|system|>\n{text}<|end|>\n");
-            }
-            else if (isGemma4)
-            {
-                sb.Append($"<|turn|>system\n{text}<turn|>\n");
-            }
-            else
-            {
-                sb.Append($"<|im_start|>system\n{text}<|im_end|>\n");
-            }
-        }
-
-        // Render conversation history
-        for (int i = 0; i < msgList.Count; i++)
-        {
-            var m = msgList[i];
-
-            if (m.Role == ChatRole.System)
-            {
-                if (i == firstSystemIndex) continue;
-
-                var text = GetMessageText(m);
-                if (isPhi3)
-                {
-                    sb.Append($"<|system|>\n{text}<|end|>\n");
-                }
-                else if (isGemma4)
-                {
-                    sb.Append($"<|turn|>system\n{text}<turn|>\n");
-                }
-                else
-                {
-                    sb.Append($"<|im_start|>system\n{text}<|im_end|>\n");
-                }
-            }
-            else if (m.Role == ChatRole.User)
-            {
-                var text = GetMessageText(m);
-                if (isPhi3)
-                {
-                    sb.Append($"<|user|>\n{text}<|end|>\n");
-                }
-                else if (isGemma4)
-                {
-                    sb.Append($"<|turn|>user\n{text}<turn|>\n");
-                }
-                else
-                {
-                    sb.Append($"<|im_start|>user\n{text}<|im_end|>\n");
-                }
-            }
-            else if (m.Role == ChatRole.Assistant)
-            {
-                var text = GetMessageText(m);
-                var toolCalls = m.Contents?.OfType<FunctionCallContent>().ToList();
-
-                if (isPhi3)
-                {
-                    sb.Append("<|assistant|>");
-                    if (!string.IsNullOrWhiteSpace(text)) sb.Append('\n').Append(text);
-                    if (toolCalls is { Count: > 0 })
-                    {
-                        foreach (var call in toolCalls)
-                        {
-                            var argsJson = call.Arguments != null ? JsonSerializer.Serialize(call.Arguments) : "{}";
-                            sb.Append($"\n<tool_call>\n{{\"name\": \"{call.Name}\", \"arguments\": {argsJson}}}\n</tool_call>");
-                        }
-                    }
-                    sb.Append("<|end|>\n");
-                }
-                else if (isGemma4)
-                {
-                    sb.Append("<|turn|>model");
-                    if (!string.IsNullOrWhiteSpace(text)) sb.Append('\n').Append(text);
-                    if (toolCalls is { Count: > 0 })
-                    {
-                        foreach (var call in toolCalls)
-                        {
-                            var argsJson = call.Arguments != null ? JsonSerializer.Serialize(call.Arguments) : "{}";
-                            sb.Append($"\n<tool_call>\n{{\"name\": \"{call.Name}\", \"arguments\": {argsJson}}}\n</tool_call>");
-                        }
-                    }
-                    sb.Append("<turn|>\n");
-                }
-                else
-                {
-                    sb.Append("<|im_start|>assistant");
-                    if (!string.IsNullOrWhiteSpace(text)) sb.Append('\n').Append(text);
-                    if (toolCalls is { Count: > 0 })
-                    {
-                        foreach (var call in toolCalls)
-                        {
-                            var argsJson = call.Arguments != null ? JsonSerializer.Serialize(call.Arguments) : "{}";
-                            sb.Append($"\n<tool_call>\n{{\"name\": \"{call.Name}\", \"arguments\": {argsJson}}}\n</tool_call>");
-                        }
-                    }
-                    sb.Append("<|im_end|>\n");
-                }
-            }
-            else if (m.Role == ChatRole.Tool)
-            {
-                var isFirstToolInGroup = i == 0 || msgList[i - 1].Role != ChatRole.Tool;
-                var isLastToolInGroup = i == msgList.Count - 1 || msgList[i + 1].Role != ChatRole.Tool;
-
-                var result = m.Contents?.OfType<FunctionResultContent>().FirstOrDefault();
-                string toolContent;
-                if (result != null)
-                {
-                    toolContent = result.Result switch
-                    {
-                        null => string.Empty,
-                        string s => s,
-                        JsonElement je => je.GetRawText(),
-                        _ => JsonSerializer.Serialize(result.Result)
-                    };
-                }
-                else
-                {
-                    toolContent = GetMessageText(m) ?? string.Empty;
-                }
-
-                if (isPhi3)
-                {
-                    if (isFirstToolInGroup) sb.Append("<|user|>");
-                    sb.Append($"\n<tool_response>\n{toolContent}\n</tool_response>");
-                    if (isLastToolInGroup) sb.Append("<|end|>\n");
-                }
-                else if (isGemma4)
-                {
-                    if (isFirstToolInGroup) sb.Append("<|turn|>user");
-                    sb.Append($"\n<tool_response>\n{toolContent}\n</tool_response>");
-                    if (isLastToolInGroup) sb.Append("<turn|>\n");
-                }
-                else
-                {
-                    if (isFirstToolInGroup) sb.Append("<|im_start|>user");
-                    sb.Append($"\n<tool_response>\n{toolContent}\n</tool_response>");
-                    if (isLastToolInGroup) sb.Append("<|im_end|>\n");
-                }
-            }
-        }
-
-        // Add generation prompt
-        if (isPhi3)
-        {
-            sb.Append("<|assistant|>\n");
-        }
-        else if (isGemma4)
-        {
-            sb.Append("<|turn|>model\n");
-        }
-        else
-        {
-            sb.Append("<|im_start|>assistant\n");
-        }
-
-        return sb.ToString();
+    /// <summary>
+    /// Formats a conversation into a single prompt string matching the specified dialect,
+    /// injecting tool signatures into the system prompt when tools are provided.
+    /// </summary>
+    public static string FormatPrompt(
+        IEnumerable<ChatMessage> messages,
+        ChatDialect dialect,
+        IList<AITool>? tools = null)
+    {
+        ArgumentNullException.ThrowIfNull(dialect);
+        return dialect.FormatPrompt(messages, tools);
     }
 
     /// <summary>
     /// Parses raw assistant output into structured contents: reasoning traces, tool calls, and text.
     /// </summary>
     public static ChatMessage ParseAssistantResponse(string rawText, FunctionCallNormalizer? normalizer = null)
+    {
+        return ParseAssistantResponse(rawText, dialect: null, normalizer: normalizer);
+    }
+
+    /// <summary>
+    /// Parses raw assistant output into structured contents: reasoning traces, tool calls, and text,
+    /// using the specified dialect to strip dialect-specific stop tokens.
+    /// </summary>
+    public static ChatMessage ParseAssistantResponse(string rawText, ChatDialect? dialect, FunctionCallNormalizer? normalizer = null)
     {
         if (string.IsNullOrWhiteSpace(rawText))
         {
@@ -291,7 +86,7 @@ public static class LocalModelChatFormatter
             var callBlock = match.Groups[1].Value.Trim();
             if (string.IsNullOrWhiteSpace(callBlock)) continue;
 
-            callBlock = callBlock.Replace("<|im_end|>", "").Replace("<|end|>", "").Replace("<turn|>", "").Trim();
+            callBlock = StripStrayTokens(callBlock, dialect);
             var parsed = TryParseFunctionCall(callBlock, normalizer);
             if (parsed != null)
             {
@@ -322,7 +117,7 @@ public static class LocalModelChatFormatter
         }
 
         // 4. Strip stray chatml / template end tokens
-        text = text.Replace("<|im_end|>", "").Replace("<|end|>", "").Replace("<turn|>", "").Trim();
+        text = StripStrayTokens(text, dialect);
 
         // 5. Add remaining text if non-empty
         if (!string.IsNullOrWhiteSpace(text))
@@ -336,6 +131,20 @@ public static class LocalModelChatFormatter
         }
 
         return new ChatMessage(ChatRole.Assistant, contents);
+    }
+
+    private static string StripStrayTokens(string text, ChatDialect? dialect)
+    {
+        if (dialect != null)
+        {
+            text = dialect.StripStopTokens(text);
+        }
+
+        foreach (var stopToken in _allStopTokens)
+        {
+            text = text.Replace(stopToken, string.Empty);
+        }
+        return text.Trim();
     }
 
     /// <summary>
@@ -459,7 +268,10 @@ public static class LocalModelChatFormatter
         };
     }
 
-    private static string? GetMessageText(ChatMessage message)
+    /// <summary>
+    /// Helper to extract text from a chat message.
+    /// </summary>
+    public static string? GetMessageText(ChatMessage message)
     {
         if (!string.IsNullOrWhiteSpace(message.Text))
         {
