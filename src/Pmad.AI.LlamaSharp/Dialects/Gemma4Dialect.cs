@@ -19,7 +19,7 @@ public class Gemma4Dialect : ChatDialect
     public override string Name => "gemma4";
 
     /// <inheritdoc />
-    public override IReadOnlyList<string> StopTokens { get; } = ["<turn|>"];
+    public override IReadOnlyList<string> StopTokens { get; } = ["<turn|>", "<end_of_turn>"];
 
     /// <inheritdoc />
     public override void RenderSystemMessage(StringBuilder sb, string content)

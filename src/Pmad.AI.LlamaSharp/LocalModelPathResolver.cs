@@ -14,8 +14,9 @@ public static class LocalModelPathResolver
     /// </summary>
     public static string GetDefaultModelsDirectory(string appName = "pmad")
     {
+        var effectiveAppName = string.IsNullOrWhiteSpace(appName) ? "pmad" : appName.Trim();
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var homeModels = Path.Combine(home, $".{appName.ToLowerInvariant()}", "models");
+        var homeModels = Path.Combine(home, $".{effectiveAppName.ToLowerInvariant()}", "models");
         if (Directory.Exists(homeModels))
         {
             return homeModels;
@@ -28,13 +29,13 @@ public static class LocalModelPathResolver
             {
                 localAppData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             }
-            return Path.Combine(localAppData, appName, "models");
+            return Path.Combine(localAppData, effectiveAppName, "models");
         }
 
         var xdgData = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
         if (!string.IsNullOrWhiteSpace(xdgData))
         {
-            return Path.Combine(xdgData.Trim(), appName.ToLowerInvariant(), "models");
+            return Path.Combine(xdgData.Trim(), effectiveAppName.ToLowerInvariant(), "models");
         }
 
         return homeModels;

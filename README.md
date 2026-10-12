@@ -104,7 +104,7 @@ var options = new ChatOptions
 var response = await chatClient.GetResponseAsync("What's the weather in Paris?", options);
 
 // Inspect assistant contents (which may contain TextReasoningContent, FunctionCallContent, and TextContent)
-foreach (var content in response.Choices[0].Message.Contents)
+foreach (var content in response.Messages[0].Contents)
 {
     if (content is FunctionCallContent toolCall)
     {
@@ -136,7 +136,7 @@ var imageBytes = await File.ReadAllBytesAsync("diagram.png");
 var messages = new List<ChatMessage>
 {
     new(ChatRole.User, [
-        new ImageContent(imageBytes, "image/png"),
+        new DataContent(imageBytes, "image/png"),
         new TextContent("Describe what is shown in this image.")
     ])
 };

@@ -31,7 +31,9 @@ public class LlamaModelPresetTests
     [InlineData("gemma4-e2b", "gemma-4-e2b")]
     [InlineData("gemma-4-e2b-it", "gemma-4-e2b")]
     [InlineData("gemma4", "gemma-4-e2b")]
+    [InlineData("gemma-4", "gemma-4-e2b")]
     [InlineData("gemma4-e4b", "gemma-4-e4b")]
+    [InlineData("gemma-4b", "gemma-4-e4b")]
     public void Find_ByAlias_ReturnsExpectedPreset(string query, string expectedId)
     {
         var preset = LlamaModelPreset.Find(query);

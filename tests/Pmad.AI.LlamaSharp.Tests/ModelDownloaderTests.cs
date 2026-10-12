@@ -350,5 +350,127 @@ public class ModelDownloaderTests
         Assert.Null(progressZero.ProgressPercentage);
         Assert.Null(progressZero.ProgressFraction);
     }
+
+    [Fact]
+    public async Task ModelDownloader_WithActiveHttpClient_DoesNotThrowOnConstructor()
+    {
+        var handler = new MockHttpMessageHandler(req => new HttpResponseMessage(HttpStatusCode.OK));
+        using var client = new HttpClient(handler);
+
+        // Make an initial request to put client into active/started state
+        await client.GetAsync("https://example.com/init");
+
+        // Should not throw InvalidOperationException when instantiated with an already active client
+        var downloader = new ModelDownloader(client);
+        Assert.NotNull(downloader);
+    }
+
+    [Fact]
+    public async Task DownloadFileWithProgressAsync_WhenHeadFails_ButGetMatchesLength_SkipsDownload()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "test_download_" + Guid.NewGuid().ToString("N"));
+        var targetFile = Path.Combine(tempDir, "existing_head_fail.gguf");
+        var fileContent = Encoding.UTF8.GetBytes("EXISTING_CONTENT_FOR_HEAD_FAIL_TEST");
+
+        Directory.CreateDirectory(tempDir);
+        await File.WriteAllBytesAsync(targetFile, fileContent);
+
+        var logs = new List<string>();
+        var getStreamRead = false;
+
+        var handler = new MockHttpMessageHandler(req =>
+        {
+            if (req.Method == HttpMethod.Head)
+            {
+                // Simulate server that does not support HEAD
+                return new HttpResponseMessage(HttpStatusCode.MethodNotAllowed);
+            }
+            if (req.Method == HttpMethod.Get)
+            {
+                var stream = new MemoryStream(fileContent);
+                var response = new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StreamContent(stream)
+                };
+                response.Content.Headers.ContentLength = fileContent.Length;
+                getStreamRead = true;
+                return response;
+            }
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        });
+
+        using var client = new HttpClient(handler);
+        var downloader = new ModelDownloader(client);
+
+        try
+        {
+            var success = await downloader.DownloadFileWithProgressAsync(
+                "https://example.com/existing_head_fail.gguf",
+                targetFile,
+                statusLogger: logs.Add);
+
+            Assert.True(success);
+            Assert.True(getStreamRead);
+            Assert.Contains(logs, l => l.Contains("Already downloaded"));
+            // Shouldn't create .part file
+            Assert.False(File.Exists(targetFile + ".part"));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task DownloadModelAsync_WhenMmprojDownloadFails_ReturnsFalse()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "test_download_" + Guid.NewGuid().ToString("N"));
+        var preset = LlamaModelPreset.Default;
+        var modelData = Encoding.UTF8.GetBytes("MODEL_DATA");
+
+        var handler = new MockHttpMessageHandler(req =>
+        {
+            var url = req.RequestUri?.ToString() ?? "";
+            if (url.Contains("mmproj"))
+            {
+                // Projector download fails
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+
+            if (req.Method == HttpMethod.Head)
+            {
+                var res = new HttpResponseMessage(HttpStatusCode.OK);
+                res.Content = new ByteArrayContent([]);
+                res.Content.Headers.ContentLength = modelData.Length;
+                return res;
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(modelData)
+            };
+        });
+
+        using var client = new HttpClient(handler);
+        var downloader = new ModelDownloader(client);
+
+        try
+        {
+            await Assert.ThrowsAsync<HttpRequestException>(async () =>
+            {
+                await downloader.DownloadModelAsync(preset, tempDir, downloadVision: true);
+            });
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
 }
 

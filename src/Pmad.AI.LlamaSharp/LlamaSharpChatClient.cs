@@ -25,7 +25,7 @@ public sealed class LlamaSharpChatClient : IChatClient
     private readonly string _modelPath;
     private readonly LlamaSharpOptions _options;
     private readonly ChatDialect _dialect;
-    private readonly string _promptFormat;
+    private readonly ChatClientMetadata _metadata;
     private readonly LLamaWeights _weights;
     private readonly LLamaContext _context;
     private readonly MtmdWeights? _clipModel;
@@ -107,8 +107,6 @@ public sealed class LlamaSharpChatClient : IChatClient
 
     /// <summary>
     /// Initializes a new instance of <see cref="LlamaSharpChatClient"/> from existing weights and context.
-    /// <summary>
-    /// Initializes a new instance of <see cref="LlamaSharpChatClient"/> from existing weights and context.
     /// </summary>
     public LlamaSharpChatClient(
         LLamaWeights weights,
@@ -123,7 +121,7 @@ public sealed class LlamaSharpChatClient : IChatClient
             weights,
             context,
             modelPath,
-            options?.Dialect ?? ChatDialect.FromName(options?.PromptFormat ?? promptFormat),
+            options?.Dialect ?? (promptFormat != "chatml" ? ChatDialect.FromName(promptFormat) : ChatDialect.FromName(options?.PromptFormat ?? promptFormat)),
             options,
             clipModel,
             ownsWeights,
@@ -149,9 +147,11 @@ public sealed class LlamaSharpChatClient : IChatClient
         _modelPath = modelPath;
         _options = options ?? new LlamaSharpOptions();
         _dialect = dialect ?? _options.Dialect ?? ChatDialect.FromName(_options.PromptFormat);
-        _promptFormat = _dialect.Name;
         _clipModel = clipModel;
         _ownsWeights = ownsWeights;
+
+        var modelUri = new Uri(Path.GetFullPath(modelPath));
+        _metadata = new ChatClientMetadata("llamasharp", modelUri, Path.GetFileName(modelPath));
 
         _logger = logger
             ?? _options.Logger
@@ -180,9 +180,32 @@ public sealed class LlamaSharpChatClient : IChatClient
     {
         return CreateFromFile(
             modelPath,
-            options?.Dialect ?? ChatDialect.FromName(options?.PromptFormat ?? promptFormat),
+            options?.Dialect ?? (promptFormat != "chatml" ? ChatDialect.FromName(promptFormat) : ChatDialect.FromName(options?.PromptFormat ?? promptFormat)),
             options,
             mmprojPath,
+            logger);
+    }
+
+    /// <summary>
+    /// Creates a self-contained <see cref="LlamaSharpChatClient"/> configured from <see cref="LlamaSharpOptions"/>.
+    /// Requires <see cref="LlamaSharpOptions.ModelPath"/> to be set.
+    /// Disposing this client will unload native weights.
+    /// </summary>
+    public static LlamaSharpChatClient CreateFromOptions(
+        LlamaSharpOptions options,
+        ILogger? logger = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (string.IsNullOrWhiteSpace(options.ModelPath))
+        {
+            throw new ArgumentException("ModelPath must be configured on LlamaSharpOptions.", nameof(options));
+        }
+
+        return CreateFromFile(
+            options.ModelPath,
+            options.Dialect ?? ChatDialect.FromName(options.PromptFormat),
+            options,
+            options.MmprojPath,
             logger);
     }
 
@@ -224,16 +247,17 @@ public sealed class LlamaSharpChatClient : IChatClient
         var context = weights.CreateContext(modelParams);
 
         MtmdWeights? clipModel = null;
-        if (!string.IsNullOrWhiteSpace(mmprojPath) && File.Exists(mmprojPath))
+        var effectiveMmprojPath = mmprojPath ?? options.MmprojPath;
+        if (!string.IsNullOrWhiteSpace(effectiveMmprojPath) && File.Exists(effectiveMmprojPath))
         {
             try
             {
-                instanceLogger.LogInformation("Loading multimodal projector from '{MmprojPath}'", mmprojPath);
-                clipModel = MtmdWeights.LoadFromFile(mmprojPath, weights, MtmdContextParams.Default());
+                instanceLogger.LogInformation("Loading multimodal projector from '{MmprojPath}'", effectiveMmprojPath);
+                clipModel = MtmdWeights.LoadFromFile(effectiveMmprojPath, weights, MtmdContextParams.Default());
             }
             catch (Exception ex)
             {
-                instanceLogger.LogWarning(ex, "Failed to load multimodal projector '{MmprojPath}': {Message}", mmprojPath, ex.Message);
+                instanceLogger.LogWarning(ex, "Failed to load multimodal projector '{MmprojPath}': {Message}", effectiveMmprojPath, ex.Message);
             }
         }
 
@@ -254,7 +278,7 @@ public sealed class LlamaSharpChatClient : IChatClient
     public ChatDialect Dialect => _dialect;
 
     /// <inheritdoc />
-    public ChatClientMetadata Metadata => new("llamasharp", new Uri($"file://{_modelPath}"), Path.GetFileName(_modelPath));
+    public ChatClientMetadata Metadata => _metadata;
 
     /// <inheritdoc />
     public async Task<ChatResponse> GetResponseAsync(
@@ -262,6 +286,13 @@ public sealed class LlamaSharpChatClient : IChatClient
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (_options.RequestTimeoutMinutes > 0)
+        {
+            timeoutCts.CancelAfter(TimeSpan.FromMinutes(_options.RequestTimeoutMinutes));
+        }
+        var ct = timeoutCts.Token;
+
         return await Task.Run(async () =>
         {
             if (HasImageContent(messages) && _clipModel == null)
@@ -274,7 +305,7 @@ public sealed class LlamaSharpChatClient : IChatClient
             var promptText = _dialect.FormatPrompt(messages, options?.Tools);
             int inputTokens = _context.Tokenize(promptText).Length;
 
-            _logger.LogDebug("Starting completion for model '{ModelPath}'. Prompt length: {PromptLength} chars, Tokens: {InputTokens}",
+            LogOperation("Starting completion for model '{ModelPath}'. Prompt length: {PromptLength} chars, Tokens: {InputTokens}",
                 _modelPath, promptText.Length, inputTokens);
 
             int maxOutputTokens = options?.MaxOutputTokens ?? _options.DefaultMaxOutputTokens;
@@ -297,10 +328,10 @@ public sealed class LlamaSharpChatClient : IChatClient
 
                 if (embeds.Count > 0 && _clipModel != null)
                 {
-                    _logger.LogDebug("Executing multimodal inference with {EmbedCount} media embed(s)", embeds.Count);
+                    LogOperation("Executing multimodal inference with {EmbedCount} media embed(s)", embeds.Count);
                     var interactiveExecutor = new InteractiveExecutor(_context, _clipModel);
                     interactiveExecutor.Embeds.AddRange(embeds);
-                    await foreach (var token in interactiveExecutor.InferAsync(promptText, inferenceParams, cancellationToken))
+                    await foreach (var token in interactiveExecutor.InferAsync(promptText, inferenceParams, ct))
                     {
                         responseBuilder.Append(token);
                         outputTokenCount++;
@@ -308,7 +339,7 @@ public sealed class LlamaSharpChatClient : IChatClient
                 }
                 else
                 {
-                    await foreach (var token in _statelessExecutor.InferAsync(promptText, inferenceParams, cancellationToken))
+                    await foreach (var token in _statelessExecutor.InferAsync(promptText, inferenceParams, ct))
                     {
                         responseBuilder.Append(token);
                         outputTokenCount++;
@@ -318,11 +349,14 @@ public sealed class LlamaSharpChatClient : IChatClient
                 var text = responseBuilder.ToString().Trim();
                 var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(text, _dialect, _options.FunctionCallNormalizer);
 
-                _logger.LogDebug("Completed inference. Output tokens: {OutputTokens}, Total tokens: {TotalTokens}",
+                LogOperation("Completed inference. Output tokens: {OutputTokens}, Total tokens: {TotalTokens}",
                     outputTokenCount, inputTokens + outputTokenCount);
 
                 var chatResponse = new ChatResponse(new List<ChatMessage> { assistantMessage })
                 {
+                    FinishReason = assistantMessage.Contents.OfType<FunctionCallContent>().Any()
+                        ? ChatFinishReason.ToolCalls
+                        : ChatFinishReason.Stop,
                     Usage = new UsageDetails
                     {
                         InputTokenCount = inputTokens,
@@ -340,7 +374,7 @@ public sealed class LlamaSharpChatClient : IChatClient
                     embed.Dispose();
                 }
             }
-        }, cancellationToken);
+        }, ct);
     }
 
     /// <inheritdoc />
@@ -349,6 +383,13 @@ public sealed class LlamaSharpChatClient : IChatClient
         ChatOptions? options = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (_options.RequestTimeoutMinutes > 0)
+        {
+            timeoutCts.CancelAfter(TimeSpan.FromMinutes(_options.RequestTimeoutMinutes));
+        }
+        var ct = timeoutCts.Token;
+
         if (HasImageContent(messages) && _clipModel == null)
         {
             throw new InvalidOperationException(
@@ -373,24 +414,24 @@ public sealed class LlamaSharpChatClient : IChatClient
         var hasTools = options?.Tools is { Count: > 0 };
         var embeds = ExtractMediaEmbeds(messages);
 
-        _logger.LogDebug("Starting streaming inference for model '{ModelPath}'", _modelPath);
+        LogOperation("Starting streaming inference for model '{ModelPath}'", _modelPath);
 
         try
         {
             IAsyncEnumerable<string> tokenStream;
             if (embeds.Count > 0 && _clipModel != null)
             {
-                _logger.LogDebug("Executing multimodal streaming inference with {EmbedCount} media embed(s)", embeds.Count);
+                LogOperation("Executing multimodal streaming inference with {EmbedCount} media embed(s)", embeds.Count);
                 var interactiveExecutor = new InteractiveExecutor(_context, _clipModel);
                 interactiveExecutor.Embeds.AddRange(embeds);
-                tokenStream = interactiveExecutor.InferAsync(promptText, inferenceParams, cancellationToken);
+                tokenStream = interactiveExecutor.InferAsync(promptText, inferenceParams, ct);
             }
             else
             {
-                tokenStream = _statelessExecutor.InferAsync(promptText, inferenceParams, cancellationToken);
+                tokenStream = _statelessExecutor.InferAsync(promptText, inferenceParams, ct);
             }
 
-            await foreach (var token in tokenStream)
+            await foreach (var token in tokenStream.WithCancellation(ct))
             {
                 responseBuilder.Append(token);
                 if (!hasTools)
@@ -417,7 +458,10 @@ public sealed class LlamaSharpChatClient : IChatClient
             yield return new ChatResponseUpdate
             {
                 Role = ChatRole.Assistant,
-                Contents = assistantMessage.Contents.ToList()
+                Contents = assistantMessage.Contents.ToList(),
+                FinishReason = assistantMessage.Contents.OfType<FunctionCallContent>().Any()
+                    ? ChatFinishReason.ToolCalls
+                    : ChatFinishReason.Stop
             };
         }
     }
@@ -442,31 +486,51 @@ public sealed class LlamaSharpChatClient : IChatClient
         var embeds = new List<SafeMtmdEmbed>();
         if (_clipModel == null) return embeds;
 
-        foreach (var message in messages)
+        try
         {
-            foreach (var content in message.Contents)
+            foreach (var message in messages)
             {
-                if (content is DataContent dataContent &&
-                    (dataContent.MediaType == null || dataContent.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)))
+                foreach (var content in message.Contents)
                 {
-                    var span = dataContent.Data.Span;
-                    if (!span.IsEmpty)
+                    if (content is DataContent dataContent &&
+                        (dataContent.MediaType == null || dataContent.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)))
                     {
-                        embeds.Add(_clipModel.LoadMedia(span));
+                        var span = dataContent.Data.Span;
+                        if (!span.IsEmpty)
+                        {
+                            embeds.Add(_clipModel.LoadMedia(span));
+                        }
                     }
-                }
-                else if (content is UriContent uriContent &&
-                         (uriContent.MediaType == null || uriContent.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)))
-                {
-                    if (uriContent.Uri.IsFile && File.Exists(uriContent.Uri.LocalPath))
+                    else if (content is UriContent uriContent &&
+                             (uriContent.MediaType == null || uriContent.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)))
                     {
-                        embeds.Add(_clipModel.LoadMedia(uriContent.Uri.LocalPath));
+                        if (uriContent.Uri.IsFile && File.Exists(uriContent.Uri.LocalPath))
+                        {
+                            embeds.Add(_clipModel.LoadMedia(uriContent.Uri.LocalPath));
+                        }
                     }
                 }
             }
-        }
 
-        return embeds;
+            return embeds;
+        }
+        catch
+        {
+            foreach (var embed in embeds)
+            {
+                embed.Dispose();
+            }
+            throw;
+        }
+    }
+
+    private void LogOperation(string message, params object?[] args)
+    {
+        var level = _options.VerboseLogging ? LogLevel.Information : LogLevel.Debug;
+        if (_logger.IsEnabled(level))
+        {
+            _logger.Log(level, message, args);
+        }
     }
 
     /// <inheritdoc />
@@ -477,6 +541,22 @@ public sealed class LlamaSharpChatClient : IChatClient
             if (serviceType == typeof(ILogger) || serviceType == typeof(ILogger<LlamaSharpChatClient>))
             {
                 return _logger;
+            }
+            if (serviceType == typeof(ChatDialect))
+            {
+                return _dialect;
+            }
+            if (serviceType == typeof(LlamaSharpOptions))
+            {
+                return _options;
+            }
+            if (serviceType == typeof(LLamaWeights))
+            {
+                return _weights;
+            }
+            if (serviceType == typeof(LLamaContext))
+            {
+                return _context;
             }
         }
         return null;

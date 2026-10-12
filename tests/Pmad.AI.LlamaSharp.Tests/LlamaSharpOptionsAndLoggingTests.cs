@@ -107,4 +107,36 @@ public class LlamaSharpOptionsAndLoggingTests
         Assert.Contains("Info", names);
         Assert.Contains("Debug", names);
     }
+
+    [Fact]
+    public void CreateFromOptions_WhenModelPathNullOrEmpty_ThrowsArgumentException()
+    {
+        var optionsEmpty = new LlamaSharpOptions { ModelPath = "" };
+        Assert.Throws<ArgumentException>(() => LlamaSharpChatClient.CreateFromOptions(optionsEmpty));
+
+        var optionsNull = new LlamaSharpOptions { ModelPath = null };
+        Assert.Throws<ArgumentException>(() => LlamaSharpChatClient.CreateFromOptions(optionsNull));
+    }
+
+    [Fact]
+    public void CreateFromOptions_WhenModelFileNotFound_ThrowsFileNotFoundException()
+    {
+        var options = new LlamaSharpOptions { ModelPath = "non_existent_path.gguf" };
+        Assert.Throws<FileNotFoundException>(() => LlamaSharpChatClient.CreateFromOptions(options));
+    }
+
+    [Theory]
+    [InlineData("phi3.5")]
+    [InlineData("phi-3.5")]
+    public void ChatDialect_FromName_ResolvesPhi35Correctly(string dialectName)
+    {
+        var dialect = ChatDialect.FromName(dialectName);
+        Assert.Same(ChatDialect.Phi3, dialect);
+    }
+
+    [Fact]
+    public void Gemma4Dialect_IncludesEndOfTurnStopToken()
+    {
+        Assert.Contains("<end_of_turn>", ChatDialect.Gemma4.StopTokens);
+    }
 }

@@ -344,4 +344,66 @@ public class LocalModelChatFormatterTests
         var callInvalid = LocalModelChatFormatter.TryParseFunctionCall("{invalid json");
         Assert.Null(callInvalid);
     }
+
+    [Fact]
+    public void ParseAssistantResponse_WithNormalizerReturningReadOnlyDictionary_DoesNotThrowAndNormalizes()
+    {
+        var raw = "<tool_call>\n{\"name\": \"old_action\", \"arguments\": {\"param1\": 100}}\n</tool_call>";
+
+        FunctionCallNormalizer normalizer = (name, args) =>
+        {
+            var dict = new System.Collections.ObjectModel.ReadOnlyDictionary<string, object?>(
+                new Dictionary<string, object?> { ["normalized_key"] = 200 });
+            return ("new_action", dict);
+        };
+
+        var parsed = LocalModelChatFormatter.ParseAssistantResponse(raw, normalizer);
+
+        var call = parsed.Contents.OfType<FunctionCallContent>().FirstOrDefault();
+        Assert.NotNull(call);
+        Assert.Equal("new_action", call.Name);
+        Assert.Equal(200L, Convert.ToInt64(call.Arguments?["normalized_key"]));
+    }
+
+    [Fact]
+    public void ParseAssistantResponse_WithMultipleReasoningBlocks_ExtractsAllReasoningContents()
+    {
+        var raw = "<think>First thought</think>Step 1 done.<thought>Second thought</thought>Step 2 done.";
+
+        var parsed = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var thoughts = parsed.Contents.OfType<TextReasoningContent>().ToList();
+        Assert.Equal(2, thoughts.Count);
+        Assert.Equal("First thought", thoughts[0].Text);
+        Assert.Equal("Second thought", thoughts[1].Text);
+
+        var text = parsed.Contents.OfType<TextContent>().FirstOrDefault();
+        Assert.NotNull(text);
+        Assert.Equal("Step 1 done.Step 2 done.", text.Text);
+    }
+
+    [Fact]
+    public void ParseAssistantResponse_StripsEndOfTurnToken()
+    {
+        var raw = "Hello Gemma!<end_of_turn>";
+
+        var parsed = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var text = parsed.Contents.OfType<TextContent>().FirstOrDefault();
+        Assert.NotNull(text);
+        Assert.Equal("Hello Gemma!", text.Text);
+    }
+
+    [Fact]
+    public void FormatPrompt_WithMultipleToolResultsInSingleMessage_FormatsAllResults()
+    {
+        var res1 = new FunctionResultContent("call_1", "Result 1");
+        var res2 = new FunctionResultContent("call_2", "Result 2");
+        var toolMsg = new ChatMessage(ChatRole.Tool, [res1, res2]);
+
+        var prompt = LocalModelChatFormatter.FormatPrompt([toolMsg], format: "chatml");
+
+        Assert.Contains("Result 1", prompt);
+        Assert.Contains("Result 2", prompt);
+    }
 }

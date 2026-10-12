@@ -53,6 +53,8 @@ public abstract class ChatDialect
         var trimmed = name.Trim();
         if (trimmed.Equals("phi3", StringComparison.OrdinalIgnoreCase) ||
             trimmed.Equals("phi-3", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("phi3.5", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("phi-3.5", StringComparison.OrdinalIgnoreCase) ||
             trimmed.Equals("phi", StringComparison.OrdinalIgnoreCase))
         {
             return Phi3;
@@ -243,19 +245,29 @@ public abstract class ChatDialect
     /// </summary>
     protected static string GetToolContent(ChatMessage message)
     {
-        var result = message.Contents?.OfType<FunctionResultContent>().FirstOrDefault();
-        if (result != null)
+        var results = message.Contents?.OfType<FunctionResultContent>().ToList();
+        if (results is { Count: > 0 })
         {
-            return result.Result switch
+            if (results.Count == 1)
             {
-                null => string.Empty,
-                string s => s,
-                JsonElement je => je.GetRawText(),
-                _ => JsonSerializer.Serialize(result.Result)
-            };
+                return FormatFunctionResult(results[0].Result);
+            }
+
+            return string.Join("\n", results.Select(r => FormatFunctionResult(r.Result)));
         }
 
         return GetMessageText(message) ?? string.Empty;
+    }
+
+    private static string FormatFunctionResult(object? result)
+    {
+        return result switch
+        {
+            null => string.Empty,
+            string s => s,
+            JsonElement je => je.GetRawText(),
+            _ => JsonSerializer.Serialize(result)
+        };
     }
 }
 

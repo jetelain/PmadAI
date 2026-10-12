@@ -77,7 +77,7 @@ public sealed record LlamaModelPreset(
             Description: "Google Gemma 4 E2B instruct GGUF model.",
             PromptFormat: "gemma4",
             ContextLength: 49152,
-            Aliases: ["gemma-4-e2b-gguf", "gemma-4-e2b-it", "gemma4-e2b"]
+            Aliases: ["gemma-4-e2b-gguf", "gemma-4-e2b-it", "gemma4-e2b", "gemma-4", "gemma-2b"]
         ),
         new(
             Id: "gemma-4-e4b",
@@ -87,7 +87,7 @@ public sealed record LlamaModelPreset(
             Description: "Google Gemma 4 E4B instruct GGUF model for advanced generation.",
             PromptFormat: "gemma4",
             ContextLength: 49152,
-            Aliases: ["gemma-4-e4b-gguf", "gemma-4-e4b-it", "gemma4-e4b"]
+            Aliases: ["gemma-4-e4b-gguf", "gemma-4-e4b-it", "gemma4-e4b", "gemma-4b"]
         )
     ];
 
@@ -126,13 +126,16 @@ public sealed record LlamaModelPreset(
         }
 
         if (trimmed.Equals("gemma-4-e2b", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("gemma-4", StringComparison.OrdinalIgnoreCase) ||
             trimmed.Equals("gemma4", StringComparison.OrdinalIgnoreCase) ||
             trimmed.Equals("gemma", StringComparison.OrdinalIgnoreCase))
         {
             return Presets[2];
         }
 
-        if (trimmed.Equals("gemma-4-e4b", StringComparison.OrdinalIgnoreCase))
+        if (trimmed.Equals("gemma-4-e4b", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("gemma4-e4b", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("gemma-4b", StringComparison.OrdinalIgnoreCase))
         {
             return Presets[3];
         }

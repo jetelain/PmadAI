@@ -27,6 +27,18 @@ public class LocalModelPathResolverTests
     [InlineData(null)]
     [InlineData("")]
     [InlineData("   ")]
+    public void GetDefaultModelsDirectory_WithNullOrWhitespaceAppName_FallsBackToDefault(string? appName)
+    {
+        var dir = LocalModelPathResolver.GetDefaultModelsDirectory(appName!);
+        Assert.False(string.IsNullOrWhiteSpace(dir));
+        Assert.Contains("pmad", dir, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith("models", dir);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
     public void ResolveModelsDirectory_WhenNullOrWhitespace_ReturnsDefaultModelsDirectory(string? configuredDir)
     {
         var resolved = LocalModelPathResolver.ResolveModelsDirectory(configuredDir);

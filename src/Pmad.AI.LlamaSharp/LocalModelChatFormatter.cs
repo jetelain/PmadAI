@@ -12,7 +12,7 @@ namespace Pmad.AI.LlamaSharp;
 /// </summary>
 public static class LocalModelChatFormatter
 {
-    private static readonly string[] _allStopTokens = ["<|im_end|>", "<|end|>", "<turn|>"];
+    private static readonly string[] _allStopTokens = ["<|im_end|>", "<|end|>", "<turn|>", "<end_of_turn>"];
 
     /// <summary>
     /// Resolves a <see cref="ChatDialect"/> by format name, falling back to <see cref="ChatDialect.Default"/> if null or unknown.
@@ -68,15 +68,18 @@ public static class LocalModelChatFormatter
         var text = rawText;
 
         // 1. Extract reasoning: <think>...</think> or <thought>...</thought>
-        var thinkMatch = Regex.Match(text, @"<(?:think|thought)>(.*?)</(?:think|thought)>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
-        if (thinkMatch.Success)
+        var thinkMatches = Regex.Matches(text, @"<(think|thought)>(.*?)</\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        foreach (Match match in thinkMatches)
         {
-            var reasoning = thinkMatch.Groups[1].Value.Trim();
+            var reasoning = match.Groups[2].Value.Trim();
             if (!string.IsNullOrWhiteSpace(reasoning))
             {
                 contents.Add(new TextReasoningContent(reasoning));
             }
-            text = text.Remove(thinkMatch.Index, thinkMatch.Length).Trim();
+        }
+        if (thinkMatches.Count > 0)
+        {
+            text = Regex.Replace(text, @"<(think|thought)>(.*?)</\1>", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
         }
 
         // 2. Extract <tool_call>...</tool_call>
@@ -181,7 +184,7 @@ public static class LocalModelChatFormatter
                 return null;
             }
 
-            var arguments = new Dictionary<string, object?>(StringComparer.Ordinal);
+            IDictionary<string, object?> arguments = new Dictionary<string, object?>(StringComparer.Ordinal);
             JsonElement argsElement = default;
             var hasArgs = false;
 
@@ -240,7 +243,7 @@ public static class LocalModelChatFormatter
                 if (normalized.HasValue)
                 {
                     functionName = normalized.Value.Name;
-                    arguments = (Dictionary<string, object?>)normalized.Value.Arguments;
+                    arguments = normalized.Value.Arguments;
                 }
             }
 
