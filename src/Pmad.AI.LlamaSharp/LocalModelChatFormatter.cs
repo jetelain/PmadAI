@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.AI;
+using Pmad.AI.Healing;
 
 namespace Pmad.AI.LlamaSharp;
 

@@ -94,6 +94,11 @@ public sealed class BenchmarkOptions
     public bool Verbose { get; set; }
 
     /// <summary>
+    /// When true, executes targeted micro-benchmarks for agent utilities (healing, loop detection, compaction allocations, shell security, fuzzy dispatch).
+    /// </summary>
+    public bool RunUtilities { get; set; }
+
+    /// <summary>
     /// Whether help was requested.
     /// </summary>
     public bool ShowHelp { get; set; }
@@ -192,6 +197,10 @@ public sealed class BenchmarkOptions
             else if (arg is "--no-reasoning" or "--disable-reasoning")
             {
                 options.EnableReasoning = false;
+            }
+            else if (arg is "-u" or "--utilities" or "--utility-benchmarks")
+            {
+                options.RunUtilities = true;
             }
             else if (arg is "-v" or "--verbose")
             {

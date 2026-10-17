@@ -1,3 +1,5 @@
+using Pmad.AI.Tokens;
+
 namespace Pmad.AI.Tests;
 
 public class HeuristicTokenEstimatorTests

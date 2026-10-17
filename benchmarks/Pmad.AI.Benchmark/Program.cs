@@ -19,6 +19,12 @@ public static class Program
             return 0;
         }
 
+        if (options.RunUtilities)
+        {
+            UtilityMicroBenchmarks.RunAll();
+            return 0;
+        }
+
         Console.ForegroundColor = ConsoleColor.White;
         Console.WriteLine(@"
 ╔═══════════════════════════════════════════════════════════════════╗

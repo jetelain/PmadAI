@@ -1,4 +1,4 @@
-namespace Pmad.AI;
+namespace Pmad.AI.Tokens;
 
 /// <summary>
 /// A fast, zero-allocation token estimator that approximates token counts using character,

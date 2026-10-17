@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 
-namespace Pmad.AI;
+namespace Pmad.AI.Healing;
 
 /// <summary>
 /// Protocol-level sanitizer for tool calling responses from local/open-weights models.
@@ -15,7 +15,7 @@ namespace Pmad.AI;
 /// </summary>
 public static partial class ToolCallHealingTransform
 {
-    [GeneratedRegex(@"<tool_call>\s*(?<payload>\{[\s\S]*?\})\s*</tool_call>")]
+    [GeneratedRegex(@"<(?:tool_call|function_call)>\s*(?:```(?:json)?\s*)?(?<payload>\{[\s\S]*?\})(?:\s*```)?\s*</(?:tool_call|function_call)>")]
     private static partial Regex ToolCallRegex();
 
     [GeneratedRegex(@"Action:\s*(?<name>[a-zA-Z0-9_\-\.]+)\s*\nAction Input:\s*(?<payload>\{[\s\S]*?\})")]
@@ -107,11 +107,13 @@ public static partial class ToolCallHealingTransform
                 {
                     try
                     {
-                        var payloadNode = JsonNode.Parse(match.Groups["payload"].Value);
+                        var sanitizedPayload = SanitizeJson(match.Groups["payload"].Value, logger);
+                        var payloadNode = JsonNode.Parse(sanitizedPayload);
                         var toolName = payloadNode?["name"]?.GetValue<string>();
-                        var toolArgs = payloadNode?["arguments"] is JsonValue argVal && argVal.TryGetValue<string>(out var strArg)
+                        var argsNode = payloadNode?["arguments"] ?? payloadNode?["parameters"];
+                        var toolArgs = argsNode is JsonValue argVal && argVal.TryGetValue<string>(out var strArg)
                             ? strArg
-                            : payloadNode?["arguments"]?.ToJsonString() ?? "{}";
+                            : argsNode?.ToJsonString() ?? "{}";
 
                         if (!string.IsNullOrEmpty(toolName))
                         {
@@ -410,11 +412,13 @@ public static partial class ToolCallHealingTransform
             {
                 try
                 {
-                    var payloadNode = JsonNode.Parse(match.Groups["payload"].Value);
+                    var sanitizedPayload = SanitizeJson(match.Groups["payload"].Value, logger);
+                    var payloadNode = JsonNode.Parse(sanitizedPayload);
                     var toolName = payloadNode?["name"]?.GetValue<string>();
-                    var toolArgs = payloadNode?["arguments"] is JsonValue argVal && argVal.TryGetValue<string>(out var strArg)
+                    var argsNode = payloadNode?["arguments"] ?? payloadNode?["parameters"];
+                    var toolArgs = argsNode is JsonValue argVal && argVal.TryGetValue<string>(out var strArg)
                         ? strArg
-                        : payloadNode?["arguments"]?.ToJsonString() ?? "{}";
+                        : argsNode?.ToJsonString() ?? "{}";
 
                     if (!string.IsNullOrEmpty(toolName))
                     {
@@ -559,7 +563,7 @@ public static partial class ToolCallHealingTransform
         return response;
     }
 
-    private static object? UnwrapJsonElement(JsonElement element)
+    internal static object? UnwrapJsonElement(JsonElement element)
     {
         if (element.ValueKind == JsonValueKind.Number)
         {

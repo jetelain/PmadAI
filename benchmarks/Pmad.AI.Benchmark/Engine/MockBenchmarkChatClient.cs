@@ -135,6 +135,36 @@ public sealed class MockBenchmarkChatClient : IChatClient
                 );
             }
 
+            if (originalUser.Contains("AuthHandler", StringComparison.OrdinalIgnoreCase))
+            {
+                return (
+                    [new TextContent("AuthHandler.cs contains the structure and 50 methods.")],
+                    ChatFinishReason.Stop,
+                    PromptTokens: 130,
+                    OutputTokens: 15
+                );
+            }
+
+            if (originalUser.Contains("unit tests", StringComparison.OrdinalIgnoreCase))
+            {
+                return (
+                    [new TextContent("The unit tests failed with ExitCode: 101, Reason: NullReferenceException in AuthHandler.cs:L42.")],
+                    ChatFinishReason.Stop,
+                    PromptTokens: 140,
+                    OutputTokens: 25
+                );
+            }
+
+            if (originalUser.Contains("TokenValidator", StringComparison.OrdinalIgnoreCase))
+            {
+                return (
+                    [new TextContent("Found match for TokenValidator in the module.")],
+                    ChatFinishReason.Stop,
+                    PromptTokens: 110,
+                    OutputTokens: 15
+                );
+            }
+
             return (
                 [new TextContent("Task completed successfully based on tool results.")],
                 ChatFinishReason.Stop,
@@ -217,6 +247,79 @@ public sealed class MockBenchmarkChatClient : IChatClient
                 ChatFinishReason.ToolCalls,
                 PromptTokens: 150,
                 OutputTokens: 25
+            );
+        }
+
+        // AgentMultiTurnCompactionScenario
+        if (toolsAvailable && userText.Contains("AuthHandler.cs and tell me its structure", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_read", "read_file", new Dictionary<string, object?> { ["path"] = "src/AuthHandler.cs" })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: 120,
+                OutputTokens: 25
+            );
+        }
+
+        if (toolsAvailable && userText.Contains("Run the unit tests", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_test", "execute_tests", new Dictionary<string, object?> { ["filter"] = "all" })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: 130,
+                OutputTokens: 25
+            );
+        }
+
+        if (toolsAvailable && userText.Contains("TokenValidator_", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_search", "search_code", new Dictionary<string, object?> { ["query"] = "TokenValidator" })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: 140,
+                OutputTokens: 25
+            );
+        }
+
+        if (userText.Contains("what was the exact exit code and failure reason", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new TextContent("In our initial test run in turn 2, the exit code was 101 with failure reason: NullReferenceException in AuthHandler.cs:L42.")],
+                ChatFinishReason.Stop,
+                PromptTokens: 190,
+                OutputTokens: 35
+            );
+        }
+
+        // ToolCallHealingRecoveryScenario
+        if (toolsAvailable && userText.Contains("Apply this patch wrapped in markdown fences", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_patch", "apply_patch", new Dictionary<string, object?> { ["content"] = "var fixedCode = 42;" })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: 115,
+                OutputTokens: 25
+            );
+        }
+
+        if (toolsAvailable && userText.Contains("Perform a search for 'SessionToken'", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_search", "search", new Dictionary<string, object?> { ["query"] = "SessionToken" })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: 110,
+                OutputTokens: 20
+            );
+        }
+
+        // StreamingRunawayAndPingPongScenario
+        if (toolsAvailable && userText.Contains("Read same.cs repeatedly", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_read_same", "read", new Dictionary<string, object?> { ["path"] = "same.cs" })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: 100,
+                OutputTokens: 20
             );
         }
 

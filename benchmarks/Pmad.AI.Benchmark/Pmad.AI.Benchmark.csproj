@@ -14,6 +14,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Pmad.AI\Pmad.AI.csproj" />
     <ProjectReference Include="..\..\src\Pmad.AI.LlamaSharp\Pmad.AI.LlamaSharp.csproj" />
   </ItemGroup>
 

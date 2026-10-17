@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using Moq;
+using Pmad.AI.Healing;
 
 namespace Pmad.AI.Tests;
 

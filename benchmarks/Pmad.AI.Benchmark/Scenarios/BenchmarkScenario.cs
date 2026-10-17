@@ -45,7 +45,10 @@ public abstract class BenchmarkScenario
         new WeatherScenario(),
         new CalculatorScenario(),
         new CustomerSupportScenario(),
-        new DirectResponseScenario()
+        new DirectResponseScenario(),
+        new AgentMultiTurnCompactionScenario(),
+        new ToolCallHealingRecoveryScenario(),
+        new StreamingRunawayAndPingPongScenario()
     ];
 
     /// <summary>

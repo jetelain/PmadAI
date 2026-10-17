@@ -57,12 +57,15 @@ public class BenchmarkSuiteTests
     public void BenchmarkScenario_GetAllScenarios_ReturnsExpectedDefinitions()
     {
         var scenarios = BenchmarkScenario.GetAllScenarios();
-        Assert.Equal(4, scenarios.Count);
+        Assert.Equal(7, scenarios.Count);
 
         Assert.Contains(scenarios, s => s.Id == "weather");
         Assert.Contains(scenarios, s => s.Id == "calculator");
         Assert.Contains(scenarios, s => s.Id == "support");
         Assert.Contains(scenarios, s => s.Id == "direct");
+        Assert.Contains(scenarios, s => s.Id == "compaction");
+        Assert.Contains(scenarios, s => s.Id == "healing");
+        Assert.Contains(scenarios, s => s.Id == "circuit-breaker");
 
         foreach (var sc in scenarios)
         {
@@ -78,7 +81,10 @@ public class BenchmarkSuiteTests
     [InlineData("calc", "calculator")]
     [InlineData("support", "support")]
     [InlineData("direct", "direct")]
-    [InlineData("all", 4)]
+    [InlineData("compaction", "compaction")]
+    [InlineData("healing", "healing")]
+    [InlineData("circuit", "circuit-breaker")]
+    [InlineData("all", 7)]
     public void BenchmarkScenario_FilterScenarios_FiltersCorrectly(string filter, object expected)
     {
         var filtered = BenchmarkScenario.FilterScenarios(filter);
@@ -102,8 +108,8 @@ public class BenchmarkSuiteTests
 
         var summary = await runner.RunAllAsync(scenarios);
 
-        Assert.Equal(4, summary.ScenariosRun);
-        Assert.Equal(4, summary.ScenariosPassed);
+        Assert.Equal(7, summary.ScenariosRun);
+        Assert.Equal(7, summary.ScenariosPassed);
         Assert.Equal(0, summary.ScenariosFailed);
         Assert.Equal(100.0, summary.PassRatePercentage);
         Assert.True(summary.TotalToolCalls >= 5);
