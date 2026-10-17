@@ -51,7 +51,7 @@ using Pmad.AI;
 string cleanJson = ToolCallHealingTransform.SanitizeArgumentsJson("```json\n{\"city\": \"Paris\",}\n```");
 
 // Estimate tokens with 0 MB allocations
-int tokens = HeuristicTokenEstimator.EstimateTokens("Summarize this document...".AsSpan());
+int tokens = HeuristicTokenEstimator.Default.Estimate("Summarize this document...".AsSpan());
 ```
 
 👉 *See the full [Pmad.AI Documentation](src/Pmad.AI/README.md) for details.*

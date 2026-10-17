@@ -96,13 +96,22 @@ When budgeting prompt context or enforcing token limits, loading full BPE tokeni
 ```csharp
 using Pmad.AI;
 
-// Estimate tokens for a string span (zero heap allocation)
+// Estimate tokens for a string span using the standard Default instance (zero heap allocation)
 ReadOnlySpan<char> promptSpan = prompt.AsSpan();
-int estimatedTokens = HeuristicTokenEstimator.EstimateTokens(promptSpan);
+int estimatedTokens = HeuristicTokenEstimator.Default.Estimate(promptSpan);
 
 // Or estimate across a list of message strings
 var messageTexts = new List<string> { systemPrompt, userMessage };
-int totalEstimated = HeuristicTokenEstimator.EstimateTokens(messageTexts);
+int totalEstimated = HeuristicTokenEstimator.Default.Estimate(messageTexts);
+
+// Or customize factors for your model/tokenizer
+var customEstimator = new HeuristicTokenEstimator(
+    wordFactor: 1.3,
+    symbolFactor: 0.9,
+    nonAsciiFactor: 1.1,
+    charFloorFactor: 3.5
+);
+int customTokens = customEstimator.Estimate(promptSpan);
 
 Console.WriteLine($"Estimated token count: {totalEstimated}");
 ```
