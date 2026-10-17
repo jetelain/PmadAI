@@ -258,6 +258,7 @@ public static partial class LocalModelChatFormatter
             if (string.IsNullOrWhiteSpace(callBlock)) continue;
 
             callBlock = StripStrayTokens(callBlock, dialect);
+            callBlock = ToolCallHealingTransform.SanitizeJson(callBlock);
 
             if (callBlock.StartsWith('[') && callBlock.EndsWith(']'))
             {
@@ -330,10 +331,31 @@ public static partial class LocalModelChatFormatter
             }
         }
 
-        // 4. Strip stray chatml / template end tokens
+        // 5. Fallback: ReAct Action: / Action Input: syntax
+        if (!contents.OfType<FunctionCallContent>().Any())
+        {
+            if (ToolCallHealingTransform.TryExtractToolCalls(ref text, out var reactCalls))
+            {
+                foreach (var call in reactCalls)
+                {
+                    if (normalizer != null)
+                    {
+                        var normalized = normalizer(call.Name, call.Arguments ?? new Dictionary<string, object?>());
+                        if (normalized.HasValue)
+                        {
+                            contents.Add(new FunctionCallContent(call.CallId, normalized.Value.Name, normalized.Value.Arguments));
+                            continue;
+                        }
+                    }
+                    contents.Add(call);
+                }
+            }
+        }
+
+        // 6. Strip stray chatml / template end tokens
         text = StripStrayTokens(text, dialect);
 
-        // 5. Add remaining text if non-empty
+        // 7. Add remaining text if non-empty
         if (!string.IsNullOrWhiteSpace(text))
         {
             contents.Add(new TextContent(text));
@@ -344,7 +366,8 @@ public static partial class LocalModelChatFormatter
             contents.Add(new TextContent(string.Empty));
         }
 
-        return new ChatMessage(ChatRole.Assistant, contents);
+        var assistantMsg = new ChatMessage(ChatRole.Assistant, contents);
+        return ToolCallHealingTransform.HealChatMessage(assistantMsg);
     }
 
     private static string StripStrayTokens(string text, ChatDialect? dialect)
@@ -387,7 +410,8 @@ public static partial class LocalModelChatFormatter
 
         try
         {
-            using var doc = JsonDocument.Parse(jsonText);
+            var sanitizedJson = ToolCallHealingTransform.SanitizeJson(jsonText);
+            using var doc = JsonDocument.Parse(sanitizedJson);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
             {
@@ -452,18 +476,15 @@ public static partial class LocalModelChatFormatter
                     var innerJson = argsElement.GetString();
                     if (!string.IsNullOrWhiteSpace(innerJson))
                     {
-                        try
+                        var parsedArgs = ToolCallHealingTransform.ParseArgumentsJson(innerJson);
+                        if (parsedArgs.Count > 0)
                         {
-                            using var innerDoc = JsonDocument.Parse(innerJson);
-                            if (innerDoc.RootElement.ValueKind == JsonValueKind.Object)
+                            foreach (var prop in parsedArgs)
                             {
-                                foreach (var prop in innerDoc.RootElement.EnumerateObject())
-                                {
-                                    arguments[prop.Name] = UnwrapJsonElement(prop.Value);
-                                }
+                                arguments[prop.Key] = prop.Value;
                             }
                         }
-                        catch
+                        else
                         {
                             arguments["input"] = innerJson;
                         }

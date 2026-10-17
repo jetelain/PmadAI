@@ -620,4 +620,42 @@ public class LocalModelChatFormatterTests
         Assert.Equal("raw_executor", call.Name);
         Assert.Equal("SELECT * FROM table", call.Arguments?["input"]);
     }
+
+    [Fact]
+    public void ParseAssistantResponse_WithTrailingCommas_RepairsAndParsesToolCall()
+    {
+        var raw = "<tool_call>{\"name\":\"fetch_weather\",\"arguments\":{\"city\":\"Rome\",},}</tool_call>";
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var call = Assert.Single(msg.Contents.OfType<FunctionCallContent>());
+        Assert.Equal("fetch_weather", call.Name);
+        Assert.Equal("Rome", call.Arguments?["city"]);
+    }
+
+    [Fact]
+    public void ParseAssistantResponse_WithMarkdownFencesInArguments_StripsFencesAndParsesArguments()
+    {
+        var raw = "<tool_call>{\"name\":\"write_file\",\"arguments\":\"```json\\n{\\\"path\\\":\\\"app.cs\\\",\\\"lines\\\":10,}\\n```\"}</tool_call>";
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var call = Assert.Single(msg.Contents.OfType<FunctionCallContent>());
+        Assert.Equal("write_file", call.Name);
+        Assert.Equal("app.cs", call.Arguments?["path"]);
+        Assert.Equal(10, call.Arguments?["lines"]);
+    }
+
+    [Fact]
+    public void ParseAssistantResponse_WithReActActionSyntax_ExtractsToolCall()
+    {
+        var raw = "I will search now.\nAction: web_search\nAction Input: {\"query\":\"csharp 10\"}\nDone.";
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw);
+
+        var call = Assert.Single(msg.Contents.OfType<FunctionCallContent>());
+        Assert.Equal("web_search", call.Name);
+        Assert.Equal("csharp 10", call.Arguments?["query"]);
+
+        var text = msg.Contents.OfType<TextContent>().Single().Text;
+        Assert.DoesNotContain("Action:", text);
+        Assert.Contains("I will search now.", text);
+    }
 }

@@ -1,324 +1,121 @@
-# Pmad.AI.LlamaSharp
+# PmadAI
 
 [![CI](https://github.com/jetelain/PmadAI/actions/workflows/ci.yml/badge.svg)](https://github.com/jetelain/PmadAI/actions/workflows/ci.yml)
-[![NuGet](https://img.shields.io/nuget/v/Pmad.AI.LlamaSharp.svg)](https://www.nuget.org/packages/Pmad.AI.LlamaSharp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-An in-process, high-performance GGUF inference adapter implementing [`Microsoft.Extensions.AI.IChatClient`](https://learn.microsoft.com/dotnet/api/microsoft.extensions.ai.ichatclient) powered by [LLamaSharp](https://github.com/SciSharp/LLamaSharp) and [llama.cpp](https://github.com/ggerganov/llama.cpp).
-
-Designed for seamless integration into modern .NET applications with support for:
-- Standard `IChatClient` non-streaming and token-by-token streaming APIs
-- Multimodal vision inference via companion `mmproj` projectors
-- Function / tool calling with `AIFunction` and customizable parameter normalization
-- Open-weights prompt templates (ChatML, Gemma 4, Phi-3) and `<think>` / `<thought>` reasoning trace extraction
-- Built-in curated presets and automated model downloads via `ModelDownloader`
+**PmadAI** is a modular .NET 10 toolkit providing high-performance local AI inference adapters, protocol transformers, and agent utilities for modern .NET applications.
 
 ---
 
-## Installation
+## Packages & Projects
 
-`Pmad.AI.LlamaSharp` uses the standard **two-package pattern** for LLamaSharp. The core library contains managed code and contracts, while native llama.cpp runtimes are distributed in backend packages.
-
-1. Install the core library:
-   ```bash
-   dotnet add package Pmad.AI.LlamaSharp
-   ```
-
-2. Add one of the native backend packages according to your execution environment and hardware:
-   - **CPU (Headless CI, containers, universal fallback)**:
-     ```bash
-     dotnet add package LLamaSharp.Backend.Cpu --version 0.27.0
-     ```
-   - **Vulkan (Cross-platform AMD / Intel / NVIDIA GPU acceleration)**:
-     ```bash
-     dotnet add package LLamaSharp.Backend.Vulkan --version 0.27.0
-     ```
-   - **CUDA 12 (NVIDIA GPUs on Windows / Linux)**:
-     ```bash
-     dotnet add package LLamaSharp.Backend.Cuda12 --version 0.27.0
-     ```
+| Project | NuGet | Description |
+|:---|:---:|:---|
+| [**`Pmad.AI`**](src/Pmad.AI/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.svg)](https://www.nuget.org/packages/Pmad.AI) | Core, lightweight AI utilities: protocol-level tool call healing (`ToolCallHealingTransform`), JSON argument sanitization, and zero-allocation heuristic token estimation (`HeuristicTokenEstimator`). Zero heavy dependencies. Native AOT ready. |
+| [**`Pmad.AI.LlamaSharp`**](src/Pmad.AI.LlamaSharp/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.LlamaSharp.svg)](https://www.nuget.org/packages/Pmad.AI.LlamaSharp) | High-performance in-process GGUF inference adapter implementing [`Microsoft.Extensions.AI.IChatClient`](https://learn.microsoft.com/dotnet/api/microsoft.extensions.ai.ichatclient) powered by [LLamaSharp](https://github.com/SciSharp/LLamaSharp) and [llama.cpp](https://github.com/ggerganov/llama.cpp). Supports streaming, vision, function calling, chat dialects, and model downloading. |
+| [**`Pmad.AI.Benchmark`**](benchmarks/Pmad.AI.Benchmark) | *Tool* | Standalone evaluation suite measuring tokens/sec, latency, RAM, and GPU VRAM (`nvidia-smi`) across CPU and Vulkan backends. |
 
 ---
 
-## Quickstart
+## Quick Navigation
 
-### 1. Basic Completion
+- **Core Utilities**: [`src/Pmad.AI/README.md`](src/Pmad.AI/README.md)
+  - Tool call healing for OpenAI and Ollama protocols
+  - Argument sanitization (markdown fences, trailing commas, unescaped control chars)
+  - Heuristic token estimation (~100x faster than BPE, 0 MB heap allocation)
+- **Local LLM Inference**: [`src/Pmad.AI.LlamaSharp/README.md`](src/Pmad.AI.LlamaSharp/README.md)
+  - Backend setup (CPU, Vulkan, CUDA 12)
+  - Quickstart: Basic completion, streaming, and tool calling with `AIFunction`
+  - Multimodal vision inference (`mmproj`)
+  - Chat dialects (ChatML, Gemma 4, Phi-3) and reasoning effort configuration
+  - Verified model presets and auto-downloader
+- **Performance & Benchmarks**:
+  - [Tool Calling Benchmark Report](docs/benchmark.md)
+  - [Full Execution Transcript](docs/transcript.md)
 
-Create a client from a local `.gguf` file and execute completions:
+---
+
+## Overview & Highlights
+
+### 1. `Pmad.AI`: Protocol Healing & Zero-Allocation Token Estimation
+
+Originally developed for [OllamaRouter](https://github.com/jetelain/OllamaRouter), these utilities solve common operational hurdles when integrating local and open-weights models:
+
+- **Repair malformed tool calls on the fly**: Local models frequently produce broken JSON (trailing commas, unescaped newlines in strings, or enclosing markdown code fences). `ToolCallHealingTransform` cleans and normalizes payloads across both OpenAI and Ollama formats without crashing strict JSON parsers.
+- **Estimate tokens instantly without loading vocabularies**: Full BPE tokenizers require large vocabulary files and heap allocations. `HeuristicTokenEstimator` operates directly over `ReadOnlySpan<char>` with zero heap allocation, making it ideal for high-throughput rate limiters and context window budgeting.
+
+```csharp
+using Pmad.AI;
+
+// Sanitize malformed tool argument JSON
+string cleanJson = ToolCallHealingTransform.SanitizeArgumentsJson("```json\n{\"city\": \"Paris\",}\n```");
+
+// Estimate tokens with 0 MB allocations
+int tokens = HeuristicTokenEstimator.EstimateTokens("Summarize this document...".AsSpan());
+```
+
+👉 *See the full [Pmad.AI Documentation](src/Pmad.AI/README.md) for details.*
+
+---
+
+### 2. `Pmad.AI.LlamaSharp`: In-Process GGUF Chat Client
+
+Embed local models directly in your .NET process using standard `Microsoft.Extensions.AI` interfaces:
 
 ```csharp
 using Microsoft.Extensions.AI;
 using Pmad.AI.LlamaSharp;
 
+// Initialize client with local GGUF model
 using var chatClient = LlamaSharpChatClient.CreateFromFile(
     modelPath: "models/qwen3.5-2b-ud-q4_k_xl.gguf",
-    options: new LlamaSharpOptions
-    {
-        ContextSize = 49152, // 48k tokens context
-        GpuLayerCount = 99   // Offload all layers to GPU (set 0 for CPU only)
-    },
-    promptFormat: "chatml");
-
-var response = await chatClient.GetResponseAsync("Explain quantum computing in one concise sentence.");
-Console.WriteLine(response.Text);
-```
-
-### 2. Token-by-Token Streaming
-
-Stream tokens in real time using `GetStreamingResponseAsync`:
-
-```csharp
-using Microsoft.Extensions.AI;
-using Pmad.AI.LlamaSharp;
-
-using var chatClient = LlamaSharpChatClient.CreateFromFile("models/qwen3.5-2b-ud-q4_k_xl.gguf");
-
-await foreach (var update in chatClient.GetStreamingResponseAsync("Write a haiku about programming."))
-{
-    Console.Write(update.Text);
-}
-Console.WriteLine();
-```
-
-### 3. Tool / Function Calling with `AIFunction`
-
-Define functions and provide them to `ChatOptions.Tools`:
-
-```csharp
-using System.ComponentModel;
-using Microsoft.Extensions.AI;
-using Pmad.AI.LlamaSharp;
-
-[Description("Fetches the current weather for a city.")]
-static string GetWeather(string city) => $"The current weather in {city} is sunny, 22°C.";
-
-var weatherTool = AIFunctionFactory.Create(GetWeather, "get_weather", "Fetches current weather for a city");
-
-using var chatClient = LlamaSharpChatClient.CreateFromFile("models/qwen3.5-2b-ud-q4_k_xl.gguf");
-
-var options = new ChatOptions
-{
-    Tools = [weatherTool]
-};
-
-var response = await chatClient.GetResponseAsync("What's the weather in Paris?", options);
-
-// Inspect assistant contents (which may contain TextReasoningContent, FunctionCallContent, and TextContent)
-foreach (var content in response.Messages[0].Contents)
-{
-    if (content is FunctionCallContent toolCall)
-    {
-        Console.WriteLine($"Function requested: {toolCall.Name}");
-        Console.WriteLine($"Arguments: {System.Text.Json.JsonSerializer.Serialize(toolCall.Arguments)}");
-    }
-    else if (content is TextContent text)
-    {
-        Console.WriteLine(text.Text);
-    }
-}
-```
-
-### 4. Multimodal Vision Inference
-
-Pair a GGUF language model with a companion `mmproj` vision projector to analyze images:
-
-```csharp
-using Microsoft.Extensions.AI;
-using Pmad.AI.LlamaSharp;
-
-using var chatClient = LlamaSharpChatClient.CreateFromFile(
-    modelPath: "models/qwen3.5-2b-ud-q4_k_xl.gguf",
-    mmprojPath: "models/qwen3.5-2b-mmproj-bf16.gguf",
     options: new LlamaSharpOptions { GpuLayerCount = 99 },
     promptFormat: "chatml");
 
-var imageBytes = await File.ReadAllBytesAsync("diagram.png");
-var messages = new List<ChatMessage>
+// Stream tokens in real time
+await foreach (var update in chatClient.GetStreamingResponseAsync("Why is the sky blue?"))
 {
-    new(ChatRole.User, [
-        new DataContent(imageBytes, "image/png"),
-        new TextContent("Describe what is shown in this image.")
-    ])
-};
-
-var response = await chatClient.GetResponseAsync(messages);
-Console.WriteLine(response.Text);
+    Console.Write(update.Text);
+}
 ```
 
-### 5. Auto-Downloading Presets with `ModelDownloader`
-
-Download verified GGUF presets and projector artifacts on demand:
-
-```csharp
-using Pmad.AI.LlamaSharp;
-
-// 1. Resolve preset by ID or alias (e.g. "qwen3.5-2b", "gemma-4-e2b")
-var preset = LlamaModelPreset.Find("qwen3.5-2b") ?? LlamaModelPreset.Default;
-
-// 2. Resolve cross-platform models cache directory (%LOCALAPPDATA%/pmad/models or ~/.pmad/models)
-var modelsDir = LocalModelPathResolver.ResolveModelsDirectory(null);
-
-// 3. Download weights and companion vision projector with progress updates
-var progress = new Progress<ModelDownloadProgress>(p =>
-{
-    if (p.ProgressPercentage.HasValue)
-        Console.WriteLine($"Downloading {p.FileName}: {p.ProgressPercentage:F1}%");
-});
-
-var downloader = new ModelDownloader(statusLogger: Console.WriteLine, progress: progress);
-await downloader.DownloadModelAsync(
-    preset,
-    destinationDir: modelsDir,
-    downloadVision: true);
-
-// 4. Instantiate client with resolved local paths
-using var chatClient = LlamaSharpChatClient.CreateFromFile(
-    modelPath: preset.GetLocalPath(modelsDir),
-    mmprojPath: preset.GetMmprojLocalPath(modelsDir),
-    promptFormat: preset.PromptFormat);
-```
-
-### 6. Logging with Microsoft.Extensions.Logging
-
-Logging is cleanly separated between process-wide native llama.cpp logs and per-chat client instance logs (preventing log mixing across concurrent chats):
-
-```csharp
-using Microsoft.Extensions.Logging;
-using Pmad.AI.LlamaSharp;
-
-// 1. Configure process-wide native llama.cpp logging
-LlamaSharpChatClient.ConfigureNativeLogging(loggerFactory, verbose: false);
-
-// 2. Configure isolated per-chat-client logging
-var options = new LlamaSharpOptions
-{
-    Logger = loggerFactory.CreateLogger<LlamaSharpChatClient>(),
-    VerboseLogging = false
-};
-
-using var chatClient = LlamaSharpChatClient.CreateFromFile("models/qwen3.5-2b-ud-q4_k_xl.gguf", options);
-```
-
-### 7. Prompt Formatting & Chat Dialects
-
-Prompt formatting uses polymorphic dialects (`ChatDialect`) to cleanly handle model-specific template tokens, stop tokens, tool call wrapping, and generation prompts:
-
-- `ChatMLDialect` (`ChatDialect.ChatML`): For Qwen 3.5, Hermes, and standard ChatML fine-tunes (`<|im_start|>`, `<|im_end|>`).
-- `Phi3Dialect` (`ChatDialect.Phi3`): For Microsoft Phi-3 and Phi-3.5 models (`<|system|>`, `<|user|>`, `<|assistant|>`, `<|end|>`).
-- `Gemma4Dialect` (`ChatDialect.Gemma4`): For Google Gemma 4 models (`<|turn|>system`, `<|turn|>model`, `<turn|>`).
-
-```csharp
-// Format prompts directly using strongly-typed dialect singletons
-var promptChatml = ChatDialect.ChatML.FormatPrompt(messages, tools);
-var promptPhi3   = ChatDialect.Phi3.FormatPrompt(messages, tools);
-var promptGemma  = ChatDialect.Gemma4.FormatPrompt(messages, tools);
-
-// Resolve dialect dynamically by format name
-var dialect = ChatDialect.FromName("phi3"); // Returns Phi3Dialect.Instance
-
-// Pass dialect directly to LlamaSharpChatClient
-using var chatClient = LlamaSharpChatClient.CreateFromFile(
-    modelPath: "models/phi-3-mini.gguf",
-    dialect: ChatDialect.Phi3);
-
-// Custom dialects can be added by subclassing ChatDialect
-public sealed class CustomDialect : ChatDialect { ... }
-```
-
-### 8. Reasoning & Thinking Mode Configuration
-
-For open-weights models supporting internal chain-of-thought (e.g. Qwen 3.5, Google Gemma 4), reasoning behavior can be toggled on/off and tuned for depth:
-
-```csharp
-using Microsoft.Extensions.AI;
-using Pmad.AI.LlamaSharp;
-
-// 1. Configure reasoning effort per-request via standard Microsoft.Extensions.AI ChatOptions
-var chatOptions = new ChatOptions
-{
-    Reasoning = new ReasoningOptions
-    {
-        Effort = ReasoningEffort.Medium // None, Low, Medium, High, ExtraHigh
-    }
-};
-
-var response = await chatClient.GetResponseAsync("Solve this logic puzzle.", chatOptions);
-
-// 2. Or disable reasoning to get instant, low-latency direct responses
-var fastOptions = new ChatOptions
-{
-    Reasoning = new ReasoningOptions { Effort = ReasoningEffort.None }
-};
-
-// 3. You can also configure client-wide defaults via LlamaSharpOptions
-var clientOptions = new LlamaSharpOptions
-{
-    EnableReasoning = true,
-    ReasoningEffort = "medium" // "low", "medium", "high", "xhigh", or "none"
-};
-```
-
-When reasoning is disabled (`enable = false` or `effort = none`), dialects pre-fill a closed `<think>\n\n</think>\n\n` block to instruct the model to skip internal deliberations. For models supporting tiered effort (introduced in Qwen 3.8 via `ChatDialect.Qwen38` or `SupportsReasoningEffort = true`), effort instructions (`low`, `medium`, `xhigh`) are automatically injected into the system prompt matching upstream chat templates.
-
-### 9. Tool Calling Benchmark Suite
-
-A standalone benchmarking tool is provided under `benchmarks/Pmad.AI.Benchmark` to showcase and validate tool calling with mocked or real multi-turn user interactions, measuring speed (tokens/sec), latency (ms), function execution accuracy, RAM usage, and GPU VRAM via `nvidia-smi`:
-
-```bash
-# 1. Run in mock simulation mode (validates all scenarios & reporting immediately without model weights):
-dotnet run --project benchmarks/Pmad.AI.Benchmark -- --mock
-
-# 2. Compare CPU vs Vulkan GPU acceleration:
-dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --compare-backends
-
-# 3. Compare with vs without internal reasoning (measures thinking tokens overhead & speed impact):
-dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --compare-reasoning
-
-# 4. Full 2x2 comparison matrix (CPU vs Vulkan AND With vs Without reasoning):
-dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --compare-all -o benchmark_report.md
-
-# 5. Benchmark all presets across backends and export markdown & JSON reports:
-dotnet run --project benchmarks/Pmad.AI.Benchmark -- --all --compare-backends -o report.md -j report.json
-
-# 6. Benchmark all presets across backends, download models and export markdown (results in docs):
-dotnet run --project benchmarks/Pmad.AI.Benchmark -- --all --download --compare-all -o docs/benchmark.md -t docs/transcript.md
-```
-
-Scenarios evaluated:
-- **`weather`**: Multi-entity function calling (`get_weather` for Paris and Tokyo) followed by multi-turn contextual reasoning.
-- **`calculator`**: Arithmetic calculation tool invocation (`calculate`) with monetary discount percentages.
-- **`support`**: Chained multi-turn pipeline (order lookup `lookup_order` -> shipment tracking `track_package`).
-- **`direct`**: Negative test verifying the model does *not* hallucinate unnecessary tool calls when direct answering is expected.
-
-Hardware & Memory Diagnostics:
-- Automatically offloads to Vulkan GPU when GPU layers > 0.
-- Queries `nvidia-smi` on NVIDIA systems to measure real-time GPU VRAM utilization and peak allocation alongside system process RAM.
+👉 *See the full [Pmad.AI.LlamaSharp Documentation](src/Pmad.AI.LlamaSharp/README.md) for installation, backend selection, multimodal vision, tool calling, and preset downloads.*
 
 ---
 
-## Model Presets
+## Building and Testing
 
-The library includes verified presets with tested prompt templates, reasoning capabilities, and context configurations:
+### Prerequisites
 
-| Preset ID | Aliases | Model Name | Format | Context Size | Approx Size | Vision | Reasoning | Effort Tuning |
-|:---|:---|:---|:---|:---:|:---:|:---:|:---:|:---:|
-| `qwen3.5-2b` *(Default)* | `qwen3.5`, `qwen3.5-2b-gguf` | Qwen 3.5 2B (Q4_K_XL) | ChatML | 48k | ~1.2 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
-| `qwen3.5-4b` | `qwen3.5-4b-gguf`, `qwen3.5-4b-q4` | Qwen 3.5 4B (Q4_K_XL) | ChatML | 48k | ~2.7 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
-| `gemma-4-e2b` | `gemma4-e2b`, `gemma-4-e2b-it` | Gemma 4 E2B (Q4_K_XL) | Gemma 4 | 48k | ~3.0 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
-| `gemma-4-e4b` | `gemma4-e4b`, `gemma-4-e4b-it` | Gemma 4 E4B (Q4_K_XL) | Gemma 4 | 48k | ~4.8 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
+- [.NET 10.0 SDK](https://dotnet.microsoft.com/download)
+- Optional: C++ build tools and Vulkan / CUDA runtime if running GPU inference locally
 
-### Recommended Models by Target Platform
+### Build & Run Tests
 
-Based on tool calling, reasoning, and hardware acceleration evaluations (see full [Benchmark Report](docs/benchmark.md) and [Transcript](docs/transcript.md)):
+```bash
+# Clone the repository
+git clone https://github.com/jetelain/PmadAI.git
+cd PmadAI
 
-| Target Platform | Recommended Model | Backend | Reasoning | Pass Rate | Memory Footprint | Avg Speed / Duration | Key Benefit |
-|---|---|---|---|---|---|---|---|
-| **Tablet (Android)** | **Gemma 4 E2B (Q4_K_XL)** | Vulkan (or CPU) | **Enabled** | **100%** | ~1.8 – 1.9 GB RAM (~4.4 GB VRAM) | **154 tok/s (GPU)** / 24.6 tok/s (CPU) | Fits mobile RAM limits, no token runaway, fast & reliable |
-| **Desktop (Fast / Snappy)** | **Gemma 4 E4B (Q4_K_XL)** | Vulkan | **Enabled** | **100%** | 3.3 GB RAM / 6.1 GB VRAM | **100 tok/s** (3.88s total) | 100% pass rate across all tests, zero reasoning token bloat |
-| **Desktop (Deep Reasoning)** | **Qwen 3.5 4B (Q4_K_XL)** | Vulkan | **Enabled** | **100%** | 3.0 GB RAM / 5.65 GB VRAM | **135 tok/s** (11.38s total) | Thorough chain-of-thought for complex multi-turn logic |
+# Restore dependencies
+dotnet restore
+
+# Build solution
+dotnet build -c Release
+
+# Run all test suites
+dotnet test -c Release --no-build
+```
+
+### Run Benchmarks
+
+```bash
+# Run tool calling benchmark in mock simulation mode (no weights required)
+dotnet run --project benchmarks/Pmad.AI.Benchmark -- --mock
+```
 
 ---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This repository is licensed under the [MIT License](LICENSE).

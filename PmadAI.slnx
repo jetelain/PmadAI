@@ -1,11 +1,13 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Pmad.AI.LlamaSharp/Pmad.AI.LlamaSharp.csproj" />
+    <Project Path="src/Pmad.AI/Pmad.AI.csproj" Id="ca0054a3-672d-45ba-92b6-d727b56fc42d" />
   </Folder>
   <Folder Name="/benchmarks/">
     <Project Path="benchmarks/Pmad.AI.Benchmark/Pmad.AI.Benchmark.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Pmad.AI.LlamaSharp.Tests/Pmad.AI.LlamaSharp.Tests.csproj" />
+    <Project Path="tests/Pmad.AI.Tests/Pmad.AI.Tests.csproj" Id="8b15ea52-1fe3-4ed6-8ee0-4a22b44e579c" />
   </Folder>
 </Solution>
