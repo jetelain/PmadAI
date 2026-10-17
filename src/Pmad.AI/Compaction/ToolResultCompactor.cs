@@ -38,6 +38,12 @@ public class ToolResultCompactionOptions
 
     /// <summary>Resolves the session id used to scope summaries (default: ChatOptions.ConversationId, then "default").</summary>
     public Func<ChatOptions?, string>? SessionIdResolver { get; set; }
+
+    /// <summary>Optional compaction telemetry instance to collect compaction events.</summary>
+    public CompactionTelemetry? Telemetry { get; set; }
+
+    /// <summary>Optional callback invoked whenever a tool result compaction event occurs.</summary>
+    public Action<CompactionEvent>? OnCompaction { get; set; }
 }
 
 /// <summary>
@@ -209,12 +215,13 @@ public class ToolResultCompactor
         if (_options.Summarizer != null && _options.Summarizer.TryGetSummary(sessionId, itemKey, out var summary) && !string.IsNullOrWhiteSpace(summary))
         {
             var trimmed = summary.Trim();
-            if (trimmed.StartsWith("[TOOL_RESULT_SUMMARY]", StringComparison.OrdinalIgnoreCase) ||
+            var compacted = (trimmed.StartsWith("[TOOL_RESULT_SUMMARY]", StringComparison.OrdinalIgnoreCase) ||
                 trimmed.StartsWith("[Semantic Summary:", StringComparison.OrdinalIgnoreCase))
-            {
-                return trimmed;
-            }
-            return $"[Semantic Summary: {trimmed}]";
+                ? trimmed
+                : $"[Semantic Summary: {trimmed}]";
+
+            RecordCompactionEvent(sessionId, itemKey, rawText.Length, compacted.Length, wasSpeculativeHit: true, CompactionMethods.SemanticSummary);
+            return compacted;
         }
 
         // Deterministic prefix + truncation marker + suffix
@@ -222,8 +229,26 @@ public class ToolResultCompactor
         var suffix = rawText[^_options.FallbackSuffixLength..];
         var truncatedChars = rawText.Length - _options.FallbackPrefixLength - _options.FallbackSuffixLength;
         var marker = string.Format(_options.FallbackTruncationMarker, truncatedChars);
+        var fallback = prefix + marker + suffix;
 
-        return prefix + marker + suffix;
+        RecordCompactionEvent(sessionId, itemKey, rawText.Length, fallback.Length, wasSpeculativeHit: false, CompactionMethods.PrefixSuffixTruncation);
+        return fallback;
+    }
+
+    private void RecordCompactionEvent(string sessionId, string itemKey, int origChars, int compactedChars, bool wasSpeculativeHit, string method)
+    {
+        if (_options.Telemetry == null && _options.OnCompaction == null) return;
+        var evt = new CompactionEvent(
+            DateTimeOffset.UtcNow,
+            sessionId,
+            SummarizationTarget.ToolResult,
+            itemKey,
+            origChars,
+            compactedChars,
+            wasSpeculativeHit,
+            method);
+        _options.Telemetry?.Record(evt);
+        _options.OnCompaction?.Invoke(evt);
     }
 }
 
@@ -240,6 +265,14 @@ public class ToolResultCompactionChatClient : DelegatingChatClient
     {
         _options = options ?? new ToolResultCompactionOptions();
         _compactor = new ToolResultCompactor(_options);
+    }
+
+    public override object? GetService(Type serviceType, object? serviceKey = null)
+    {
+        if (serviceType == typeof(ToolResultCompactionChatClient)) return this;
+        if (serviceType == typeof(ToolResultCompactor)) return _compactor;
+        if (serviceType == typeof(CompactionTelemetry) && _options.Telemetry != null) return _options.Telemetry;
+        return base.GetService(serviceType, serviceKey);
     }
 
     public override async Task<ChatResponse> GetResponseAsync(

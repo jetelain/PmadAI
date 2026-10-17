@@ -1,4 +1,5 @@
 using Microsoft.Extensions.AI;
+using Pmad.AI.Compaction;
 
 namespace Pmad.AI.Benchmark.Engine;
 
@@ -43,6 +44,8 @@ public sealed class TurnResult
     public string? AssistantReasoning { get; set; }
     public string? ValidationMessage { get; set; }
     public bool SemanticRecallPassed { get; set; } = true;
+    public int CompactionPrunedChars { get; set; }
+    public int CompactionPrunedTokens { get; set; }
 }
 
 /// <summary>
@@ -108,6 +111,9 @@ public sealed class BenchmarkScenarioResult
     public bool SemanticRecallPassed { get; set; } = true;
     public List<TurnResult> TurnResults { get; init; } = [];
     public string? ErrorMessage { get; set; }
+    public CompactionTelemetrySnapshot? CompactionStats { get; set; }
+    public int CompactionPrunedChars => CompactionStats?.TotalPrunedChars ?? 0;
+    public int CompactionPrunedTokens => CompactionStats?.EstimatedPrunedTokens ?? 0;
 }
 
 /// <summary>
@@ -249,6 +255,10 @@ public sealed class ModelBenchmarkSummary
     /// Relative or absolute path to the dedicated verbatim transcript file for this model and configuration.
     /// </summary>
     public string? TranscriptPath { get; set; }
+
+    public CompactionTelemetrySnapshot? CompactionStats { get; set; }
+    public int CompactionPrunedChars => CompactionStats?.TotalPrunedChars ?? 0;
+    public int CompactionPrunedTokens => CompactionStats?.EstimatedPrunedTokens ?? 0;
 
     public List<BenchmarkScenarioResult> ScenarioResults { get; init; } = [];
 }

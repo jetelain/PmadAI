@@ -32,6 +32,12 @@ public class ThinkingTraceCompactionOptions
 
     /// <summary>Resolves the session id used to scope summaries. (default: ChatOptions.ConversationId, then "default").</summary>
     public Func<ChatOptions?, string>? SessionIdResolver { get; set; }
+
+    /// <summary>Optional compaction telemetry instance to collect compaction events.</summary>
+    public CompactionTelemetry? Telemetry { get; set; }
+
+    /// <summary>Optional callback invoked whenever a thinking trace compaction event occurs.</summary>
+    public Action<CompactionEvent>? OnCompaction { get; set; }
 }
 
 /// <summary>
@@ -45,6 +51,13 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
         : base(innerClient)
     {
         _options = options ?? new ThinkingTraceCompactionOptions();
+    }
+
+    public override object? GetService(Type serviceType, object? serviceKey = null)
+    {
+        if (serviceType == typeof(ThinkingTraceCompactionChatClient)) return this;
+        if (serviceType == typeof(CompactionTelemetry) && _options.Telemetry != null) return _options.Telemetry;
+        return base.GetService(serviceType, serviceKey);
     }
 
     public override async Task<ChatResponse> GetResponseAsync(
@@ -198,12 +211,13 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
         if (_options.Summarizer != null && _options.Summarizer.TryGetSummary(sessionId, itemKey, out var summary) && !string.IsNullOrWhiteSpace(summary))
         {
             var trimmed = summary.Trim();
-            if (trimmed.StartsWith("[THINKING_SUMMARY]", StringComparison.OrdinalIgnoreCase) ||
+            var compacted = (trimmed.StartsWith("[THINKING_SUMMARY]", StringComparison.OrdinalIgnoreCase) ||
                 trimmed.StartsWith("[Reasoned Summary:", StringComparison.OrdinalIgnoreCase))
-            {
-                return trimmed;
-            }
-            return $"[Reasoned Summary: {trimmed}]";
+                ? trimmed
+                : $"[Reasoned Summary: {trimmed}]";
+
+            RecordCompactionEvent(sessionId, itemKey, rawReasoning.Length, compacted.Length, wasSpeculativeHit: true, CompactionMethods.SemanticSummary);
+            return compacted;
         }
 
         // Deterministic fallback stub
@@ -223,7 +237,25 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
             firstLine = firstLine.Substring(0, maxChars) + "...";
         }
 
-        return string.Format(_options.FallbackFormat, firstLine);
+        var fallback = string.Format(_options.FallbackFormat, firstLine);
+        RecordCompactionEvent(sessionId, itemKey, rawReasoning.Length, fallback.Length, wasSpeculativeHit: false, CompactionMethods.DeterministicStub);
+        return fallback;
+    }
+
+    private void RecordCompactionEvent(string sessionId, string itemKey, int origChars, int compactedChars, bool wasSpeculativeHit, string method)
+    {
+        if (_options.Telemetry == null && _options.OnCompaction == null) return;
+        var evt = new CompactionEvent(
+            DateTimeOffset.UtcNow,
+            sessionId,
+            SummarizationTarget.ThinkingMonologue,
+            itemKey,
+            origChars,
+            compactedChars,
+            wasSpeculativeHit,
+            method);
+        _options.Telemetry?.Record(evt);
+        _options.OnCompaction?.Invoke(evt);
     }
 
     private void TriggerSpeculativeEnqueue(IList<ChatMessage> msgList, string sessionId)

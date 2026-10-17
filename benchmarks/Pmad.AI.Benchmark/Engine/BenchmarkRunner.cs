@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
 using Pmad.AI.Benchmark.Scenarios;
+using Pmad.AI.Compaction;
 using Pmad.AI.Transcripts;
 
 namespace Pmad.AI.Benchmark.Engine;
@@ -177,6 +178,9 @@ public sealed class BenchmarkRunner
             summary.AverageGenerationTokensPerSecond = summary.TotalOutputTokens / (summary.TotalTimeMs / 1000.0);
         }
 
+        var compactionTelemetry = _client.GetService<CompactionTelemetry>();
+        summary.CompactionStats = compactionTelemetry?.CreateSnapshot();
+
         var verbatimClient = _client.GetService<VerbatimTranscriptChatClient>();
         if (verbatimClient != null && !string.IsNullOrWhiteSpace(_transcriptPath))
         {
@@ -204,6 +208,9 @@ public sealed class BenchmarkRunner
 
         _client.GetService<Pmad.AI.Guardrails.ToolLoopCircuitBreaker>()?.Reset();
         scenario.OnScenarioStart();
+
+        var compaction = _client.GetService<CompactionTelemetry>();
+        var prevPrunedChars = compaction?.TotalPrunedChars ?? 0;
 
         var isGpu = _gpuLayers > 0 || string.Equals(_backend, "Vulkan", StringComparison.OrdinalIgnoreCase);
         var scenarioResult = new BenchmarkScenarioResult
@@ -353,6 +360,12 @@ public sealed class BenchmarkRunner
             turnStopwatch.Stop();
             turnResult.DurationMs = turnStopwatch.Elapsed.TotalMilliseconds;
 
+            var currentPrunedChars = compaction?.TotalPrunedChars ?? 0;
+            var turnPruned = Math.Max(0, currentPrunedChars - prevPrunedChars);
+            prevPrunedChars = currentPrunedChars;
+            turnResult.CompactionPrunedChars = turnPruned;
+            turnResult.CompactionPrunedTokens = (int)Math.Round(turnPruned / 4.0);
+
             // Validate Turn Expectations
             // 1. Tool name matching
             if (turnResult.AssistantFinalText.Contains("[Circuit Breaker Tripped]", StringComparison.OrdinalIgnoreCase))
@@ -477,6 +490,8 @@ public sealed class BenchmarkRunner
         {
             scenarioResult.Status = BenchmarkStatus.Failed;
         }
+
+        scenarioResult.CompactionStats = compaction?.CreateSnapshot(scenario.Id);
 
         var endMem = GetCurrentWorkingSetMb();
         if (endMem > scenarioResult.PeakMemoryMb)

@@ -5,6 +5,7 @@ using Pmad.AI.Benchmark.Reporting;
 using Pmad.AI.Benchmark.Scenarios;
 using Pmad.AI.Benchmark.Scenarios.Bfcl;
 using Pmad.AI.Benchmark.Scenarios.Ruler;
+using Pmad.AI.Transcripts;
 
 namespace Pmad.AI.Benchmark.Tests;
 
@@ -751,4 +752,82 @@ public class BenchmarkSuiteTests
         Assert.False(fail.IsSuccess);
         Assert.Contains("wal_55410", fail.Message);
     }
+
+    [Fact]
+    public void MarkdownReportWriter_GeneratesCompactionEfficiencyTable_WhenCompactionStatsPresent()
+    {
+        var summary = new ModelBenchmarkSummary
+        {
+            ModelId = "qwen3.5-4b",
+            ModelName = "Qwen 3.5 4B",
+            OptimizationConfigId = "all-optimizations",
+            OptimizationConfigLabel = "All Optimizations",
+            CompactionStats = new Pmad.AI.Compaction.CompactionTelemetrySnapshot(
+                TotalEvents: 10,
+                TotalOriginalChars: 45000,
+                TotalCompactedChars: 5000,
+                TotalPrunedChars: 40000,
+                EstimatedPrunedTokens: 10000,
+                SpeculativeHits: 7,
+                SpeculativeHitRatePercentage: 70.0,
+                ThinkingTracesCollapsed: 4,
+                ToolResultsTruncated: 2,
+                ToolResultsSummarized: 4,
+                ToolResultsCompacted: 6
+            ),
+            ScenarioResults =
+            [
+                new BenchmarkScenarioResult
+                {
+                    ScenarioId = "swebench-diff",
+                    ScenarioName = "SWE-bench Diff",
+                    ModelId = "qwen3.5-4b",
+                    CompactionStats = new Pmad.AI.Compaction.CompactionTelemetrySnapshot(
+                        TotalEvents: 5,
+                        TotalOriginalChars: 25000,
+                        TotalCompactedChars: 2500,
+                        TotalPrunedChars: 22500,
+                        EstimatedPrunedTokens: 5625,
+                        SpeculativeHits: 4,
+                        SpeculativeHitRatePercentage: 80.0,
+                        ThinkingTracesCollapsed: 2,
+                        ToolResultsTruncated: 1,
+                        ToolResultsSummarized: 2,
+                        ToolResultsCompacted: 3
+                    )
+                }
+            ]
+        };
+
+        var md = MarkdownReportWriter.GenerateMarkdown([summary]);
+
+        Assert.Contains("## Compaction Efficiency & Telemetry Matrix", md);
+        Assert.Contains("| Model | Configuration | Pruned Chars | Pruned Tokens | Speculative Hit Rate | Thinking Traces Collapsed | Tool Results Truncated | Tool Results Summarized | Total Events |", md);
+        Assert.Contains("40,000", md);
+        Assert.Contains("10,000", md);
+        Assert.Contains("70.0% (7/10)", md);
+        Assert.Contains("| `Qwen 3.5 4B` | **All Optimizations** | 40,000 | 10,000 | 70.0% (7/10) | 4 | 2 | 4 | 10 |", md);
+        Assert.Contains("Compaction Details for SWE-bench Diff", md);
+    }
+
+    [Fact]
+    public void BenchmarkPipelineBuilder_WiresCompactionTelemetry_AcrossMiddleware()
+    {
+        var fake = new BadMockClient();
+        var telemetry = new Pmad.AI.Compaction.CompactionTelemetry();
+
+        var client = BenchmarkPipelineBuilder.BuildPipeline(
+            fake,
+            OptimizationConfig.All,
+            compactionTelemetry: telemetry,
+            transcriptOptions: new VerbatimTranscriptOptions { SessionTitle = "Pipeline Wiring Test" });
+
+        var resolvedTelemetry = client.GetService<Pmad.AI.Compaction.CompactionTelemetry>();
+        Assert.NotNull(resolvedTelemetry);
+        Assert.Same(telemetry, resolvedTelemetry);
+
+        var transcriptClient = client.GetService<VerbatimTranscriptChatClient>();
+        Assert.NotNull(transcriptClient);
+    }
 }
+

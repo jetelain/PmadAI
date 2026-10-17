@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
+using Pmad.AI.Compaction;
 
 namespace Pmad.AI.Transcripts;
 
@@ -62,6 +63,9 @@ public class VerbatimTranscriptOptions
 
     /// <summary>Optional redaction hook applied to every text before it is recorded (secrets, tokens, PII).</summary>
     public Func<string, string>? Redactor { get; set; }
+
+    /// <summary>Optional compaction telemetry instance to attach to this transcript client.</summary>
+    public CompactionTelemetry? CompactionTelemetry { get; set; }
 }
 
 /// <summary>
@@ -86,6 +90,7 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
         public long TotalTokens;
         public int TurnCounter;
         public int TotalEstimatedChars;
+        public readonly List<CompactionEvent> CompactionEvents = [];
     }
 
     private sealed record TranscriptTurn(
@@ -106,11 +111,16 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
         : base(innerClient)
     {
         _options = options ?? new VerbatimTranscriptOptions();
+        if (_options.CompactionTelemetry != null)
+        {
+            _options.CompactionTelemetry.EventRecorded += RecordCompaction;
+        }
     }
 
     public override object? GetService(Type serviceType, object? serviceKey = null)
     {
         if (serviceType == typeof(VerbatimTranscriptChatClient)) return this;
+        if (serviceType == typeof(CompactionTelemetry) && _options.CompactionTelemetry != null) return _options.CompactionTelemetry;
         return base.GetService(serviceType, serviceKey);
     }
 
@@ -592,6 +602,20 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
     }
 
     /// <summary>
+    /// Records a compaction event for the specified or active session and embeds it in the verbatim transcript.
+    /// </summary>
+    public void RecordCompaction(CompactionEvent compactionEvent)
+    {
+        ArgumentNullException.ThrowIfNull(compactionEvent);
+        var targetSessionId = string.IsNullOrWhiteSpace(compactionEvent.SessionId) ? "default" : compactionEvent.SessionId;
+        var state = GetOrCreateState(targetSessionId);
+        lock (state.Lock)
+        {
+            state.CompactionEvents.Add(compactionEvent);
+        }
+    }
+
+    /// <summary>
     /// Generates complete GitHub-flavored Markdown text of the recorded session.
     /// </summary>
     public string ToMarkdown()
@@ -624,6 +648,11 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
                     sb.AppendLine($"input_tokens: {state.InputTokens}");
                     sb.AppendLine($"output_tokens: {state.OutputTokens}");
                     sb.AppendLine($"total_tokens: {state.TotalTokens}");
+                }
+                if (state.CompactionEvents.Count > 0)
+                {
+                    sb.AppendLine($"compaction_events: {state.CompactionEvents.Count}");
+                    sb.AppendLine($"compaction_pruned_chars: {state.CompactionEvents.Sum(e => e.PrunedChars)}");
                 }
                 sb.AppendLine("---");
                 sb.AppendLine();
@@ -666,6 +695,21 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
                     sb.AppendLine();
                 }
 
+                // Compaction events collapsible section
+                if (state.CompactionEvents.Count > 0)
+                {
+                    sb.AppendLine("<details open>");
+                    sb.AppendLine($"<summary>✂️ Compaction Events ({state.CompactionEvents.Count})</summary>");
+                    sb.AppendLine();
+                    foreach (var evt in state.CompactionEvents)
+                    {
+                        sb.AppendLine(evt.ToMarkdownBanner());
+                    }
+                    sb.AppendLine();
+                    sb.AppendLine("</details>");
+                    sb.AppendLine();
+                }
+
                 // Turns
                 foreach (var turn in state.Turns)
                 {
@@ -692,6 +736,17 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
                             {
                                 foreach (var tr in turn.ToolResults)
                                 {
+                                    var matchingCompaction = state.CompactionEvents.Where(e =>
+                                        e.Target == SummarizationTarget.ToolResult &&
+                                        (string.Equals(e.ItemKey, tr.CallId, StringComparison.OrdinalIgnoreCase) ||
+                                         (!string.IsNullOrEmpty(tr.CallId) && e.ItemKey.Contains(tr.CallId, StringComparison.OrdinalIgnoreCase)))).ToList();
+
+                                    foreach (var compEvt in matchingCompaction)
+                                    {
+                                        sb.AppendLine(compEvt.ToMarkdownBanner());
+                                        sb.AppendLine();
+                                    }
+
                                     sb.AppendLine($"#### Result for `{tr.CallId}`");
                                     sb.AppendLine("````");
                                     sb.AppendLine(tr.ResultText);
@@ -709,6 +764,19 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
 
                             if (!string.IsNullOrEmpty(turn.Reasoning))
                             {
+                                var matchingReasoning = state.CompactionEvents.Where(e =>
+                                    e.Target == SummarizationTarget.ThinkingMonologue &&
+                                    (e.ItemKey.Contains(turn.TurnNumber.ToString()) ||
+                                     turn.Reasoning.StartsWith("[Reasoned") ||
+                                     turn.Reasoning.StartsWith("[THINKING_SUMMARY") ||
+                                     turn.Reasoning.StartsWith("[Reasoned Summary"))).ToList();
+
+                                foreach (var compEvt in matchingReasoning)
+                                {
+                                    sb.AppendLine(compEvt.ToMarkdownBanner());
+                                    sb.AppendLine();
+                                }
+
                                 sb.AppendLine("> 💭 **Reasoning:**");
                                 foreach (var line in turn.Reasoning.Split('\n'))
                                 {
@@ -813,6 +881,11 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
         if (_disposed) return;
         _disposed = true;
 
+        if (_options.CompactionTelemetry != null)
+        {
+            _options.CompactionTelemetry.EventRecorded -= RecordCompaction;
+        }
+
         if (_options.AutoSaveOnDispose &&
             (!string.IsNullOrWhiteSpace(_options.OutputDirectory) || !string.IsNullOrWhiteSpace(_options.FilePath)))
         {
@@ -833,6 +906,11 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
     {
         if (_disposed) return;
         _disposed = true;
+
+        if (disposing && _options.CompactionTelemetry != null)
+        {
+            _options.CompactionTelemetry.EventRecorded -= RecordCompaction;
+        }
 
         if (disposing && _options.AutoSaveOnDispose &&
             (!string.IsNullOrWhiteSpace(_options.OutputDirectory) || !string.IsNullOrWhiteSpace(_options.FilePath)))

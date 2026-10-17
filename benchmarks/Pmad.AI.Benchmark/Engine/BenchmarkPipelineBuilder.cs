@@ -20,10 +20,13 @@ public static class BenchmarkPipelineBuilder
         ISpeculativeSummarizer? speculativeSummarizer = null,
         string? transcriptDir = null,
         string? transcriptFilePath = null,
-        VerbatimTranscriptOptions? transcriptOptions = null)
+        VerbatimTranscriptOptions? transcriptOptions = null,
+        CompactionTelemetry? compactionTelemetry = null)
     {
         ArgumentNullException.ThrowIfNull(innerClient);
         ArgumentNullException.ThrowIfNull(config);
+
+        var telemetry = compactionTelemetry ?? new CompactionTelemetry();
 
         IChatClient client = config.Id switch
         {
@@ -35,7 +38,8 @@ public static class BenchmarkPipelineBuilder
                 innerClient,
                 new ThinkingTraceCompactionOptions
                 {
-                    KeepVerbatimCount = 5
+                    KeepVerbatimCount = 5,
+                    Telemetry = telemetry
                 }),
 
             "opt-tool-compaction" => new ToolResultCompactionChatClient(
@@ -45,20 +49,22 @@ public static class BenchmarkPipelineBuilder
                     KeepVerbatimCount = 5,
                     FallbackCharacterLimit = 2500,
                     FallbackPrefixLength = 1800,
-                    FallbackSuffixLength = 700
+                    FallbackSuffixLength = 700,
+                    Telemetry = telemetry
                 }),
 
-            "opt-speculative-slm" => BuildSpeculativeCompactionPipeline(innerClient, speculativeSummarizer),
+            "opt-speculative-slm" => BuildSpeculativeCompactionPipeline(innerClient, speculativeSummarizer, telemetry),
 
             "opt-lenient-dispatch" => BuildLenientDispatchPipeline(innerClient),
 
-            "all-optimizations" => BuildAllOptimizationsPipeline(innerClient, speculativeSummarizer),
+            "all-optimizations" => BuildAllOptimizationsPipeline(innerClient, speculativeSummarizer, telemetry),
 
             _ => innerClient
         };
 
         if (transcriptOptions != null)
         {
+            transcriptOptions.CompactionTelemetry ??= telemetry;
             client = new VerbatimTranscriptChatClient(client, transcriptOptions);
         }
         else if (!string.IsNullOrWhiteSpace(transcriptFilePath))
@@ -67,7 +73,8 @@ public static class BenchmarkPipelineBuilder
             {
                 FilePath = transcriptFilePath,
                 AutoSaveOnDispose = true,
-                FlushAfterEachTurn = true
+                FlushAfterEachTurn = true,
+                CompactionTelemetry = telemetry
             });
         }
         else if (!string.IsNullOrWhiteSpace(transcriptDir))
@@ -76,7 +83,8 @@ public static class BenchmarkPipelineBuilder
             {
                 OutputDirectory = transcriptDir,
                 AutoSaveOnDispose = true,
-                FlushAfterEachTurn = true
+                FlushAfterEachTurn = true,
+                CompactionTelemetry = telemetry
             });
         }
 
@@ -85,7 +93,8 @@ public static class BenchmarkPipelineBuilder
 
     private static IChatClient BuildSpeculativeCompactionPipeline(
         IChatClient innerClient,
-        ISpeculativeSummarizer? speculativeSummarizer)
+        ISpeculativeSummarizer? speculativeSummarizer,
+        CompactionTelemetry telemetry)
     {
         var toolOptions = new ToolResultCompactionOptions
         {
@@ -93,14 +102,16 @@ public static class BenchmarkPipelineBuilder
             FallbackCharacterLimit = 2500,
             FallbackPrefixLength = 1800,
             FallbackSuffixLength = 700,
-            Summarizer = speculativeSummarizer
+            Summarizer = speculativeSummarizer,
+            Telemetry = telemetry
         };
         var withToolCompaction = new ToolResultCompactionChatClient(innerClient, toolOptions);
 
         var thinkOptions = new ThinkingTraceCompactionOptions
         {
             KeepVerbatimCount = 5,
-            Summarizer = speculativeSummarizer
+            Summarizer = speculativeSummarizer,
+            Telemetry = telemetry
         };
         return new ThinkingTraceCompactionChatClient(withToolCompaction, thinkOptions);
     }
@@ -121,7 +132,8 @@ public static class BenchmarkPipelineBuilder
 
     private static IChatClient BuildAllOptimizationsPipeline(
         IChatClient innerClient,
-        ISpeculativeSummarizer? speculativeSummarizer)
+        ISpeculativeSummarizer? speculativeSummarizer,
+        CompactionTelemetry telemetry)
     {
         // 1. Tool call healing wraps raw client
         IChatClient current = new ToolCallHealingChatClient(innerClient);
@@ -133,14 +145,16 @@ public static class BenchmarkPipelineBuilder
             FallbackCharacterLimit = 2500,
             FallbackPrefixLength = 1800,
             FallbackSuffixLength = 700,
-            Summarizer = speculativeSummarizer
+            Summarizer = speculativeSummarizer,
+            Telemetry = telemetry
         });
 
         // 3. Thinking trace compaction
         current = new ThinkingTraceCompactionChatClient(current, new ThinkingTraceCompactionOptions
         {
             KeepVerbatimCount = 5,
-            Summarizer = speculativeSummarizer
+            Summarizer = speculativeSummarizer,
+            Telemetry = telemetry
         });
 
         // 4. Circuit breaker & lenient dispatch

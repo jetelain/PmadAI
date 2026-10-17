@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Pmad.AI.Benchmark.Engine;
+using Pmad.AI.Compaction;
 
 namespace Pmad.AI.Benchmark.Reporting;
 
@@ -260,6 +262,43 @@ public static class MarkdownReportWriter
             }
         }
 
+        // Dedicated Compaction Efficiency Table
+        var summariesWithCompaction = summaries
+            .Where(s => (s.CompactionStats != null && s.CompactionStats.TotalEvents > 0) ||
+                        s.ScenarioResults.Any(r => r.CompactionStats != null && r.CompactionStats.TotalEvents > 0))
+            .ToList();
+
+        if (summariesWithCompaction.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Compaction Efficiency & Telemetry Matrix");
+            sb.AppendLine();
+            sb.AppendLine("> Reports characters and tokens pruned, speculative SLM hit rate, and breakdown of collapsed reasoning traces vs. truncated/summarized tool results.");
+            sb.AppendLine();
+            sb.AppendLine("| Model | Configuration | Pruned Chars | Pruned Tokens | Speculative Hit Rate | Thinking Traces Collapsed | Tool Results Truncated | Tool Results Summarized | Total Events |");
+            sb.AppendLine("|---|---|---|---|---|---|---|---|---|");
+
+            foreach (var s in summariesWithCompaction)
+            {
+                var stats = s.CompactionStats ?? AggregateScenarioStats(s.ScenarioResults);
+                var configName = !string.IsNullOrWhiteSpace(s.OptimizationConfigLabel)
+                    ? s.OptimizationConfigLabel
+                    : (s.ConfigurationLabel ?? "Default");
+
+                var configDisplay = !string.IsNullOrWhiteSpace(s.TranscriptPath)
+                    ? $"[**{configName}**]({s.TranscriptPath})"
+                    : $"**{configName}**";
+
+                var hitRateStr = stats.TotalEvents > 0
+                    ? $"{stats.SpeculativeHitRatePercentage.ToString("F1", CultureInfo.InvariantCulture)}% ({stats.SpeculativeHits}/{stats.TotalEvents})"
+                    : "0.0%";
+                var prunedCharsStr = stats.TotalPrunedChars.ToString("N0", CultureInfo.InvariantCulture);
+                var prunedTokensStr = stats.EstimatedPrunedTokens.ToString("N0", CultureInfo.InvariantCulture);
+
+                sb.AppendLine($"| `{s.ModelName}` | {configDisplay} | {prunedCharsStr} | {prunedTokensStr} | {hitRateStr} | {stats.ThinkingTracesCollapsed} | {stats.ToolResultsTruncated} | {stats.ToolResultsSummarized} | {stats.TotalEvents} |");
+            }
+        }
+
         sb.AppendLine();
         sb.AppendLine("## Detailed Scenario Breakdown");
         sb.AppendLine();
@@ -296,6 +335,13 @@ public static class MarkdownReportWriter
 
             foreach (var sc in m.ScenarioResults)
             {
+                if (sc.CompactionStats != null && sc.CompactionStats.TotalEvents > 0)
+                {
+                    var c = sc.CompactionStats;
+                    sb.AppendLine($"> ✂️ **Compaction Details for {sc.ScenarioName}:** {c.TotalPrunedChars.ToString("N0", CultureInfo.InvariantCulture)} chars pruned (~{c.EstimatedPrunedTokens.ToString("N0", CultureInfo.InvariantCulture)} tokens), {c.ThinkingTracesCollapsed} thinking traces collapsed, {c.ToolResultsTruncated} tool results truncated, {c.ToolResultsSummarized} summarized (Speculative Hit Rate: {c.SpeculativeHitRatePercentage.ToString("F1", CultureInfo.InvariantCulture)}%).");
+                    sb.AppendLine();
+                }
+
                 if (sc.Status != BenchmarkStatus.Passed || !string.IsNullOrWhiteSpace(sc.ErrorMessage))
                 {
                     sb.AppendLine($"> [!WARNING]");
@@ -313,6 +359,45 @@ public static class MarkdownReportWriter
         }
 
         return sb.ToString();
+    }
+
+    private static CompactionTelemetrySnapshot AggregateScenarioStats(IEnumerable<BenchmarkScenarioResult> scenarioResults)
+    {
+        var scStats = scenarioResults
+            .Where(sc => sc.CompactionStats != null)
+            .Select(sc => sc.CompactionStats!)
+            .ToList();
+
+        if (scStats.Count == 0)
+        {
+            return new CompactionTelemetrySnapshot(0, 0, 0, 0, 0, 0, 0.0, 0, 0, 0, 0);
+        }
+
+        var totalEvents = scStats.Sum(s => s.TotalEvents);
+        var totalOrig = scStats.Sum(s => s.TotalOriginalChars);
+        var totalComp = scStats.Sum(s => s.TotalCompactedChars);
+        var totalPruned = scStats.Sum(s => s.TotalPrunedChars);
+        var estTokens = scStats.Sum(s => s.EstimatedPrunedTokens);
+        var specHits = scStats.Sum(s => s.SpeculativeHits);
+        var hitRate = totalEvents > 0 ? Math.Round((double)specHits * 100.0 / totalEvents, 1) : 0.0;
+        var thinking = scStats.Sum(s => s.ThinkingTracesCollapsed);
+        var toolTrunc = scStats.Sum(s => s.ToolResultsTruncated);
+        var toolSumm = scStats.Sum(s => s.ToolResultsSummarized);
+        var toolComp = scStats.Sum(s => s.ToolResultsCompacted);
+
+        return new CompactionTelemetrySnapshot(
+            TotalEvents: totalEvents,
+            TotalOriginalChars: totalOrig,
+            TotalCompactedChars: totalComp,
+            TotalPrunedChars: totalPruned,
+            EstimatedPrunedTokens: estTokens,
+            SpeculativeHits: specHits,
+            SpeculativeHitRatePercentage: hitRate,
+            ThinkingTracesCollapsed: thinking,
+            ToolResultsTruncated: toolTrunc,
+            ToolResultsSummarized: toolSumm,
+            ToolResultsCompacted: toolComp
+        );
     }
 
     public static async Task WriteToFileAsync(
