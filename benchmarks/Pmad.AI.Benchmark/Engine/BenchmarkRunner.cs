@@ -97,6 +97,8 @@ public sealed class BenchmarkRunner
                     ScenarioName = scenario.Name,
                     ModelId = _modelId,
                     Status = BenchmarkStatus.Failed,
+                    TaskSuccess = false,
+                    StepAccuracy = 0.0,
                     Score = 0.0,
                     Weight = scenario.Weight,
                     TotalTurns = scenario.Turns.Count,
@@ -201,6 +203,7 @@ public sealed class BenchmarkRunner
         Log($"\n>>> Running Scenario: [{scenario.Id}] \"{scenario.Name}\"");
 
         _client.GetService<Pmad.AI.Guardrails.ToolLoopCircuitBreaker>()?.Reset();
+        scenario.OnScenarioStart();
 
         var isGpu = _gpuLayers > 0 || string.Equals(_backend, "Vulkan", StringComparison.OrdinalIgnoreCase);
         var scenarioResult = new BenchmarkScenarioResult
@@ -210,6 +213,7 @@ public sealed class BenchmarkRunner
             ModelId = _modelId,
             Weight = scenario.Weight,
             TotalTurns = scenario.Turns.Count,
+            ExecutionDetails = (scenario as Scenarios.SweBench.SweBenchTraceScenario)?.Executor.ExecutionMode,
             PeakMemoryMb = GetCurrentWorkingSetMb(),
             PeakVramMb = isGpu ? (NvidiaSmiMonitor.GetUsedVramMb() ?? 0) : 0
         };
@@ -448,18 +452,24 @@ public sealed class BenchmarkRunner
         scenarioStopwatch.Stop();
         scenarioResult.TotalDurationMs = scenarioStopwatch.Elapsed.TotalMilliseconds;
 
-        // Compute subtest score (0 - 100), passed turns, and scenario status
+        // Compute dual scoring metrics: TaskSuccess (Binary Pass@1) & StepAccuracy (turn-by-turn)
         scenarioResult.TurnsPassed = scenarioResult.TurnResults.Count(t => t.Status == BenchmarkStatus.Passed);
         scenarioResult.TotalTurns = scenario.Turns.Count;
-        scenarioResult.Score = scenarioResult.TotalTurns > 0
+        scenarioResult.StepAccuracy = scenarioResult.TotalTurns > 0
             ? Math.Round(scenarioResult.TurnsPassed * 100.0 / scenarioResult.TotalTurns, 1)
             : 0.0;
 
-        if (scenarioResult.Score >= 100.0)
+        scenarioResult.TaskSuccess = scenario.EvaluateTaskSuccess(scenarioResult);
+
+        // Dual scoring: 70% Task Success (Pass@1) + 30% Step Accuracy
+        var taskSuccessScore = scenarioResult.TaskSuccess ? 100.0 : 0.0;
+        scenarioResult.Score = Math.Round((0.70 * taskSuccessScore) + (0.30 * scenarioResult.StepAccuracy), 1);
+
+        if (scenarioResult.TaskSuccess && scenarioResult.StepAccuracy >= 100.0)
         {
             scenarioResult.Status = BenchmarkStatus.Passed;
         }
-        else if (scenarioResult.Score > 0.0)
+        else if (scenarioResult.TaskSuccess || scenarioResult.StepAccuracy > 0.0)
         {
             scenarioResult.Status = BenchmarkStatus.Partial;
         }

@@ -40,7 +40,7 @@ public static class Program
         Console.WriteLine($"GPU:      {hardware.GpuSummary}");
         Console.WriteLine();
 
-        var scenarios = BenchmarkScenario.FilterScenarios(options.ScenarioFilter);
+        var scenarios = BenchmarkScenario.FilterScenarios(options.ScenarioFilter, options.SweSandbox, options.DockerContainer);
         if (scenarios.Count == 0)
         {
             Console.ForegroundColor = ConsoleColor.Red;

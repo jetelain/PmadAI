@@ -8,6 +8,7 @@
     <Project Path="benchmarks/Pmad.AI.Benchmark/Pmad.AI.Benchmark.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Pmad.AI.Benchmark.Tests/Pmad.AI.Benchmark.Tests.csproj" />
     <Project Path="tests/Pmad.AI.LlamaSharp.Tests/Pmad.AI.LlamaSharp.Tests.csproj" />
     <Project Path="tests/Pmad.AI.Tests/Pmad.AI.Tests.csproj" Id="8b15ea52-1fe3-4ed6-8ee0-4a22b44e579c" />
     <Project Path="tests/Pmad.AI.AotSmokeTest/Pmad.AI.AotSmokeTest.csproj" />

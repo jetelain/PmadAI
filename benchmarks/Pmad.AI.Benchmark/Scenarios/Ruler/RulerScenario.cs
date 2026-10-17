@@ -40,7 +40,7 @@ public class RulerScenario : BenchmarkScenario
 
     public override double ComplexityMultiplier => _targetTokens switch
     {
-        <= 8192 => 10.0,
+        <= 8192 => 5.0,  // 2 turns * 5.0 = 10.0 weight
         <= 16384 => 15.0,
         <= 32768 => 20.0,
         <= 65536 => 25.0,

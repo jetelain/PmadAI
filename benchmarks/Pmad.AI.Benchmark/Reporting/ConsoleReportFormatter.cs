@@ -17,8 +17,8 @@ public static class ConsoleReportFormatter
         Console.WriteLine(new string('=', 134));
         Console.ResetColor();
 
-        Console.WriteLine(string.Format("{0,-25} | {1,-6} | {2,-7} | {3,-6} | {4,-10} | {5,-10} | {6,-8} | {7,-10} | {8,-10} | {9,-10} | {10,-9}",
-            "Scenario", "Status", "Score", "Weight", "Tool Calls", "Prompt Tok", "Gen Tok", "Gen Tok/s", "RAM", "GPU VRAM", "Time (ms)"));
+        Console.WriteLine(string.Format("{0,-23} | {1,-6} | {2,-6} | {3,-8} | {4,-7} | {5,-6} | {6,-6} | {7,-8} | {8,-8} | {9,-9} | {10,-8} | {11,-8} | {12,-8}",
+            "Scenario", "Status", "Pass@1", "Step Acc", "Score", "Weight", "Tools", "Prompt", "Gen Tok", "Gen Tok/s", "RAM", "GPU VRAM", "Time(ms)"));
         Console.WriteLine(new string('-', 134));
 
         foreach (var sc in summary.ScenarioResults)
@@ -36,12 +36,16 @@ public static class ConsoleReportFormatter
             else Console.ForegroundColor = ConsoleColor.Yellow;
 
             var vramStr = sc.PeakVramMb > 0 ? BenchmarkRunner.FormatMemory(sc.PeakVramMb) : "-";
+            var passAt1Str = sc.TaskSuccess ? "PASS" : "FAIL";
+            var stepAccStr = $"{sc.StepAccuracy:F1}%";
             var scoreStr = $"{sc.Score:F1}%";
             var weightStr = $"{sc.Weight:F1}";
 
-            Console.WriteLine(string.Format("{0,-25} | {1,-6} | {2,-7} | {3,-6} | {4,-10} | {5,-10} | {6,-8} | {7,-10:F1} | {8,-10} | {9,-10} | {10,-9:F0}",
-                sc.ScenarioName.Length > 25 ? sc.ScenarioName[..22] + "..." : sc.ScenarioName,
+            Console.WriteLine(string.Format("{0,-23} | {1,-6} | {2,-6} | {3,-8} | {4,-7} | {5,-6} | {6,-6} | {7,-8} | {8,-8} | {9,-9:F1} | {10,-8} | {11,-8} | {12,-8:F0}",
+                sc.ScenarioName.Length > 23 ? sc.ScenarioName[..20] + "..." : sc.ScenarioName,
                 statusStr,
+                passAt1Str,
+                stepAccStr,
                 scoreStr,
                 weightStr,
                 sc.TotalToolCalls,
@@ -67,13 +71,15 @@ public static class ConsoleReportFormatter
         Console.WriteLine(new string('=', 134));
         Console.ResetColor();
 
-        Console.WriteLine(string.Format("{0,-22} | {1,-8} | {2,-11} | {3,-7} | {4,-9} | {5,-9} | {6,-9} | {7,-9} | {8,-9} | {9,-10} | {10,-10}",
-            "Model", "Backend", "Reasoning", "Passed", "Pass Rate", "Tool Calls", "Gen Toks", "Avg Tok/s", "RAM", "GPU VRAM", "Total Time"));
+        Console.WriteLine(string.Format("{0,-20} | {1,-7} | {2,-9} | {3,-6} | {4,-7} | {5,-8} | {6,-9} | {7,-6} | {8,-8} | {9,-8} | {10,-8} | {11,-8} | {12,-9}",
+            "Model", "Backend", "Reasoning", "Passed", "Pass@1", "Step Acc", "Pass Rate", "Tools", "Gen Toks", "Avg Tok/s", "RAM", "GPU VRAM", "Total Time"));
         Console.WriteLine(new string('-', 134));
 
         foreach (var m in allSummaries)
         {
             var passedRatio = $"{m.ScenariosPassed}/{m.ScenariosRun}";
+            var passAt1RateStr = $"{m.TaskSuccessRatePercentage:F1}%";
+            var stepAccRateStr = $"{m.StepAccuracyPercentage:F1}%";
             var passRateStr = $"{m.PassRatePercentage:F1}%";
             var totalTimeSec = $"{m.TotalTimeMs / 1000.0:F2}s";
             var backendStr = m.Backend ?? (m.GpuLayers > 0 ? "Vulkan" : "CPU");
@@ -84,11 +90,13 @@ public static class ConsoleReportFormatter
             else if (m.PassRatePercentage >= 50) Console.ForegroundColor = ConsoleColor.Yellow;
             else Console.ForegroundColor = ConsoleColor.Red;
 
-            Console.WriteLine(string.Format("{0,-22} | {1,-8} | {2,-11} | {3,-7} | {4,-9} | {5,-9} | {6,-9} | {7,-9:F1} | {8,-9} | {9,-10} | {10,-10}",
-                m.ModelName.Length > 22 ? m.ModelName[..19] + "..." : m.ModelName,
+            Console.WriteLine(string.Format("{0,-20} | {1,-7} | {2,-9} | {3,-6} | {4,-7} | {5,-8} | {6,-9} | {7,-6} | {8,-8} | {9,-8:F1} | {10,-8} | {11,-8} | {12,-9}",
+                m.ModelName.Length > 20 ? m.ModelName[..17] + "..." : m.ModelName,
                 backendStr,
                 reasStr,
                 passedRatio,
+                passAt1RateStr,
+                stepAccRateStr,
                 passRateStr,
                 m.TotalToolCalls,
                 m.TotalOutputTokens,

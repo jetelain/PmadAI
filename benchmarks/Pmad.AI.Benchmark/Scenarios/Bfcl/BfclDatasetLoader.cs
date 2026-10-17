@@ -67,6 +67,16 @@ public static class BfclDatasetLoader
             filesToLoad.Add((Path.Combine(fixturesDir, "irrelevance.jsonl"), BfclCategory.Irrelevance));
         }
 
+        if (catLower is "all" or "bfcl" or "multiturn" or "bfcl-multiturn")
+        {
+            filesToLoad.Add((Path.Combine(fixturesDir, "multiturn.jsonl"), BfclCategory.MultiTurn));
+        }
+
+        if (catLower is "all" or "bfcl" or "strict" or "bfcl-strict")
+        {
+            filesToLoad.Add((Path.Combine(fixturesDir, "strict.jsonl"), BfclCategory.Strict));
+        }
+
         var results = new List<BfclEntry>();
 
         foreach (var (filePath, category) in filesToLoad)
@@ -98,6 +108,16 @@ public static class BfclDatasetLoader
 
         var id = root.GetProperty("id").GetString() ?? Guid.NewGuid().ToString();
         var question = root.GetProperty("question").GetString() ?? string.Empty;
+
+        var category = defaultCategory;
+        if (root.TryGetProperty("category", out var catProp) && catProp.ValueKind == JsonValueKind.String)
+        {
+            var catStr = catProp.GetString();
+            if (Enum.TryParse<BfclCategory>(catStr, ignoreCase: true, out var parsedCategory))
+            {
+                category = parsedCategory;
+            }
+        }
 
         // Parse tools
         var tools = new List<AITool>();
@@ -145,16 +165,53 @@ public static class BfclDatasetLoader
             }
         }
 
-        return new BfclEntry(id, defaultCategory, question, tools, groundTruth);
+        bool clearHistory = true;
+        if (root.TryGetProperty("clear_history", out var chElem) &&
+            (chElem.ValueKind == JsonValueKind.True || chElem.ValueKind == JsonValueKind.False))
+        {
+            clearHistory = chElem.GetBoolean();
+        }
+
+        string? toolResult = null;
+        if (root.TryGetProperty("tool_result", out var trElem))
+        {
+            toolResult = trElem.ValueKind == JsonValueKind.String
+                ? trElem.GetString()
+                : trElem.GetRawText();
+        }
+
+        List<string>? expectedKeywords = null;
+        if (root.TryGetProperty("expected_text", out var etElem) && etElem.ValueKind == JsonValueKind.Array)
+        {
+            expectedKeywords = etElem.EnumerateArray()
+                .Select(x => x.GetString())
+                .Where(x => !string.IsNullOrEmpty(x))
+                .Select(x => x!)
+                .ToList();
+        }
+
+        return new BfclEntry(id, category, question, tools, groundTruth, clearHistory, toolResult, expectedKeywords);
     }
 
-    private static object? ConvertJsonValue(JsonElement el) => el.ValueKind switch
+    public static object? ConvertJsonValue(JsonElement el) => el.ValueKind switch
     {
         JsonValueKind.String => el.GetString(),
-        JsonValueKind.Number => el.TryGetInt64(out var l) ? l : el.GetDouble(),
+        JsonValueKind.Number => el.TryGetInt64(out var l) ? (object)l : el.GetDouble(),
         JsonValueKind.True => true,
         JsonValueKind.False => false,
         JsonValueKind.Null => null,
+        JsonValueKind.Object => ConvertJsonObject(el),
+        JsonValueKind.Array => el.EnumerateArray().Select(ConvertJsonValue).ToList(),
         _ => el.Clone()
     };
+
+    private static Dictionary<string, object?> ConvertJsonObject(JsonElement el)
+    {
+        var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var prop in el.EnumerateObject())
+        {
+            dict[prop.Name] = ConvertJsonValue(prop.Value);
+        }
+        return dict;
+    }
 }

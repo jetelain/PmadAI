@@ -56,8 +56,26 @@ public sealed class BenchmarkScenarioResult
     public BenchmarkStatus Status { get; set; } = BenchmarkStatus.Passed;
 
     /// <summary>
-    /// Scenario evaluation score ranging from 0.0 to 100.0 based on passed subtest turns.
+    /// Whether the scenario achieved end-to-end task success (binary Pass@1).
+    /// In SWE-bench, only true if the patch is applied and verification tests pass.
+    /// In other scenarios, true if all turns pass assertions.
+    /// </summary>
+    public bool TaskSuccess { get; set; } = true;
+
+    /// <summary>
+    /// Optional environment or sandbox execution mode note (e.g. "Mock", "Docker (swebench_...)", "Docker (Fallback: Mock)").
+    /// </summary>
+    public string? ExecutionDetails { get; set; }
+
+    /// <summary>
+    /// Turn-by-turn step accuracy percentage (0.0 to 100.0) measuring tool adherence and partial progress.
     /// Formula: (TurnsPassed / TotalTurns) * 100.0.
+    /// </summary>
+    public double StepAccuracy { get; set; } = 100.0;
+
+    /// <summary>
+    /// Combined scenario evaluation score ranging from 0.0 to 100.0 based on dual scoring metrics:
+    /// 70% TaskSuccess (Binary Pass@1) + 30% StepAccuracy (turn-by-turn).
     /// </summary>
     public double Score { get; set; } = 100.0;
 
@@ -148,7 +166,38 @@ public sealed class ModelBenchmarkSummary
     public int ScenariosFailed { get; set; }
 
     /// <summary>
-    /// Overall benchmark pass rate percentage computed as sum(score * weight) / sum(weight).
+    /// Overall binary Task Success (Pass@1) rate percentage across all evaluated scenarios.
+    /// </summary>
+    public double TaskSuccessRatePercentage
+    {
+        get
+        {
+            if (ScenarioResults.Count == 0) return 0.0;
+            var totalWeight = ScenarioResults.Sum(s => s.Weight);
+            return totalWeight > 0
+                ? Math.Round(ScenarioResults.Sum(s => (s.TaskSuccess ? 100.0 : 0.0) * s.Weight) / totalWeight, 1)
+                : Math.Round(ScenarioResults.Count(s => s.TaskSuccess) * 100.0 / ScenarioResults.Count, 1);
+        }
+    }
+
+    /// <summary>
+    /// Overall turn-by-turn Step Accuracy percentage across all evaluated scenarios.
+    /// </summary>
+    public double StepAccuracyPercentage
+    {
+        get
+        {
+            if (ScenarioResults.Count == 0) return 0.0;
+            var totalWeight = ScenarioResults.Sum(s => s.Weight);
+            return totalWeight > 0
+                ? Math.Round(ScenarioResults.Sum(s => s.StepAccuracy * s.Weight) / totalWeight, 1)
+                : Math.Round(ScenarioResults.Average(s => s.StepAccuracy), 1);
+        }
+    }
+
+    /// <summary>
+    /// Overall benchmark pass rate percentage computed as sum(score * weight) / sum(weight),
+    /// reflecting the dual metric (70% Task Success + 30% Step Accuracy).
     /// </summary>
     public double PassRatePercentage
     {

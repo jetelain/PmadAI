@@ -211,6 +211,170 @@ public sealed class MockBenchmarkChatClient : IChatClient
             );
         }
 
+        // BFCL Multi-Turn Scenario
+        if (toolsAvailable && userText.Contains("sarah_dev", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_mt_1", "get_customer_profile", new Dictionary<string, object?> { ["username"] = "sarah_dev" })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: promptTokens,
+                OutputTokens: 25
+            );
+        }
+        if (toolsAvailable && userText.Contains("Sarah's default wallet", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_mt_2", "get_wallet_balance", new Dictionary<string, object?> { ["wallet_id"] = "wal_55410" })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: promptTokens,
+                OutputTokens: 25
+            );
+        }
+        if (toolsAvailable && userText.Contains("Authorize a payment of 350.00 USD", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_mt_3", "authorize_payment", new Dictionary<string, object?>
+                {
+                    ["wallet_id"] = "wal_55410",
+                    ["vendor_name"] = "AWS-INFRA",
+                    ["amount"] = 350.00,
+                    ["currency"] = "USD"
+                })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: promptTokens,
+                OutputTokens: 35
+            );
+        }
+        if (toolsAvailable && userText.Contains("Commit the authorized payment auth_99182a", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_mt_4", "commit_payment_and_invoice", new Dictionary<string, object?> { ["auth_code"] = "auth_99182a" })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: promptTokens,
+                OutputTokens: 25
+            );
+        }
+        if (userText.Contains("Please summarize the invoice number and whether the payment is settled", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new TextContent("The payment has been settled successfully under invoice number INV-2026-4401.")],
+                ChatFinishReason.Stop,
+                PromptTokens: promptTokens,
+                OutputTokens: 20
+            );
+        }
+        if (toolsAvailable && userText.Contains("ticket for service 'auth-gateway'", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_mt_5", "get_active_incidents", new Dictionary<string, object?> { ["service_name"] = "auth-gateway" })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: promptTokens,
+                OutputTokens: 25
+            );
+        }
+        if (toolsAvailable && userText.Contains("primary pod", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_mt_6", "get_pod_diagnostics", new Dictionary<string, object?> { ["pod_name"] = "auth-gateway-pod-x89", ["include_logs"] = true })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: promptTokens,
+                OutputTokens: 25
+            );
+        }
+        if (toolsAvailable && userText.Contains("Patch deployment memory limit for incident INC-7704", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_mt_7", "patch_deployment_resource", new Dictionary<string, object?>
+                {
+                    ["incident_id"] = "INC-7704",
+                    ["resource_type"] = "memory_mb",
+                    ["new_value"] = 2048
+                })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: promptTokens,
+                OutputTokens: 30
+            );
+        }
+        if (toolsAvailable && userText.Contains("Resolve incident INC-7704", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_mt_8", "resolve_incident", new Dictionary<string, object?>
+                {
+                    ["incident_id"] = "INC-7704",
+                    ["resolution_notes"] = "Scaled memory limit to 2048MB"
+                })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: promptTokens,
+                OutputTokens: 30
+            );
+        }
+
+        // BFCL Strict Scenario
+        if (toolsAvailable && userText.Contains("Kubernetes production workload 'api-gateway'", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_strict_1", "deploy_kubernetes_workload", new Dictionary<string, object?>
+                {
+                    ["spec"] = new Dictionary<string, object?>
+                    {
+                        ["name"] = "api-gateway",
+                        ["replicas"] = 3,
+                        ["resources"] = new Dictionary<string, object?>
+                        {
+                            ["cpu_cores"] = 2.5,
+                            ["memory_gib"] = 4.0
+                        },
+                        ["environment"] = "production"
+                    }
+                })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: promptTokens,
+                OutputTokens: 40
+            );
+        }
+        if (toolsAvailable && userText.Contains("alert_cpu_high", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_strict_2", "configure_alert_rule", new Dictionary<string, object?>
+                {
+                    ["alert_id"] = "alert_cpu_high",
+                    ["threshold"] = 95.5,
+                    ["severity"] = "CRITICAL",
+                    ["notification"] = new Dictionary<string, object?>
+                    {
+                        ["channel"] = "slack",
+                        ["target"] = "#ops-alerts",
+                        ["cooldown_minutes"] = 15
+                    }
+                })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: promptTokens,
+                OutputTokens: 45
+            );
+        }
+        if (toolsAvailable && userText.Contains("payment transaction for 199.99 USD", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_strict_3", "create_payment_transaction", new Dictionary<string, object?>
+                {
+                    ["amount"] = 199.99,
+                    ["currency"] = "USD",
+                    ["metadata"] = new Dictionary<string, object?>
+                    {
+                        ["order_id"] = "ord_8842",
+                        ["customer"] = new Dictionary<string, object?>
+                        {
+                            ["account_number"] = 100982,
+                            ["tax_id"] = "US-TAX-4491"
+                        }
+                    }
+                })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: promptTokens,
+                OutputTokens: 45
+            );
+        }
+
         // BFCL Scenarios (dynamic lookup from loaded fixtures)
         var bfclEntries = Scenarios.Bfcl.BfclDatasetLoader.LoadEntries("all");
         var availableTools = options?.Tools?.Select(t => t.Name).Where(n => !string.IsNullOrEmpty(n)).ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];

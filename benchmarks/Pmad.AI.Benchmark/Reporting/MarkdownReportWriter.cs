@@ -43,8 +43,8 @@ public static class MarkdownReportWriter
 
         sb.AppendLine("## Summary Comparison");
         sb.AppendLine();
-        sb.AppendLine("| Model | Backend | Reasoning | Scenarios Passed | Pass Rate | Tool Calls | Gen Tokens | Avg Speed (tok/s) | Sys RAM | GPU VRAM | Total Time |");
-        sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|");
+        sb.AppendLine("| Model | Backend | Reasoning | Scenarios Passed | Pass@1 Rate | Step Acc | Pass Rate | Tool Calls | Gen Tokens | Avg Speed (tok/s) | Sys RAM | GPU VRAM | Total Time |");
+        sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
 
         foreach (var m in summaries)
         {
@@ -54,7 +54,7 @@ public static class MarkdownReportWriter
             var modelDisplay = !string.IsNullOrWhiteSpace(m.TranscriptPath)
                 ? $"[`{m.DisplayName}`]({m.TranscriptPath})"
                 : $"`{m.DisplayName}`";
-            sb.AppendLine($"| {modelDisplay} | {backendStr} | {reasStr} | {m.ScenariosPassed}/{m.ScenariosRun} | {m.PassRatePercentage:F1}% | {m.TotalToolCalls} | {m.TotalOutputTokens} | {m.AverageGenerationTokensPerSecond:F1} | {BenchmarkRunner.FormatMemory(m.PeakMemoryMb)} | {vramStr} | {m.TotalTimeMs / 1000.0:F2}s |");
+            sb.AppendLine($"| {modelDisplay} | {backendStr} | {reasStr} | {m.ScenariosPassed}/{m.ScenariosRun} | {m.TaskSuccessRatePercentage:F1}% | {m.StepAccuracyPercentage:F1}% | {m.PassRatePercentage:F1}% | {m.TotalToolCalls} | {m.TotalOutputTokens} | {m.AverageGenerationTokensPerSecond:F1} | {BenchmarkRunner.FormatMemory(m.PeakMemoryMb)} | {vramStr} | {m.TotalTimeMs / 1000.0:F2}s |");
         }
 
         // Hardware acceleration comparison (CPU vs Vulkan)
@@ -271,8 +271,8 @@ public static class MarkdownReportWriter
                 : "";
             sb.AppendLine($"### Model: `{m.DisplayName}`{transcriptLink}");
             sb.AppendLine();
-            sb.AppendLine("| Scenario | Status | Score | Weight | Tool Calls | Tool Acc. | Prompt Tokens | Gen Tokens | Gen Speed | RAM | GPU VRAM | Duration |");
-            sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|---|");
+            sb.AppendLine("| Scenario | Status | Pass@1 | Step Acc. | Score | Weight | Tool Calls | Tool Acc. | Prompt Tokens | Gen Tokens | Gen Speed | RAM | GPU VRAM | Duration |");
+            sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
 
             foreach (var sc in m.ScenarioResults)
             {
@@ -283,9 +283,13 @@ public static class MarkdownReportWriter
                     _ => "❌ FAIL"
                 };
 
+                var passAt1Badge = sc.TaskSuccess ? "✅ PASS" : "❌ FAIL";
                 var vramStr = sc.PeakVramMb > 0 ? BenchmarkRunner.FormatMemory(sc.PeakVramMb) : "-";
+                var scenarioLabel = !string.IsNullOrEmpty(sc.ExecutionDetails)
+                    ? $"**{sc.ScenarioName}**<br/><sub>`[{sc.ExecutionDetails}]`</sub>"
+                    : $"**{sc.ScenarioName}**";
 
-                sb.AppendLine($"| **{sc.ScenarioName}** | {statusBadge} | {sc.Score:F1}% | {sc.Weight:F1} | {sc.TotalToolCalls} | {sc.ToolAccuracyPercentage:F0}% | {sc.TotalPromptTokens} | {sc.TotalOutputTokens} | {sc.GenerationTokensPerSecond:F1} tok/s | {BenchmarkRunner.FormatMemory(sc.PeakMemoryMb)} | {vramStr} | {sc.TotalDurationMs:F0} ms |");
+                sb.AppendLine($"| {scenarioLabel} | {statusBadge} | {passAt1Badge} | {sc.StepAccuracy:F1}% | {sc.Score:F1}% | {sc.Weight:F1} | {sc.TotalToolCalls} | {sc.ToolAccuracyPercentage:F0}% | {sc.TotalPromptTokens} | {sc.TotalOutputTokens} | {sc.GenerationTokensPerSecond:F1} tok/s | {BenchmarkRunner.FormatMemory(sc.PeakMemoryMb)} | {vramStr} | {sc.TotalDurationMs:F0} ms |");
             }
 
             sb.AppendLine();

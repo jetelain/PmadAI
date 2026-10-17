@@ -6,7 +6,7 @@ using Pmad.AI.Benchmark.Scenarios;
 using Pmad.AI.Benchmark.Scenarios.Bfcl;
 using Pmad.AI.Benchmark.Scenarios.Ruler;
 
-namespace Pmad.AI.LlamaSharp.Tests;
+namespace Pmad.AI.Benchmark.Tests;
 
 public class BenchmarkSuiteTests
 {
@@ -59,12 +59,14 @@ public class BenchmarkSuiteTests
     public void BenchmarkScenario_GetAllScenarios_ReturnsExpectedDefinitions()
     {
         var scenarios = BenchmarkScenario.GetAllScenarios();
-        Assert.Equal(16, scenarios.Count);
+        Assert.Equal(18, scenarios.Count);
 
         Assert.Contains(scenarios, s => s.Id == "bfcl-simple");
         Assert.Contains(scenarios, s => s.Id == "bfcl-multiple");
         Assert.Contains(scenarios, s => s.Id == "bfcl-parallel");
         Assert.Contains(scenarios, s => s.Id == "bfcl-irrelevance");
+        Assert.Contains(scenarios, s => s.Id == "bfcl-multiturn");
+        Assert.Contains(scenarios, s => s.Id == "bfcl-strict");
         Assert.Contains(scenarios, s => s.Id == "swebench-diff");
         Assert.Contains(scenarios, s => s.Id == "swebench-logs");
         Assert.Contains(scenarios, s => s.Id == "swebench-loop");
@@ -91,17 +93,19 @@ public class BenchmarkSuiteTests
     [InlineData("multiple", "bfcl-multiple")]
     [InlineData("parallel", "bfcl-parallel")]
     [InlineData("irrelevance", "bfcl-irrelevance")]
+    [InlineData("multiturn", "bfcl-multiturn")]
+    [InlineData("strict", "bfcl-strict")]
     [InlineData("ruler-8k", "ruler-8k")]
     [InlineData("ruler-16k", "ruler-16k")]
-    [InlineData("bfcl", 4)]
+    [InlineData("bfcl", 6)]
     [InlineData("deep", 3)]
     [InlineData("ruler", 5)]
     [InlineData("swebench", 7)]
-    [InlineData("all", 16)]
-    [InlineData("all-small", 13)]
-    [InlineData("small", 13)]
-    [InlineData("full", 16)]
-    [InlineData("bfcl,swebench", 11)]
+    [InlineData("all", 18)]
+    [InlineData("all-small", 15)]
+    [InlineData("small", 15)]
+    [InlineData("full", 18)]
+    [InlineData("bfcl,swebench", 13)]
     public void BenchmarkScenario_FilterScenarios_FiltersCorrectly(string filter, object expected)
     {
         var filtered = BenchmarkScenario.FilterScenarios(filter);
@@ -126,12 +130,14 @@ public class BenchmarkSuiteTests
 
         var summary = await runner.RunAllAsync(scenarios);
 
-        Assert.Equal(16, summary.ScenariosRun);
+        Assert.Equal(18, summary.ScenariosRun);
         var failures = string.Join("\n", summary.ScenarioResults
             .Where(r => r.Status != BenchmarkStatus.Passed)
             .Select(r => $"{r.ScenarioId}: {r.ErrorMessage ?? string.Join("; ", r.TurnResults.Where(t => t.Status != BenchmarkStatus.Passed).Select(t => $"Turn {t.TurnIndex}: {t.ValidationMessage}"))}"));
         Assert.True(summary.ScenariosFailed == 0, $"Failures:\n{failures}");
-        Assert.Equal(16, summary.ScenariosPassed);
+        Assert.Equal(18, summary.ScenariosPassed);
+        Assert.Equal(100.0, summary.TaskSuccessRatePercentage);
+        Assert.Equal(100.0, summary.StepAccuracyPercentage);
         Assert.Equal(100.0, summary.PassRatePercentage);
         Assert.True(summary.TotalToolCalls >= 5);
         Assert.True(summary.TotalOutputTokens > 0);
@@ -142,6 +148,7 @@ public class BenchmarkSuiteTests
         foreach (var scResult in summary.ScenarioResults)
         {
             Assert.Equal(BenchmarkStatus.Passed, scResult.Status);
+            Assert.True(scResult.TaskSuccess, $"Expected TaskSuccess for {scResult.ScenarioId}");
             if (scResult.ScenarioId != "swebench-loop")
             {
                 Assert.True(scResult.ToolAccuracyPercentage >= 70, $"{scResult.ScenarioId} accuracy was {scResult.ToolAccuracyPercentage}%");
@@ -175,11 +182,11 @@ public class BenchmarkSuiteTests
     [Fact]
     public void BenchmarkScenario_AllIncludesEverythingAndCategorySubsets()
     {
-        Assert.Equal(16, BenchmarkScenario.FilterScenarios("all").Count);
-        Assert.Equal(13, BenchmarkScenario.FilterScenarios("all-small").Count);
+        Assert.Equal(18, BenchmarkScenario.FilterScenarios("all").Count);
+        Assert.Equal(15, BenchmarkScenario.FilterScenarios("all-small").Count);
         Assert.Equal(3, BenchmarkScenario.FilterScenarios("deep").Count);
         Assert.Equal(7, BenchmarkScenario.FilterScenarios("swebench").Count);
-        Assert.Equal(4, BenchmarkScenario.FilterScenarios("bfcl").Count);
+        Assert.Equal(6, BenchmarkScenario.FilterScenarios("bfcl").Count);
         Assert.Equal(5, BenchmarkScenario.FilterScenarios("ruler").Count);
     }
 
@@ -461,8 +468,8 @@ public class BenchmarkSuiteTests
     public void BenchmarkScenario_Weight_DerivedFromSubtestsAndComplexity()
     {
         var simple = new BfclSimpleScenario();
-        Assert.Equal(1.0, simple.ComplexityMultiplier);
-        Assert.Equal(20.0, simple.Weight);
+        Assert.Equal(0.5, simple.ComplexityMultiplier);
+        Assert.Equal(10.0, simple.Weight);
 
         var multiple = new BfclMultipleScenario();
         Assert.Equal(1.25, multiple.ComplexityMultiplier);
@@ -477,8 +484,8 @@ public class BenchmarkSuiteTests
         Assert.Equal(15.0, irrelevance.Weight);
 
         var ruler8k = new Ruler8kScenario();
-        Assert.Equal(10.0, ruler8k.ComplexityMultiplier);
-        Assert.Equal(20.0, ruler8k.Weight);
+        Assert.Equal(5.0, ruler8k.ComplexityMultiplier);
+        Assert.Equal(10.0, ruler8k.Weight);
 
         var ruler128k = new Ruler128kScenario();
         Assert.Equal(30.0, ruler128k.ComplexityMultiplier);
@@ -570,10 +577,12 @@ public class BenchmarkSuiteTests
 
         var result = summary.ScenarioResults[0];
         Assert.Equal(BenchmarkStatus.Partial, result.Status);
-        Assert.Equal(50.0, result.Score);
+        Assert.Equal(15.0, result.Score); // 70% TaskSuccess (0%) + 30% StepAccuracy (50%) = 15.0%
+        Assert.Equal(50.0, result.StepAccuracy);
+        Assert.False(result.TaskSuccess);
         Assert.Equal(1, result.TurnsPassed);
         Assert.Equal(2, result.TotalTurns);
-        Assert.Equal(50.0, summary.PassRatePercentage);
+        Assert.Equal(15.0, summary.PassRatePercentage);
     }
 
     private sealed class TestMultiTurnScenario : BenchmarkScenario
@@ -615,5 +624,131 @@ public class BenchmarkSuiteTests
 
         public object? GetService(Type serviceType, object? serviceKey = null) => null;
         public void Dispose() { }
+    }
+
+    [Fact]
+    public void RebalancedScenarioWeights_AdhereToTrackASpecification()
+    {
+        var bfclSimple = Assert.Single(BenchmarkScenario.FilterScenarios("bfcl-simple"));
+        Assert.Equal(10.0, bfclSimple.Weight);
+
+        var ruler8k = Assert.Single(BenchmarkScenario.FilterScenarios("ruler-8k"));
+        Assert.Equal(10.0, ruler8k.Weight);
+
+        var sweScenarios = BenchmarkScenario.FilterScenarios("swebench");
+        Assert.Equal(7, sweScenarios.Count);
+        foreach (var sc in sweScenarios)
+        {
+            Assert.InRange(sc.Weight, 35.0, 50.0);
+        }
+    }
+
+    [Fact]
+    public void DualScoringMetrics_WeightsTaskSuccessAt70PercentAndStepAccuracyAt30Percent()
+    {
+        var result = new BenchmarkScenarioResult
+        {
+            ScenarioId = "test-scenario",
+            ScenarioName = "Test Scenario",
+            ModelId = "test-model",
+            Weight = 40.0,
+            TotalTurns = 6,
+            TurnsPassed = 5,
+            StepAccuracy = Math.Round(5 * 100.0 / 6, 1), // 83.3%
+            TaskSuccess = false // Patch not applied or verification failed
+        };
+
+        // Dual scoring formula: 70% TaskSuccess + 30% StepAccuracy
+        var score = Math.Round((0.70 * (result.TaskSuccess ? 100.0 : 0.0)) + (0.30 * result.StepAccuracy), 1);
+        result.Score = score;
+
+        // 0.7 * 0 + 0.3 * 83.3 = 25.0%
+        Assert.Equal(25.0, result.Score);
+
+        var summary = new ModelBenchmarkSummary
+        {
+            ModelId = "test-model",
+            ModelName = "Test Model"
+        };
+        summary.ScenarioResults.Add(result);
+
+        Assert.Equal(0.0, summary.TaskSuccessRatePercentage);
+        Assert.Equal(83.3, summary.StepAccuracyPercentage);
+        Assert.Equal(25.0, summary.PassRatePercentage);
+
+        // If TaskSuccess becomes true:
+        result.TaskSuccess = true;
+        result.Score = Math.Round((0.70 * 100.0) + (0.30 * result.StepAccuracy), 1); // 70 + 25.0 = 95.0%
+        Assert.Equal(95.0, result.Score);
+        Assert.Equal(100.0, summary.TaskSuccessRatePercentage);
+        Assert.Equal(95.0, summary.PassRatePercentage);
+    }
+
+    [Fact]
+    public void BfclStrictScenario_ValidatesStrictTypesAndRejectsDistractors()
+    {
+        var scenario = Assert.Single(BenchmarkScenario.FilterScenarios("bfcl-strict"));
+        Assert.Equal(15.0, scenario.Weight);
+        Assert.Equal(3, scenario.Turns.Count);
+
+        // Turn 1: Calling distractor should fail validation
+        var turn1 = scenario.Turns[0];
+        var distractorContext = new TurnValidationContext(
+            TurnIndex: 1,
+            UserPrompt: turn1.UserPrompt,
+            ActualToolCalls: [new FunctionCallContent("call_d1", "deploy_serverless_function", new Dictionary<string, object?>())],
+            AssistantFinalText: "",
+            AssistantReasoning: null,
+            CompletedWithoutError: true);
+
+        var failResult = turn1.CustomValidator!(distractorContext);
+        Assert.False(failResult.IsSuccess);
+        Assert.Contains("distractor", failResult.Message, StringComparison.OrdinalIgnoreCase);
+
+        // Calling target tool with invalid types should fail validation
+        var invalidTypeContext = new TurnValidationContext(
+            TurnIndex: 1,
+            UserPrompt: turn1.UserPrompt,
+            ActualToolCalls: [new FunctionCallContent("call_t1", "deploy_kubernetes_workload", new Dictionary<string, object?>
+            {
+                ["spec"] = new Dictionary<string, object?>
+                {
+                    ["name"] = "api-gateway",
+                    ["replicas"] = "not_an_int",
+                    ["resources"] = new Dictionary<string, object?> { ["cpu_cores"] = 2.5, ["memory_gib"] = 4.0 },
+                    ["environment"] = "production"
+                }
+            })],
+            AssistantFinalText: "",
+            AssistantReasoning: null,
+            CompletedWithoutError: true);
+
+        var typeFailResult = turn1.CustomValidator!(invalidTypeContext);
+        Assert.False(typeFailResult.IsSuccess);
+        Assert.Contains("Expected integer", typeFailResult.Message);
+    }
+
+    [Fact]
+    public void BfclMultiTurnScenario_ChainsOutputsCorrectly()
+    {
+        var scenario = Assert.Single(BenchmarkScenario.FilterScenarios("bfcl-multiturn"));
+        Assert.Equal(22.5, scenario.Weight);
+        Assert.Equal(9, scenario.Turns.Count);
+
+        // Turn 2 expects wallet_id: "wal_55410" derived from Turn 1
+        var turn2 = scenario.Turns[1];
+        Assert.False(turn2.ClearHistoryBeforeTurn);
+
+        var wrongWalletContext = new TurnValidationContext(
+            TurnIndex: 2,
+            UserPrompt: turn2.UserPrompt,
+            ActualToolCalls: [new FunctionCallContent("call_w1", "get_wallet_balance", new Dictionary<string, object?> { ["wallet_id"] = "wrong_id" })],
+            AssistantFinalText: "",
+            AssistantReasoning: null,
+            CompletedWithoutError: true);
+
+        var fail = turn2.CustomValidator!(wrongWalletContext);
+        Assert.False(fail.IsSuccess);
+        Assert.Contains("wal_55410", fail.Message);
     }
 }

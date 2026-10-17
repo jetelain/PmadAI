@@ -150,6 +150,16 @@ public sealed class BenchmarkOptions
     public bool IsContextSizeExplicit { get; set; }
 
     /// <summary>
+    /// Execution mode for SWE-bench tool actions: "mock" (default state-aware in-memory executor) or "docker" (container sandbox).
+    /// </summary>
+    public string SweSandbox { get; set; } = "mock";
+
+    /// <summary>
+    /// Optional container name or image tag for Docker SWE-bench sandbox execution.
+    /// </summary>
+    public string? DockerContainer { get; set; }
+
+    /// <summary>
     /// Whether help was requested.
     /// </summary>
     public bool ShowHelp { get; set; }
@@ -258,6 +268,18 @@ public sealed class BenchmarkOptions
             {
                 options.CheckpointPath = args[++i];
             }
+            else if (arg is "--sandbox" or "--swe-sandbox" && i + 1 < args.Length)
+            {
+                options.SweSandbox = args[++i];
+            }
+            else if (arg is "--docker" or "--docker-sandbox")
+            {
+                options.SweSandbox = "docker";
+            }
+            else if (arg is "--docker-container" or "--container" && i + 1 < args.Length)
+            {
+                options.DockerContainer = args[++i];
+            }
             else if (arg is "-g" or "--gpu" && i + 1 < args.Length && int.TryParse(args[++i], out var gpu))
             {
                 options.GpuLayerCount = gpu;
@@ -335,10 +357,11 @@ Target Models & Providers:
   --ollama-url <url>       Ollama endpoint URL (default: http://localhost:11434).
   -d, --download           Download GGUF models automatically if missing from local cache.
   --mock, --dry-run        Run with mock simulated chat client (showcases tool calling & metrics immediately).
-  -s, --scenario <name>    Filter scenario: 'all' (all 16 scenarios across BFCL, SWE-bench & RULER),
-                           'all-small' (13 scenarios: BFCL + SWE-bench + RULER 8k/16k, excluding deep),
-                           'bfcl' (4 scenarios, 70 cases), 'swebench' (7 trace replays),
-                           'ruler' (5 context depths), 'deep' (32k/64k/128k), or comma-separated.
+  -s, --scenario <name>    Filter scenario: 'all' (all 18 scenarios across BFCL, SWE-bench & RULER),
+                           'all-small' (15 scenarios: BFCL + SWE-bench + RULER 8k/16k, excluding deep),
+                           'bfcl' (6 scenarios: Simple, Multiple, Parallel, Irrelevance, Multi-Turn, Strict),
+                           'swebench' (7 trace replays), 'ruler' (5 context depths),
+                           'deep' (32k/64k/128k), or comma-separated.
 
 Optimization Matrix:
   --opt-matrix             Run full 7-configuration optimization matrix (Baseline, single utilities, and all combined).

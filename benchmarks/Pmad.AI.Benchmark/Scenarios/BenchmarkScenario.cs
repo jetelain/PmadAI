@@ -51,21 +51,39 @@ public abstract class BenchmarkScenario
     public virtual double Weight => Math.Max(1.0, Math.Round(Turns.Count * ComplexityMultiplier, 1));
 
     /// <summary>
-    /// Returns all 4 BFCL function calling scenarios (Simple, Multiple, Parallel, Irrelevance).
+    /// Called by the runner before each run of the scenario so stateful scenarios can reset
+    /// per-run state (scenario instances are reused across model configurations).
+    /// </summary>
+    public virtual void OnScenarioStart()
+    {
+    }
+
+    /// <summary>
+    /// Evaluates whether the scenario achieved binary Task Success (Pass@1).
+    /// By default, true if all turns passed validation. SWE-bench scenarios override this
+    /// to require successful patch application and passing verification tests.
+    /// </summary>
+    public virtual bool EvaluateTaskSuccess(Engine.BenchmarkScenarioResult result) =>
+        result.TurnsPassed == result.TotalTurns && result.TotalTurns > 0;
+
+    /// <summary>
+    /// Returns all 6 BFCL function calling scenarios (Simple, Multiple, Parallel, Irrelevance, Multi-Turn, Strict Schema).
     /// </summary>
     public static IReadOnlyList<BenchmarkScenario> GetBfclScenarios() =>
     [
         new BfclSimpleScenario(),
         new BfclMultipleScenario(),
         new BfclParallelScenario(),
-        new BfclIrrelevanceScenario()
+        new BfclIrrelevanceScenario(),
+        new BfclMultiTurnScenario(),
+        new BfclStrictScenario()
     ];
 
     /// <summary>
     /// Returns all 7 SWE-bench / OpenHands trajectory replay scenarios.
     /// </summary>
-    public static IReadOnlyList<BenchmarkScenario> GetSweBenchScenarios() =>
-        SweBench.SweBenchTraceScenario.GetAllSweBenchScenarios();
+    public static IReadOnlyList<BenchmarkScenario> GetSweBenchScenarios(string? sandboxMode = null, string? dockerContainer = null) =>
+        SweBench.SweBenchTraceScenario.GetAllSweBenchScenarios(sandboxMode, dockerContainer);
 
     /// <summary>
     /// Returns all 5 RULER / NIAH context recall scenarios (8k, 16k, 32k, 64k, 128k).
@@ -90,35 +108,35 @@ public abstract class BenchmarkScenario
     ];
 
     /// <summary>
-    /// Returns all scenarios excluding the deep context scenarios (13 scenarios: BFCL + SWE-bench + RULER 8k/16k).
+    /// Returns all scenarios excluding the deep context scenarios (15 scenarios: 6 BFCL + 7 SWE-bench + RULER 8k/16k).
     /// </summary>
-    public static IReadOnlyList<BenchmarkScenario> GetAllSmallScenarios() =>
+    public static IReadOnlyList<BenchmarkScenario> GetAllSmallScenarios(string? sandboxMode = null, string? dockerContainer = null) =>
     [
         .. GetBfclScenarios(),
-        .. GetSweBenchScenarios(),
+        .. GetSweBenchScenarios(sandboxMode, dockerContainer),
         new Ruler8kScenario(),
         new Ruler16kScenario()
     ];
 
     /// <summary>
-    /// Returns all available benchmark scenarios (16 scenarios across BFCL, SWE-bench, and RULER).
+    /// Returns all available benchmark scenarios (18 scenarios across BFCL, SWE-bench, and RULER).
     /// </summary>
-    public static IReadOnlyList<BenchmarkScenario> GetAllScenarios() =>
+    public static IReadOnlyList<BenchmarkScenario> GetAllScenarios(string? sandboxMode = null, string? dockerContainer = null) =>
     [
         .. GetBfclScenarios(),
-        .. GetSweBenchScenarios(),
+        .. GetSweBenchScenarios(sandboxMode, dockerContainer),
         .. GetRulerScenarios()
     ];
 
     /// <summary>
     /// Filters scenarios according to the provided filter string ("all", "all-small", "bfcl", "swebench", "ruler", "deep", comma-separated, or matching Id/Name).
     /// </summary>
-    public static IReadOnlyList<BenchmarkScenario> FilterScenarios(string? filter)
+    public static IReadOnlyList<BenchmarkScenario> FilterScenarios(string? filter, string? sandboxMode = null, string? dockerContainer = null)
     {
-        var all = GetAllScenarios();
-        var allSmall = GetAllSmallScenarios();
+        var all = GetAllScenarios(sandboxMode, dockerContainer);
+        var allSmall = GetAllSmallScenarios(sandboxMode, dockerContainer);
         var bfcl = GetBfclScenarios();
-        var swebench = GetSweBenchScenarios();
+        var swebench = GetSweBenchScenarios(sandboxMode, dockerContainer);
         var ruler = GetRulerScenarios();
         var deep = GetDeepContextScenarios();
 

@@ -8,7 +8,9 @@ public enum BfclCategory
     Simple,
     Multiple,
     Parallel,
-    Irrelevance
+    Irrelevance,
+    MultiTurn,
+    Strict
 }
 
 public sealed record BfclExpectedCall(
@@ -21,5 +23,8 @@ public sealed record BfclEntry(
     BfclCategory Category,
     string Question,
     IReadOnlyList<AITool> Tools,
-    IReadOnlyList<BfclExpectedCall> GroundTruth
+    IReadOnlyList<BfclExpectedCall> GroundTruth,
+    bool ClearHistory = true,
+    string? ToolResult = null,
+    IReadOnlyList<string>? ExpectedTextKeywords = null
 );
