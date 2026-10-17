@@ -39,6 +39,12 @@ public sealed class BenchmarkTurn
     public IReadOnlyList<string> ExpectedToolNames { get; init; } = [];
 
     /// <summary>
+    /// When true, any tool call is accepted without failing if a specific ExpectedToolNames match is absent.
+    /// Used for open trajectory exploration and replay.
+    /// </summary>
+    public bool AllowAnyTool { get; init; }
+
+    /// <summary>
     /// Handler providing deterministic mocked execution for tool calls invoked by the model during this turn.
     /// </summary>
     public required Func<FunctionCallContent, object?> ToolExecutor { get; init; }
@@ -47,6 +53,16 @@ public sealed class BenchmarkTurn
     /// Optional custom validation callback to inspect the assistant's final response and tool execution.
     /// </summary>
     public Func<TurnValidationContext, ValidationResult>? CustomValidator { get; init; }
+
+    /// <summary>
+    /// Optional tool functions specific to this turn. If null, scenario.Tools is used.
+    /// </summary>
+    public IReadOnlyList<AITool>? Tools { get; init; }
+
+    /// <summary>
+    /// When true, clears previous conversation history before executing this turn (useful for independent test batches).
+    /// </summary>
+    public bool ClearHistoryBeforeTurn { get; init; }
 
     /// <summary>
     /// Marks this turn as a semantic recall probe; any failure on it marks semantic recall as failed.

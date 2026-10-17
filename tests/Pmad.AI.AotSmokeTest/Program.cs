@@ -166,6 +166,16 @@ public static class Program
             }
         }
 
+        // 7. OllamaSpeculativeSummarizer and OllamaApiClient AOT check
+        await using var summarizer = new OllamaSpeculativeSummarizer(new OllamaSpeculativeSummarizerOptions
+        {
+            Model = "qwen3.5:2b"
+        });
+        summarizer.EnqueueSummarization("session-aot", "key-1", SummarizationTarget.ToolResult, "Test raw text");
+        _ = summarizer.TryGetSummary("session-aot", "key-1", out _);
+        summarizer.EvictSession("session-aot");
+        Console.WriteLine("✓ OllamaSpeculativeSummarizer verified");
+
         Console.WriteLine("[AOT Smoke Test] ALL AOT CHECKS PASSED SUCCESSFULLY!");
         return 0;
     }

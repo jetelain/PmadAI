@@ -12,14 +12,14 @@ public static class ConsoleReportFormatter
     {
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine(new string('=', 120));
+        Console.WriteLine(new string('=', 134));
         Console.WriteLine($"   BENCHMARK SCENARIO BREAKDOWN: {summary.DisplayName.ToUpperInvariant()}");
-        Console.WriteLine(new string('=', 120));
+        Console.WriteLine(new string('=', 134));
         Console.ResetColor();
 
-        Console.WriteLine(string.Format("{0,-25} | {1,-8} | {2,-10} | {3,-10} | {4,-8} | {5,-10} | {6,-10} | {7,-11} | {8,-10}",
-            "Scenario", "Status", "Tool Calls", "Prompt Tok", "Gen Tok", "Gen Tok/s", "RAM", "GPU VRAM", "Time (ms)"));
-        Console.WriteLine(new string('-', 120));
+        Console.WriteLine(string.Format("{0,-25} | {1,-6} | {2,-7} | {3,-6} | {4,-10} | {5,-10} | {6,-8} | {7,-10} | {8,-10} | {9,-10} | {10,-9}",
+            "Scenario", "Status", "Score", "Weight", "Tool Calls", "Prompt Tok", "Gen Tok", "Gen Tok/s", "RAM", "GPU VRAM", "Time (ms)"));
+        Console.WriteLine(new string('-', 134));
 
         foreach (var sc in summary.ScenarioResults)
         {
@@ -36,10 +36,14 @@ public static class ConsoleReportFormatter
             else Console.ForegroundColor = ConsoleColor.Yellow;
 
             var vramStr = sc.PeakVramMb > 0 ? BenchmarkRunner.FormatMemory(sc.PeakVramMb) : "-";
+            var scoreStr = $"{sc.Score:F1}%";
+            var weightStr = $"{sc.Weight:F1}";
 
-            Console.WriteLine(string.Format("{0,-25} | {1,-8} | {2,-10} | {3,-10} | {4,-8} | {5,-10:F1} | {6,-10} | {7,-11} | {8,-9:F0}",
+            Console.WriteLine(string.Format("{0,-25} | {1,-6} | {2,-7} | {3,-6} | {4,-10} | {5,-10} | {6,-8} | {7,-10:F1} | {8,-10} | {9,-10} | {10,-9:F0}",
                 sc.ScenarioName.Length > 25 ? sc.ScenarioName[..22] + "..." : sc.ScenarioName,
                 statusStr,
+                scoreStr,
+                weightStr,
                 sc.TotalToolCalls,
                 sc.TotalPromptTokens,
                 sc.TotalOutputTokens,
@@ -51,7 +55,7 @@ public static class ConsoleReportFormatter
             Console.ResetColor();
         }
 
-        Console.WriteLine(new string('-', 120));
+        Console.WriteLine(new string('-', 134));
     }
 
     public static void PrintModelsComparisonTable(IReadOnlyList<ModelBenchmarkSummary> allSummaries)
@@ -70,7 +74,7 @@ public static class ConsoleReportFormatter
         foreach (var m in allSummaries)
         {
             var passedRatio = $"{m.ScenariosPassed}/{m.ScenariosRun}";
-            var passRateStr = $"{m.PassRatePercentage:F0}%";
+            var passRateStr = $"{m.PassRatePercentage:F1}%";
             var totalTimeSec = $"{m.TotalTimeMs / 1000.0:F2}s";
             var backendStr = m.Backend ?? (m.GpuLayers > 0 ? "Vulkan" : "CPU");
             var reasStr = m.ReasoningEnabled.HasValue ? (m.ReasoningEnabled.Value ? "Enabled" : "Disabled") : "Default";

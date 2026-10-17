@@ -1,0 +1,80 @@
+{
+  "instance_id": "scikit-learn__scikit-learn-14092",
+  "repository": "scikit-learn/scikit-learn",
+  "archetype": "DeepHorizon",
+  "problem_statement": "NCA (NeighborhoodComponentsAnalysis) fails with object dtype in target vector y across multi-step pipeline.",
+  "turns": [
+    {
+      "turn_index": 1,
+      "user_prompt": "[SWE-bench: scikit-learn-14092] Inspect sklearn/neighbors/nca.py to identify how target variable y is validated.",
+      "assistant_thought": "I will examine the _validate_params method in sklearn/neighbors/nca.py.",
+      "expected_tool_name": "read_file",
+      "tool_arguments": { "path": "sklearn/neighbors/nca.py" },
+      "observation": "import numpy as np\nfrom sklearn.utils import check_X_y, check_array\nfrom sklearn.utils.multiclass import check_classification_targets\n\nclass NeighborhoodComponentsAnalysis:\n    def fit(self, X, y):\n        X, y = check_X_y(X, y, ensure_min_samples=2)\n        check_classification_targets(y)\n        # Target check fails if y has object dtype with string labels\n        self.classes_, y = np.unique(y, return_inverse=True)\n        return self\n",
+      "expected_completion_substring": "The fit method uses check_X_y without explicitly converting object dtypes."
+    },
+    {
+      "turn_index": 2,
+      "user_prompt": "Run the NCA test suite in sklearn/neighbors/tests/test_nca.py.",
+      "assistant_thought": "Let's run pytest on test_nca.py.",
+      "expected_tool_name": "run_tests",
+      "tool_arguments": { "test_target": "sklearn/neighbors/tests/test_nca.py" },
+      "observation": "============================= test session starts =============================\ncollected 18 items\nsklearn/neighbors/tests/test_nca.py ..............F..\n=================================== FAILURES ===================================\n_______________________ test_nca_object_target_dtype _______________________\ny = np.array(['a', 'b', 'a', 'b'], dtype=object)\nTypeError: Cannot cast array data from dtype('O') to dtype('float64') according to the rule 'safe'\n=========================== 1 failed, 17 passed in 3.12s ===========================\n",
+      "expected_completion_substring": "TypeError encountered when casting object dtype."
+    },
+    {
+      "turn_index": 3,
+      "user_prompt": "Check check_classification_targets implementation in sklearn/utils/multiclass.py.",
+      "assistant_thought": "Let's check how classification targets are handled in multiclass.py.",
+      "expected_tool_name": "read_file",
+      "tool_arguments": { "path": "sklearn/utils/multiclass.py" },
+      "observation": "def check_classification_targets(y):\n    y_type = type_of_target(y)\n    if y_type not in ['binary', 'multiclass', 'multiclass-multioutput']:\n        raise ValueError('Unknown label type: %r' % y_type)\n",
+      "expected_completion_substring": "type_of_target validates whether y is binary or multiclass."
+    },
+    {
+      "turn_index": 4,
+      "user_prompt": "Search for check_X_y usages with dtype in sklearn/neighbors.",
+      "assistant_thought": "Let's search for check_X_y calls with dtype parameter.",
+      "expected_tool_name": "search_code",
+      "tool_arguments": { "query": "check_X_y(", "path": "sklearn/neighbors" },
+      "observation": "sklearn/neighbors/base.py:128: X, y = check_X_y(X, y, dtype=[np.float64, np.float32])\nsklearn/neighbors/classification.py:45: X, y = check_X_y(X, y)\nsklearn/neighbors/nca.py:88: X, y = check_X_y(X, y, ensure_min_samples=2)\nsklearn/neighbors/regression.py:52: X, y = check_X_y(X, y, y_numeric=True)\n",
+      "expected_completion_substring": "Notice classification.py does not enforce numeric y."
+    },
+    {
+      "turn_index": 5,
+      "user_prompt": "Apply fix to sklearn/neighbors/nca.py converting y using LabelEncoder or check_classification_targets properly.",
+      "assistant_thought": "I will apply the fix in nca.py.",
+      "expected_tool_name": "apply_patch",
+      "tool_arguments": { "path": "sklearn/neighbors/nca.py", "patch": "@@ -88,2 +88,3 @@\n-        X, y = check_X_y(X, y, ensure_min_samples=2)\n+        check_classification_targets(y)\n+        X, y = check_X_y(X, y, ensure_min_samples=2, dtype=[np.float64, np.float32])\n" },
+      "observation": "Patch applied successfully to sklearn/neighbors/nca.py.\n",
+      "expected_completion_substring": "Patch applied."
+    },
+    {
+      "turn_index": 6,
+      "user_prompt": "Re-run test_nca.py to verify whether object dtype target works.",
+      "assistant_thought": "Re-running test_nca.py.",
+      "expected_tool_name": "run_tests",
+      "tool_arguments": { "test_target": "sklearn/neighbors/tests/test_nca.py" },
+      "observation": "============================= test session starts =============================\ncollected 18 items\nsklearn/neighbors/tests/test_nca.py ..................\n=========================== 18 passed in 2.85s ===========================\n",
+      "expected_completion_substring": "All 18 tests passed."
+    },
+    {
+      "turn_index": 7,
+      "user_prompt": "Inspect the final git diff of sklearn/neighbors/nca.py.",
+      "assistant_thought": "Checking git diff.",
+      "expected_tool_name": "check_git_diff",
+      "tool_arguments": {},
+      "observation": "diff --git a/sklearn/neighbors/nca.py b/sklearn/neighbors/nca.py\n--- a/sklearn/neighbors/nca.py\n+++ b/sklearn/neighbors/nca.py\n@@ -88,2 +88,3 @@ class NeighborhoodComponentsAnalysis:\n-        X, y = check_X_y(X, y, ensure_min_samples=2)\n+        check_classification_targets(y)\n+        X, y = check_X_y(X, y, ensure_min_samples=2, dtype=[np.float64, np.float32])\n",
+      "expected_completion_substring": "Git diff confirms target check."
+    },
+    {
+      "turn_index": 8,
+      "user_prompt": "Summarize the final solution for object dtype support in NCA.",
+      "assistant_thought": null,
+      "expected_tool_name": null,
+      "tool_arguments": null,
+      "observation": null,
+      "expected_completion_substring": "NCA now correctly supports object dtype targets by validating classification targets before X, y type coercion."
+    }
+  ]
+}

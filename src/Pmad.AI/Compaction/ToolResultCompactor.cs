@@ -208,7 +208,13 @@ public class ToolResultCompactor
         // Try speculative summary
         if (_options.Summarizer != null && _options.Summarizer.TryGetSummary(sessionId, itemKey, out var summary) && !string.IsNullOrWhiteSpace(summary))
         {
-            return $"[Semantic Summary: {summary}]";
+            var trimmed = summary.Trim();
+            if (trimmed.StartsWith("[TOOL_RESULT_SUMMARY]", StringComparison.OrdinalIgnoreCase) ||
+                trimmed.StartsWith("[Semantic Summary:", StringComparison.OrdinalIgnoreCase))
+            {
+                return trimmed;
+            }
+            return $"[Semantic Summary: {trimmed}]";
         }
 
         // Deterministic prefix + truncation marker + suffix

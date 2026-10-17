@@ -1,0 +1,47 @@
+{
+  "instance_id": "sphinx-doc__sphinx-8721",
+  "repository": "sphinx-doc/sphinx",
+  "archetype": "SyntaxRecovery",
+  "problem_statement": "viewcode extension generates unescaped html anchors on complex generics and method overloads.",
+  "turns": [
+    {
+      "turn_index": 1,
+      "user_prompt": "[SWE-bench: sphinx-8721] Search for viewcode_follow_imported in sphinx/ext/viewcode.py.",
+      "assistant_thought": "Searching for viewcode_follow_imported definition in sphinx/ext/viewcode.py.",
+      "expected_tool_name": "search_code",
+      "tool_arguments": { "query": "viewcode_follow_imported", "path": "sphinx/ext/viewcode.py" },
+      "observation": "sphinx/ext/viewcode.py:124:    app.add_config_value('viewcode_follow_imported', True, False)\nsphinx/ext/viewcode.py:156:    if not app.config.viewcode_follow_imported:\n",
+      "expected_completion_substring": "viewcode_follow_imported found at lines 124 and 156."
+    },
+    {
+      "turn_index": 2,
+      "user_prompt": "Read lines 145-180 in sphinx/ext/viewcode.py to inspect the anchor creation logic.",
+      "assistant_thought": "Reading sphinx/ext/viewcode.py lines 145 to 180.",
+      "expected_tool_name": "read_file",
+      "tool_arguments": { "path": "sphinx/ext/viewcode.py", "start_line": 145, "end_line": 180 },
+      "observation": "            if not app.config.viewcode_follow_imported:\n                tags = {}\n            else:\n                tags = analyzer.find_tags()\n            entry = code, tags, {}, refname\n",
+      "expected_completion_substring": "Inspected anchor tags creation in viewcode."
+    },
+    {
+      "turn_index": 3,
+      "user_prompt": "Apply patch to sphinx/ext/viewcode.py escaping generic brackets in anchor tags.",
+      "assistant_thought": "Applying anchor tag sanitization patch.",
+      "expected_tool_name": "apply_patch",
+      "tool_arguments": {
+        "path": "sphinx/ext/viewcode.py",
+        "patch": "@@ -160,2 +160,4 @@\n+            refname = refname.replace('<', '&lt;').replace('>', '&gt;')\n"
+      },
+      "observation": "Hunk #1 succeeded at line 160.\nFile sphinx/ext/viewcode.py updated successfully.\n",
+      "expected_completion_substring": "Anchor tags sanitized against bracket collisions."
+    },
+    {
+      "turn_index": 4,
+      "user_prompt": "Run pytest on tests/test_ext_viewcode.py to confirm anchor tags are properly generated.",
+      "assistant_thought": "Running viewcode test suite.",
+      "expected_tool_name": "run_tests",
+      "tool_arguments": { "test_target": "tests/test_ext_viewcode.py" },
+      "observation": "============================= test session starts =============================\ncollected 5 items\ntests/test_ext_viewcode.py .....\n=========================== 5 passed in 1.12s ===========================\n",
+      "expected_completion_substring": "All 5 viewcode tests passed."
+    }
+  ]
+}

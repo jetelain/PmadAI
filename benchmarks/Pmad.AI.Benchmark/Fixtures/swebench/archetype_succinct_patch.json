@@ -1,0 +1,44 @@
+{
+  "instance_id": "requests__requests-3362",
+  "repository": "psf/requests",
+  "archetype": "SuccinctControl",
+  "problem_statement": "Uncertain json decode error in Response.json() when body is None or empty.",
+  "turns": [
+    {
+      "turn_index": 1,
+      "user_prompt": "[SWE-bench: requests-3362] View Response.json implementation in requests/models.py lines 800-840.",
+      "assistant_thought": "I will inspect Response.json in requests/models.py.",
+      "expected_tool_name": "read_file",
+      "tool_arguments": { "path": "requests/models.py" },
+      "observation": "    def json(self, **kwargs):\n        if not self.encoding and self.content and len(self.content) > 3:\n            encoding = guess_json_utf(self.content)\n            if encoding is not None:\n                try:\n                    return complexjson.loads(self.content.decode(encoding), **kwargs)\n                except UnicodeDecodeError:\n                    pass\n        return complexjson.loads(self.text, **kwargs)\n",
+      "expected_completion_substring": "Response.json tries decoding self.content then falls back to self.text."
+    },
+    {
+      "turn_index": 2,
+      "user_prompt": "Run the tests under tests/test_requests.py testing empty body json parsing.",
+      "assistant_thought": "Let's run the json response tests.",
+      "expected_tool_name": "run_tests",
+      "tool_arguments": { "test_target": "tests/test_requests.py -k test_json_decode" },
+      "observation": "============================= test session starts =============================\ncollected 2 items\ntests/test_requests.py .F\n=================================== FAILURES ===================================\n_____________________________ test_empty_json_body _____________________________\nValueError: No JSON object could be decoded\n=========================== 1 failed, 1 passed in 0.45s ===========================\n",
+      "expected_completion_substring": "Test failed with ValueError."
+    },
+    {
+      "turn_index": 3,
+      "user_prompt": "Apply patch handling empty content gracefully with standard JSONDecodeError or ValueError.",
+      "assistant_thought": "Applying patch to requests/models.py.",
+      "expected_tool_name": "apply_patch",
+      "tool_arguments": { "path": "requests/models.py", "patch": "@@ -808,2 +808,4 @@\n+        if not self.content:\n+            return None\n" },
+      "observation": "Patch applied successfully to requests/models.py.\n",
+      "expected_completion_substring": "Guard check added for empty content."
+    },
+    {
+      "turn_index": 4,
+      "user_prompt": "Re-run tests/test_requests.py to confirm fix.",
+      "assistant_thought": "Re-running test_requests.py.",
+      "expected_tool_name": "run_tests",
+      "tool_arguments": { "test_target": "tests/test_requests.py -k test_json_decode" },
+      "observation": "============================= test session starts =============================\ncollected 2 items\ntests/test_requests.py ..\n=========================== 2 passed in 0.42s ===========================\n",
+      "expected_completion_substring": "All 2 tests passed."
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "instance_id": "django__django-11099",
+  "repository": "django/django",
+  "archetype": "DiffExplosion",
+  "problem_statement": "ASCIIUsernameValidator and UnicodeUsernameValidator accept trailing newlines because regex uses $ instead of \\Z.",
+  "turns": [
+    {
+      "turn_index": 1,
+      "user_prompt": "[SWE-bench: django-11099] Inspect django/contrib/auth/validators.py to see how username regex validation is defined.",
+      "assistant_thought": "I need to inspect the validators.py file to understand the current regex definition for username validation.",
+      "expected_tool_name": "read_file",
+      "tool_arguments": { "path": "django/contrib/auth/validators.py" },
+      "observation": "import re\nfrom django.core import validators\nfrom django.utils.deconstruct import deconstructible\nfrom django.utils.translation import gettext_lazy as _\n\n@deconstructible\nclass ASCIIUsernameValidator(validators.RegexValidator):\n    regex = r'^[\\w.@+-]+$'\n    message = _(\n        'Enter a valid username. This value may contain only English letters, '\n        'numbers, and @/./+/-/_ characters.'\n    )\n    flags = re.ASCII\n\n@deconstructible\nclass UnicodeUsernameValidator(validators.RegexValidator):\n    regex = r'^[\\w.@+-]+$'\n    message = _(\n        'Enter a valid username. This value may contain only letters, '\n        'numbers, and @/./+/-/_ characters.'\n    )\n    flags = 0\n",
+      "expected_completion_substring": "The regex uses ^ and $ which allows trailing newlines."
+    },
+    {
+      "turn_index": 2,
+      "user_prompt": "Run the auth test suite to reproduce the failure when a username ends with a newline.",
+      "assistant_thought": "Let's run the validator tests using pytest to confirm that trailing newlines are erroneously accepted.",
+      "expected_tool_name": "run_tests",
+      "tool_arguments": { "test_target": "tests/auth_tests/test_validators.py" },
+      "observation": "============================= test session starts =============================\nplatform linux -- Python 3.9.18, pytest-7.4.0, pluggy-1.3.0\nrootdir: /workspace/django\ncollected 12 items\n\ntests/auth_tests/test_validators.py ........F...\n\n=================================== FAILURES ===================================\n_________________ TestUsernameValidators.test_trailing_newline _________________\ntests/auth_tests/test_validators.py:84: in test_trailing_newline\n    with self.assertRaises(ValidationError):\nE   AssertionError: ValidationError not raised by validate('user\\n')\n----------------------------- Captured stdout call -----------------------------\nValidating username: 'testuser\\n' with ASCIIUsernameValidator.\nRegex pattern matched unexpected trailing newline character.\n=========================== 1 failed, 11 passed in 1.42s ===========================\n",
+      "expected_completion_substring": "The test failed because ValidationError was not raised for a username with trailing newline."
+    },
+    {
+      "turn_index": 3,
+      "user_prompt": "Search across the django codebase for other RegexValidator classes using $ instead of \\Z.",
+      "assistant_thought": "I should grep for RegexValidator subclasses across the codebase to ensure consistency.",
+      "expected_tool_name": "search_code",
+      "tool_arguments": { "query": "RegexValidator", "path": "django/core/validators.py" },
+      "observation": "django/core/validators.py:12:class RegexValidator:\ndjango/core/validators.py:14:    regex = ''\ndjango/core/validators.py:108:class URLValidator(RegexValidator):\ndjango/core/validators.py:110:    ul = '\\u00a1-\\uffff'\ndjango/core/validators.py:165:class EmailValidator:\ndjango/core/validators.py:167:    user_regex = _lazy_re_compile(\ndjango/core/validators.py:168:        r\"(^[-!#$%&'*+/=?^_`{}|~0-9A-Z]+(\\.[-!#$%&'*+/=?^_`{}|~0-9A-Z]+)*\\Z\"  # dot-atom\ndjango/core/validators.py:169:        r'|^\"([\\001-\\010\\013\\014\\016-\\037!#-\\[\\]-\\177]|\\\\[\\001-\\011\\013\\014\\016-\\177])*\"\\Z)',\ndjango/core/validators.py:170:        re.IGNORECASE)\ndjango/core/validators.py:240:validate_slug = RegexValidator(\ndjango/core/validators.py:241:    regex=r'^[-a-zA-Z0-9_]+\\Z',\ndjango/core/validators.py:242:    message=_(\"Enter a valid 'slug' consisting of letters, numbers, underscores or hyphens.\"),\ndjango/core/validators.py:243:    code='invalid',\ndjango/core/validators.py:244:)\ndjango/core/validators.py:246:validate_unicode_slug = RegexValidator(\ndjango/core/validators.py:247:    regex=r'^[-\\w]+\\Z',\ndjango/core/validators.py:248:    message=_(\"Enter a valid 'slug' consisting of Unicode letters, numbers, underscores, or hyphens.\"),\ndjango/core/validators.py:249:    code='invalid',\ndjango/core/validators.py:250:)\n",
+      "expected_completion_substring": "Notice that validate_slug already uses \\Z instead of $."
+    },
+    {
+      "turn_index": 4,
+      "user_prompt": "Apply a patch to django/contrib/auth/validators.py replacing $ with \\Z and ^ with \\A.",
+      "assistant_thought": "I will now apply a patch using apply_patch to fix both ASCIIUsernameValidator and UnicodeUsernameValidator.",
+      "expected_tool_name": "apply_patch",
+      "tool_arguments": { "path": "django/contrib/auth/validators.py", "patch": "@@ -8,13 +8,13 @@\n class ASCIIUsernameValidator(validators.RegexValidator):\n-    regex = r'^[\\w.@+-]+$'\n+    regex = r'\\A[\\w.@+-]+\\Z'\n     message = _(\n@@ -19,4 +19,4 @@\n class UnicodeUsernameValidator(validators.RegexValidator):\n-    regex = r'^[\\w.@+-]+$'\n+    regex = r'\\A[\\w.@+-]+\\Z'\n     message = _(\n" },
+      "observation": "Hunk #1 succeeded at line 8.\nHunk #2 succeeded at line 19.\nFile django/contrib/auth/validators.py updated successfully.\n",
+      "expected_completion_substring": "The patch has been applied to both username validators."
+    },
+    {
+      "turn_index": 5,
+      "user_prompt": "Run git diff to inspect the exact modifications.",
+      "assistant_thought": "Let's inspect the git diff to verify our changes.",
+      "expected_tool_name": "check_git_diff",
+      "tool_arguments": {},
+      "observation": "diff --git a/django/contrib/auth/validators.py b/django/contrib/auth/validators.py\nindex 1234567..abcdef8 100644\n--- a/django/contrib/auth/validators.py\n+++ b/django/contrib/auth/validators.py\n@@ -8,7 +8,7 @@ from django.utils.translation import gettext_lazy as _\n \n @deconstructible\n class ASCIIUsernameValidator(validators.RegexValidator):\n-    regex = r'^[\\w.@+-]+$'\n+    regex = r'\\A[\\w.@+-]+\\Z'\n     message = _(\n         'Enter a valid username. This value may contain only English letters, '\n         'numbers, and @/./+/-/_ characters.'\n@@ -19,7 +19,7 @@ class ASCIIUsernameValidator(validators.RegexValidator):\n \n @deconstructible\n class UnicodeUsernameValidator(validators.RegexValidator):\n-    regex = r'^[\\w.@+-]+$'\n+    regex = r'\\A[\\w.@+-]+\\Z'\n     message = _(\n         'Enter a valid username. This value may contain only letters, '\n         'numbers, and @/./+/-/_ characters.'\n",
+      "expected_completion_substring": "Git diff confirms regex updated to \\A and \\Z."
+    },
+    {
+      "turn_index": 6,
+      "user_prompt": "Re-run the test suite to ensure all validator tests pass.",
+      "assistant_thought": "Let's re-run tests/auth_tests/test_validators.py now.",
+      "expected_tool_name": "run_tests",
+      "tool_arguments": { "test_target": "tests/auth_tests/test_validators.py" },
+      "observation": "============================= test session starts =============================\nplatform linux -- Python 3.9.18, pytest-7.4.0, pluggy-1.3.0\nrootdir: /workspace/django\ncollected 12 items\n\ntests/auth_tests/test_validators.py ............\n\n=========================== 12 passed in 1.15s ===========================\n",
+      "expected_completion_substring": "All 12 tests passed successfully."
+    },
+    {
+      "turn_index": 7,
+      "user_prompt": "Please confirm if the fix solves the trailing newline issue and summarize the changes.",
+      "assistant_thought": null,
+      "expected_tool_name": null,
+      "tool_arguments": null,
+      "observation": null,
+      "expected_completion_substring": "The trailing newline issue in ASCIIUsernameValidator and UnicodeUsernameValidator has been resolved by anchoring regex patterns with \\A and \\Z."
+    }
+  ]
+}

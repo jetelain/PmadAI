@@ -18,12 +18,14 @@ public static class BenchmarkPipelineBuilder
         IChatClient innerClient,
         OptimizationConfig config,
         ISpeculativeSummarizer? speculativeSummarizer = null,
-        string? transcriptDir = null)
+        string? transcriptDir = null,
+        string? transcriptFilePath = null,
+        VerbatimTranscriptOptions? transcriptOptions = null)
     {
         ArgumentNullException.ThrowIfNull(innerClient);
         ArgumentNullException.ThrowIfNull(config);
 
-        return config.Id switch
+        IChatClient client = config.Id switch
         {
             "baseline" => innerClient,
 
@@ -33,27 +35,52 @@ public static class BenchmarkPipelineBuilder
                 innerClient,
                 new ThinkingTraceCompactionOptions
                 {
-                    KeepVerbatimCount = 2
+                    KeepVerbatimCount = 5
                 }),
 
             "opt-tool-compaction" => new ToolResultCompactionChatClient(
                 innerClient,
                 new ToolResultCompactionOptions
                 {
-                    KeepVerbatimCount = 2,
-                    FallbackCharacterLimit = 400,
-                    FallbackPrefixLength = 300,
-                    FallbackSuffixLength = 100
+                    KeepVerbatimCount = 5,
+                    FallbackCharacterLimit = 2500,
+                    FallbackPrefixLength = 1800,
+                    FallbackSuffixLength = 700
                 }),
 
             "opt-speculative-slm" => BuildSpeculativeCompactionPipeline(innerClient, speculativeSummarizer),
 
             "opt-lenient-dispatch" => BuildLenientDispatchPipeline(innerClient),
 
-            "all-optimizations" => BuildAllOptimizationsPipeline(innerClient, speculativeSummarizer, transcriptDir),
+            "all-optimizations" => BuildAllOptimizationsPipeline(innerClient, speculativeSummarizer),
 
             _ => innerClient
         };
+
+        if (transcriptOptions != null)
+        {
+            client = new VerbatimTranscriptChatClient(client, transcriptOptions);
+        }
+        else if (!string.IsNullOrWhiteSpace(transcriptFilePath))
+        {
+            client = new VerbatimTranscriptChatClient(client, new VerbatimTranscriptOptions
+            {
+                FilePath = transcriptFilePath,
+                AutoSaveOnDispose = true,
+                FlushAfterEachTurn = true
+            });
+        }
+        else if (!string.IsNullOrWhiteSpace(transcriptDir))
+        {
+            client = new VerbatimTranscriptChatClient(client, new VerbatimTranscriptOptions
+            {
+                OutputDirectory = transcriptDir,
+                AutoSaveOnDispose = true,
+                FlushAfterEachTurn = true
+            });
+        }
+
+        return client;
     }
 
     private static IChatClient BuildSpeculativeCompactionPipeline(
@@ -62,17 +89,17 @@ public static class BenchmarkPipelineBuilder
     {
         var toolOptions = new ToolResultCompactionOptions
         {
-            KeepVerbatimCount = 2,
-            FallbackCharacterLimit = 400,
-            FallbackPrefixLength = 300,
-            FallbackSuffixLength = 100,
+            KeepVerbatimCount = 5,
+            FallbackCharacterLimit = 2500,
+            FallbackPrefixLength = 1800,
+            FallbackSuffixLength = 700,
             Summarizer = speculativeSummarizer
         };
         var withToolCompaction = new ToolResultCompactionChatClient(innerClient, toolOptions);
 
         var thinkOptions = new ThinkingTraceCompactionOptions
         {
-            KeepVerbatimCount = 2,
+            KeepVerbatimCount = 5,
             Summarizer = speculativeSummarizer
         };
         return new ThinkingTraceCompactionChatClient(withToolCompaction, thinkOptions);
@@ -94,8 +121,7 @@ public static class BenchmarkPipelineBuilder
 
     private static IChatClient BuildAllOptimizationsPipeline(
         IChatClient innerClient,
-        ISpeculativeSummarizer? speculativeSummarizer,
-        string? transcriptDir)
+        ISpeculativeSummarizer? speculativeSummarizer)
     {
         // 1. Tool call healing wraps raw client
         IChatClient current = new ToolCallHealingChatClient(innerClient);
@@ -103,17 +129,17 @@ public static class BenchmarkPipelineBuilder
         // 2. Tool result compaction
         current = new ToolResultCompactionChatClient(current, new ToolResultCompactionOptions
         {
-            KeepVerbatimCount = 2,
-            FallbackCharacterLimit = 400,
-            FallbackPrefixLength = 300,
-            FallbackSuffixLength = 100,
+            KeepVerbatimCount = 5,
+            FallbackCharacterLimit = 2500,
+            FallbackPrefixLength = 1800,
+            FallbackSuffixLength = 700,
             Summarizer = speculativeSummarizer
         });
 
         // 3. Thinking trace compaction
         current = new ThinkingTraceCompactionChatClient(current, new ThinkingTraceCompactionOptions
         {
-            KeepVerbatimCount = 2,
+            KeepVerbatimCount = 5,
             Summarizer = speculativeSummarizer
         });
 
@@ -129,15 +155,6 @@ public static class BenchmarkPipelineBuilder
         var dispatcher = CreateConfiguredDispatcher();
         current = new LenientToolDispatchChatClient(current, dispatcher);
 
-        // 5. Verbatim transcript (optional)
-        if (!string.IsNullOrWhiteSpace(transcriptDir))
-        {
-            current = new VerbatimTranscriptChatClient(current, new VerbatimTranscriptOptions
-            {
-                OutputDirectory = transcriptDir
-            });
-        }
-
         return current;
     }
 
@@ -150,27 +167,13 @@ public static class BenchmarkPipelineBuilder
             {
                 ["get_weather"] = new(aliases: ["get_current_weather", "weather", "getCurrentWeather", "fetch_weather"]),
                 ["calculate"] = new(aliases: ["calc", "compute", "calculator", "eval"]),
-                ["lookup_order"] = new(aliases: ["lookup_customer", "get_order", "order_lookup", "getOrder"]),
-                ["track_package"] = new(aliases: ["trackPackage", "track", "check_shipping", "get_tracking"]),
                 ["read_file"] = new(aliases: ["readFile", "view_file"]),
                 ["read"] = new(aliases: ["cat"]),
-                ["execute_tests"] = new(aliases: ["run_tests", "runTests", "executeTests", "test"]),
+                ["run_tests"] = new(aliases: ["execute_tests", "runTests", "executeTests", "test"]),
                 ["search_code"] = new(aliases: ["grep", "searchCode", "find_in_files"]),
                 ["search"] = new(aliases: ["find", "query"]),
                 ["apply_patch"] = new(aliases: ["patch", "applyPatch", "git_apply"]),
-                ["query_database"] = new(aliases: ["queryDb", "sql_query", "database_query"]),
-                ["check_status"] = new(aliases: ["status", "checkStatus", "poll_status"]),
-
-                // Canonical tools of the long-horizon scenarios (exact names take precedence over aliases above)
-                ["run_tests"] = new(aliases: []),
-                ["write_file"] = new(aliases: []),
-                ["compile_project"] = new(aliases: []),
-                ["check_git_diff"] = new(aliases: []),
-                ["execute_sast_scan"] = new(aliases: []),
-                ["build_solution"] = new(aliases: []),
-                ["run_unit_tests"] = new(aliases: []),
-                ["run_benchmarks"] = new(aliases: []),
-                ["git_command"] = new(aliases: [])
+                ["query_database"] = new(aliases: ["queryDb", "sql_query", "database_query"])
             }
         });
         return dispatcher;

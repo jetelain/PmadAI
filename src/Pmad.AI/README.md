@@ -80,7 +80,7 @@ dotnet add package Pmad.AI
 | **`Pmad.AI.Tools`** | Tool dispatching, aliasing, translations, and attributes | `LenientToolDispatcher`, `ToolMapping`, `ToolTranslation`, `[ToolAlias]`, `[ToolParameterAlias]`, `[ToolTranslation]` |
 | **`Pmad.AI.Healing`** | Payload healing and protocol repair for local/open-weights models | `ToolCallHealingTransform`, `ToolCallHealingChatClient`, `StreamingHealingMode` |
 | **`Pmad.AI.Guardrails`** | Execution loop breaker and shell security validation | `ToolLoopCircuitBreaker`, `ToolLoopCircuitBreakerChatClient`, `ReadOnlyCommandValidator`, `ShellDialect` |
-| **`Pmad.AI.Compaction`** | Context window history compaction and speculative summarization | `ToolResultCompactor`, `ThinkingTraceCompactionChatClient`, `ISpeculativeSummarizer` |
+| **`Pmad.AI.Compaction`** | Context window history compaction and speculative summarization | `ToolResultCompactor`, `ThinkingTraceCompactionChatClient`, `ISpeculativeSummarizer`, `OllamaSpeculativeSummarizer`, `OllamaApiClient` |
 | **`Pmad.AI.Transcripts`** | Audit-grade Markdown transcript logging | `VerbatimTranscriptChatClient`, `VerbatimTranscriptOptions` |
 | **`Pmad.AI.Tokens`** | Fast zero-allocation token estimation | `HeuristicTokenEstimator` |
 

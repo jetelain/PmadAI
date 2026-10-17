@@ -48,6 +48,8 @@ public class LlamaSharpOptionsAndLoggingTests
         Assert.Null(options.LoggerFactory);
         Assert.Equal(49152, options.ContextSize);
         Assert.Equal(99, options.GpuLayerCount);
+        Assert.Null(options.Threads);
+        Assert.Null(options.BatchThreads);
         Assert.Equal(2048u, options.BatchSize);
         Assert.Equal("chatml", options.PromptFormat);
         Assert.Equal(0.7f, options.DefaultTemperature);
@@ -57,6 +59,19 @@ public class LlamaSharpOptionsAndLoggingTests
         Assert.Null(options.ReasoningEffort);
         Assert.Null(options.SupportsReasoning);
         Assert.Null(options.SupportsReasoningEffort);
+    }
+
+    [Fact]
+    public void LlamaSharpOptions_CanConfigureThreads()
+    {
+        var options = new LlamaSharpOptions
+        {
+            Threads = 2,
+            BatchThreads = 4
+        };
+
+        Assert.Equal(2, options.Threads);
+        Assert.Equal(4, options.BatchThreads);
     }
 
     [Fact]

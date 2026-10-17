@@ -54,6 +54,28 @@ public sealed class BenchmarkScenarioResult
     public required string ScenarioName { get; init; }
     public required string ModelId { get; init; }
     public BenchmarkStatus Status { get; set; } = BenchmarkStatus.Passed;
+
+    /// <summary>
+    /// Scenario evaluation score ranging from 0.0 to 100.0 based on passed subtest turns.
+    /// Formula: (TurnsPassed / TotalTurns) * 100.0.
+    /// </summary>
+    public double Score { get; set; } = 100.0;
+
+    /// <summary>
+    /// Importance weight assigned to this scenario based on turn count and complexity.
+    /// </summary>
+    public double Weight { get; set; } = 1.0;
+
+    /// <summary>
+    /// Number of subtest turns that passed validation.
+    /// </summary>
+    public int TurnsPassed { get; set; }
+
+    /// <summary>
+    /// Total number of subtest turns in this scenario.
+    /// </summary>
+    public int TotalTurns { get; set; }
+
     public double TotalDurationMs { get; set; }
     public int TotalPromptTokens { get; set; }
     public int TotalOutputTokens { get; set; }
@@ -122,8 +144,28 @@ public sealed class ModelBenchmarkSummary
 
     public int ScenariosRun { get; set; }
     public int ScenariosPassed { get; set; }
+    public int ScenariosPartial { get; set; }
     public int ScenariosFailed { get; set; }
-    public double PassRatePercentage => ScenariosRun > 0 ? (ScenariosPassed * 100.0 / ScenariosRun) : 0.0;
+
+    /// <summary>
+    /// Overall benchmark pass rate percentage computed as sum(score * weight) / sum(weight).
+    /// </summary>
+    public double PassRatePercentage
+    {
+        get
+        {
+            if (ScenarioResults.Count > 0)
+            {
+                var totalWeight = ScenarioResults.Sum(s => s.Weight);
+                if (totalWeight > 0)
+                {
+                    return Math.Round(ScenarioResults.Sum(s => s.Score * s.Weight) / totalWeight, 1);
+                }
+            }
+
+            return ScenariosRun > 0 ? Math.Round(ScenariosPassed * 100.0 / ScenariosRun, 1) : 0.0;
+        }
+    }
     public double TotalTimeMs { get; set; }
     public int TotalPromptTokens { get; set; }
     public int TotalOutputTokens { get; set; }
@@ -153,6 +195,11 @@ public sealed class ModelBenchmarkSummary
     public double? PeakContextReductionPercentage { get; set; }
     public double? TimeSavingsPercentage { get; set; }
     public double? AccuracyGainPercentage { get; set; }
+
+    /// <summary>
+    /// Relative or absolute path to the dedicated verbatim transcript file for this model and configuration.
+    /// </summary>
+    public string? TranscriptPath { get; set; }
 
     public List<BenchmarkScenarioResult> ScenarioResults { get; init; } = [];
 }

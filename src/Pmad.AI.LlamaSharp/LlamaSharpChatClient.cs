@@ -194,6 +194,14 @@ public sealed class LlamaSharpChatClient : IChatClient
                 GpuLayerCount = _options.GpuLayerCount,
                 BatchSize = _options.BatchSize
             };
+            if (_options.Threads.HasValue && _options.Threads.Value > 0)
+            {
+                modelParams.Threads = _options.Threads.Value;
+            }
+            if (_options.BatchThreads.HasValue && _options.BatchThreads.Value > 0)
+            {
+                modelParams.BatchThreads = _options.BatchThreads.Value;
+            }
             _context = _weights.CreateContext(modelParams);
             _ownsContext = true;
         }
@@ -274,8 +282,8 @@ public sealed class LlamaSharpChatClient : IChatClient
             ?? NullLogger<LlamaSharpChatClient>.Instance;
 
         instanceLogger.LogInformation(
-            "Loading GGUF model from '{ModelPath}' (ContextSize: {ContextSize}, GpuLayerCount: {GpuLayerCount})",
-            modelPath, options.ContextSize, options.GpuLayerCount);
+            "Loading GGUF model from '{ModelPath}' (ContextSize: {ContextSize}, GpuLayerCount: {GpuLayerCount}, Threads: {Threads})",
+            modelPath, options.ContextSize, options.GpuLayerCount, options.Threads?.ToString() ?? "default");
 
         var effectiveMtpPath = options.MtpPath;
         if (!string.IsNullOrWhiteSpace(effectiveMtpPath) && File.Exists(effectiveMtpPath))
@@ -289,6 +297,16 @@ public sealed class LlamaSharpChatClient : IChatClient
             GpuLayerCount = options.GpuLayerCount,
             BatchSize = options.BatchSize
         };
+
+        if (options.Threads.HasValue && options.Threads.Value > 0)
+        {
+            modelParams.Threads = options.Threads.Value;
+        }
+
+        if (options.BatchThreads.HasValue && options.BatchThreads.Value > 0)
+        {
+            modelParams.BatchThreads = options.BatchThreads.Value;
+        }
 
         var weights = LLamaWeights.LoadFromFile(modelParams);
         var context = weights.CreateContext(modelParams);

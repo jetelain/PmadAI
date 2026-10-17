@@ -11,9 +11,9 @@
 
 | Project | NuGet | Description |
 |:---|:---:|:---|
-| [**`Pmad.AI`**](src/Pmad.AI/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.svg)](https://www.nuget.org/packages/Pmad.AI) | Core agent utilities: protocol-level tool call healing (`ToolCallHealingChatClient`), history compaction (`ThinkingTraceCompactionChatClient`, `ToolResultCompactor`), loop circuit breaker (`ToolLoopCircuitBreaker`, `ToolLoopCircuitBreakerChatClient`), shell security validator (`ReadOnlyCommandValidator`), verbatim audit transcripts (`VerbatimTranscriptChatClient`), declarative tool dispatching (`LenientToolDispatcher`), and token heuristics. Native AOT ready (`IsAotCompatible = true`). |
+| [**`Pmad.AI`**](src/Pmad.AI/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.svg)](https://www.nuget.org/packages/Pmad.AI) | Core agent utilities: protocol-level tool call healing (`ToolCallHealingChatClient`), history compaction (`ThinkingTraceCompactionChatClient`, `ToolResultCompactor`), speculative SLM summarization (`OllamaSpeculativeSummarizer`, `OllamaApiClient`), loop circuit breaker (`ToolLoopCircuitBreaker`, `ToolLoopCircuitBreakerChatClient`), shell security validator (`ReadOnlyCommandValidator`), verbatim audit transcripts (`VerbatimTranscriptChatClient`), declarative tool dispatching (`LenientToolDispatcher`), and token heuristics. Native AOT ready (`IsAotCompatible = true`). |
 | [**`Pmad.AI.SourceGenerators`**](src/Pmad.AI.SourceGenerators) | *Analyzer* | Roslyn incremental source generator and analyzers emitting compile-time diagnostics (`PMAD001`-`PMAD003`) and automatic tool mapping registries from `[ToolAlias]` attributes. |
-| [**`Pmad.AI.LlamaSharp`**](src/Pmad.AI.LlamaSharp/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.LlamaSharp.svg)](https://www.nuget.org/packages/Pmad.AI.LlamaSharp) | High-performance in-process GGUF inference adapter implementing [`Microsoft.Extensions.AI.IChatClient`](https://learn.microsoft.com/dotnet/api/microsoft.extensions.ai.ichatclient) powered by [LLamaSharp](https://github.com/SciSharp/LLamaSharp) and [llama.cpp](https://github.com/ggerganov/llama.cpp). Includes the `LlamaSharpSpeculativeSummarizer` background CPU engine. |
+| [**`Pmad.AI.LlamaSharp`**](src/Pmad.AI.LlamaSharp/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.LlamaSharp.svg)](https://www.nuget.org/packages/Pmad.AI.LlamaSharp) | High-performance in-process GGUF inference adapter implementing [`Microsoft.Extensions.AI.IChatClient`](https://learn.microsoft.com/dotnet/api/microsoft.extensions.ai.ichatclient) powered by [LLamaSharp](https://github.com/SciSharp/LLamaSharp) and [llama.cpp](https://github.com/ggerganov/llama.cpp). |
 | [**`Pmad.AI.Benchmark`**](benchmarks/Pmad.AI.Benchmark) | *Tool* | Evaluation suite measuring tool calling accuracy, compaction efficiency, loop breaker trips, and inference tok/s, latency, RAM, and GPU VRAM across CPU and Vulkan backends. |
 
 ---
@@ -26,11 +26,11 @@
   - Multi-dialect shell security validation (Bash & PowerShell default-deny policies)
   - Audit-grade verbatim Markdown transcript generation (`FlushAfterEachTurn`)
   - Conversation history compaction (reasoning traces and bulky tool outputs)
+  - Speculative SLM summarization via lightweight Ollama HTTP client (`OllamaSpeculativeSummarizer`)
   - Declarative tool dispatching and Roslyn source generation
   - Zero-allocation heuristic token estimation
-- **Local LLM Inference & Speculative Summarization**: [`src/Pmad.AI.LlamaSharp/README.md`](src/Pmad.AI.LlamaSharp/README.md)
+- **Local LLM Inference**: [`src/Pmad.AI.LlamaSharp/README.md`](src/Pmad.AI.LlamaSharp/README.md)
   - Backend setup (CPU, Vulkan, CUDA 12)
-  - Speculative CPU SLM summarization engine (`LlamaSharpSpeculativeSummarizer`)
   - Quickstart: Basic completion, streaming, and tool calling with `AIFunction`
   - Multimodal vision inference (`mmproj`)
   - Chat dialects (ChatML, Gemma 4, Phi-3) and reasoning effort configuration

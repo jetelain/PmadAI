@@ -86,6 +86,17 @@ public sealed class ToolLoopCircuitBreaker
     }
 
     /// <summary>
+    /// Resets invocation history and consecutive count. Call this between independent sessions or benchmark scenarios.
+    /// </summary>
+    public void Reset()
+    {
+        _history.Clear();
+        _lastToolHash = null;
+        _lastStateSignature = null;
+        _consecutiveIdenticalCount = 0;
+    }
+
+    /// <summary>
     /// Scans a text buffer for repeating character sequences ($\ge \text{NgramMinLength}$ repeated $\ge \text{NgramMinOccurrences}$ times).
     /// Only scans a bounded tail window for $O(1)$ per-chunk performance.
     /// </summary>
@@ -203,16 +214,6 @@ public sealed class ToolLoopCircuitBreaker
         return new LoopCheckResult(false, LoopType.None, string.Empty, toolName);
     }
 
-    /// <summary>
-    /// Clears invocation history and resets state.
-    /// </summary>
-    public void Reset()
-    {
-        _history.Clear();
-        _lastToolHash = null;
-        _lastStateSignature = null;
-        _consecutiveIdenticalCount = 0;
-    }
 
     private static string CanonicalizeJson(string? json)
     {

@@ -48,6 +48,18 @@ public sealed class LlamaSharpOptions
     public int GpuLayerCount { get; set; } = 99;
 
     /// <summary>
+    /// Number of CPU threads to allocate for model generation/inference.
+    /// When null, LLamaSharp / llama.cpp default thread heuristics are used.
+    /// </summary>
+    public int? Threads { get; set; }
+
+    /// <summary>
+    /// Number of CPU threads to allocate for prompt batch processing.
+    /// When null, defaults to <see cref="Threads"/> or LLamaSharp defaults.
+    /// </summary>
+    public int? BatchThreads { get; set; }
+
+    /// <summary>
     /// Evaluation batch size in tokens. Defaults to 2048.
     /// </summary>
     public uint BatchSize { get; set; } = 2048;

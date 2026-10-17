@@ -91,7 +91,7 @@ public static class TranscriptReportWriter
             sb.AppendLine();
             sb.AppendLine($"- **Backend:** {backendStr} (GPU layers: {m.GpuLayers})");
             sb.AppendLine($"- **Reasoning:** {reasStr}");
-            sb.AppendLine($"- **Scenarios:** {m.ScenariosPassed}/{m.ScenariosRun} passed ({m.PassRatePercentage:F0}%)");
+            sb.AppendLine($"- **Scenarios:** {m.ScenariosPassed}/{m.ScenariosRun} passed (Weighted Pass Rate: {m.PassRatePercentage:F1}%)");
             sb.AppendLine($"- **Metrics:** {m.TotalOutputTokens} tokens in {m.TotalTimeMs / 1000.0:F2}s ({m.AverageGenerationTokensPerSecond:F1} tok/s) | RAM: {BenchmarkRunner.FormatMemory(m.PeakMemoryMb)} | GPU VRAM: {vramStr}");
             sb.AppendLine();
 
@@ -100,11 +100,11 @@ public static class TranscriptReportWriter
                 var statusBadge = sc.Status switch
                 {
                     BenchmarkStatus.Passed => "✅ PASS",
-                    BenchmarkStatus.Failed => "❌ FAIL",
-                    _ => "⚠️ PARTIAL"
+                    BenchmarkStatus.Partial => "⚠️ PARTIAL",
+                    _ => "❌ FAIL"
                 };
 
-                sb.AppendLine($"#### Scenario: `{sc.ScenarioId}` - \"{sc.ScenarioName}\" ({statusBadge})");
+                sb.AppendLine($"#### Scenario: `{sc.ScenarioId}` - \"{sc.ScenarioName}\" ({statusBadge} - Score: {sc.Score:F1}%, Weight: {sc.Weight:F1})");
                 sb.AppendLine();
                 sb.AppendLine($"- **Total Time:** {sc.TotalDurationMs:F0} ms | **Speed:** {sc.GenerationTokensPerSecond:F1} tok/s | **Tool Calls:** {sc.TotalToolCalls} (Accuracy: {sc.ToolAccuracyPercentage:F0}%)");
 

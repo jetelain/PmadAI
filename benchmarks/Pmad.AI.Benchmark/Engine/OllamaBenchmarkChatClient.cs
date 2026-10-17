@@ -432,6 +432,117 @@ public sealed partial class OllamaBenchmarkChatClient : IChatClient
     public object? GetService(Type serviceType, object? serviceKey = null) =>
         serviceType == typeof(OllamaBenchmarkChatClient) ? this : null;
 
+    /// <summary>
+    /// Checks whether the local Ollama daemon is reachable.
+    /// </summary>
+    public static async Task<bool> IsOllamaRunningAsync(string baseUrl = "http://localhost:11434", CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+            var baseUri = new Uri(baseUrl.TrimEnd('/') + "/api/tags");
+            using var response = await client.GetAsync(baseUri, cancellationToken);
+            return response.IsSuccessStatusCode;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Retrieves list of model names currently installed in the Ollama instance.
+    /// </summary>
+    public static async Task<List<string>> GetAvailableModelsAsync(string baseUrl = "http://localhost:11434", CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var baseUri = new Uri(baseUrl.TrimEnd('/') + "/api/tags");
+            using var response = await client.GetAsync(baseUri, cancellationToken);
+            if (!response.IsSuccessStatusCode) return [];
+
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            var models = new List<string>();
+
+            if (doc.RootElement.TryGetProperty("models", out var modelsArr) && modelsArr.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var m in modelsArr.EnumerateArray())
+                {
+                    if (m.TryGetProperty("name", out var nameProp) && nameProp.GetString() is { } name)
+                    {
+                        models.Add(name);
+                    }
+                }
+            }
+            return models;
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// Preloads the model weights into Ollama memory/VRAM with a specified keep_alive duration.
+    /// Eliminates cold-start latency distortion during benchmarks.
+    /// </summary>
+    public static async Task PreloadModelAsync(
+        string modelId,
+        string baseUrl = "http://localhost:11434",
+        string keepAlive = "1h",
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
+            var endpoint = new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), "api/generate");
+
+            var payload = JsonSerializer.Serialize(new
+            {
+                model = modelId,
+                keep_alive = keepAlive
+            });
+
+            using var content = new StringContent(payload, Encoding.UTF8, "application/json");
+            using var response = await client.PostAsync(endpoint, content, cancellationToken);
+        }
+        catch
+        {
+            // Best effort preload
+        }
+    }
+
+    /// <summary>
+    /// Forcefully unloads the model from Ollama VRAM by setting keep_alive to 0.
+    /// Frees 100% of GPU resources for subsequent in-process Vulkan models or next targets.
+    /// </summary>
+    public static async Task OffloadModelAsync(
+        string modelId,
+        string baseUrl = "http://localhost:11434",
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+            var endpoint = new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), "api/generate");
+
+            var payload = JsonSerializer.Serialize(new
+            {
+                model = modelId,
+                keep_alive = 0
+            });
+
+            using var content = new StringContent(payload, Encoding.UTF8, "application/json");
+            using var response = await client.PostAsync(endpoint, content, cancellationToken);
+        }
+        catch
+        {
+            // Best effort offload
+        }
+    }
+
     public void Dispose()
     {
         if (_ownsHttpClient)

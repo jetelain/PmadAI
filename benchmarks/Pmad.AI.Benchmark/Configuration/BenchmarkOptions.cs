@@ -17,6 +17,16 @@ public sealed class BenchmarkOptions
     public bool AllPresets { get; set; }
 
     /// <summary>
+    /// When true, benchmarks all available execution targets (all GGUF presets + designated Ollama models).
+    /// </summary>
+    public bool AllTargets { get; set; }
+
+    /// <summary>
+    /// Comma-separated list of designated Ollama model names to benchmark (e.g. "Qwen3.8-27B:latest,jetelain/Qwen3.8-27B:iq3").
+    /// </summary>
+    public string? OllamaModelsList { get; set; }
+
+    /// <summary>
     /// When true, automatically downloads model files if missing from the local cache.
     /// </summary>
     public bool DownloadMissing { get; set; }
@@ -41,6 +51,11 @@ public sealed class BenchmarkOptions
     /// Context size tokens for model inference (default 8192).
     /// </summary>
     public int ContextSize { get; set; } = 8192;
+
+    /// <summary>
+    /// Number of CPU threads allocated to background speculative SLM summarization (default 2).
+    /// </summary>
+    public int SlmThreads { get; set; } = 2;
 
     /// <summary>
     /// Optional file path to export benchmark results as Markdown.
@@ -156,9 +171,14 @@ public sealed class BenchmarkOptions
                 return options;
             }
 
-            if (arg is "-m" or "--model" && i + 1 < args.Length)
+            if (arg is "-m" or "--model" or "--preset" && i + 1 < args.Length)
             {
                 options.Model = args[++i];
+            }
+            else if (arg is "--all-targets" or "--all-models")
+            {
+                options.AllTargets = true;
+                options.AllPresets = true;
             }
             else if (arg is "--all" or "--all-presets")
             {
@@ -202,13 +222,25 @@ public sealed class BenchmarkOptions
                 options.CompareBackends = true;
                 options.CompareReasoning = true;
             }
-            else if (arg is "--opt-matrix" or "--optimization-matrix" or "--opt")
+            else if (arg is "--opt-matrix" or "--optimization-matrix")
             {
                 options.OptMatrix = true;
             }
-            else if (arg is "--config" && i + 1 < args.Length)
+            else if (arg is "--config" or "--opt" && i + 1 < args.Length)
             {
-                options.ConfigId = args[++i];
+                var val = args[++i];
+                if (val.Equals("matrix", StringComparison.OrdinalIgnoreCase) || val.Equals("all", StringComparison.OrdinalIgnoreCase))
+                {
+                    options.OptMatrix = true;
+                }
+                else
+                {
+                    options.ConfigId = val;
+                }
+            }
+            else if (arg is "--ollama-models" or "--ollama-list" && i + 1 < args.Length)
+            {
+                options.OllamaModelsList = args[++i];
             }
             else if (arg is "--ollama" && i + 1 < args.Length)
             {
@@ -235,15 +267,15 @@ public sealed class BenchmarkOptions
                 options.ContextSize = ctx;
                 options.IsContextSizeExplicit = true;
             }
-            else if (arg is "-o" or "--output" or "--markdown" && i + 1 < args.Length)
+            else if (arg is "-o" or "--output" or "--markdown" or "--out-markdown" && i + 1 < args.Length)
             {
                 options.OutputMarkdownPath = args[++i];
             }
-            else if (arg is "-j" or "--json" && i + 1 < args.Length)
+            else if (arg is "-j" or "--json" or "--out-json" && i + 1 < args.Length)
             {
                 options.OutputJsonPath = args[++i];
             }
-            else if (arg is "-t" or "--transcript" && i + 1 < args.Length)
+            else if (arg is "-t" or "--transcript" or "--out-transcript" && i + 1 < args.Length)
             {
                 options.OutputTranscriptPath = args[++i];
             }
@@ -262,6 +294,10 @@ public sealed class BenchmarkOptions
             else if (arg is "-u" or "--utilities" or "--utility-benchmarks")
             {
                 options.RunUtilities = true;
+            }
+            else if (arg is "--slm-threads" or "--speculative-threads" && i + 1 < args.Length && int.TryParse(args[++i], out var slmThreads))
+            {
+                options.SlmThreads = slmThreads;
             }
             else if (arg is "-v" or "--verbose")
             {
@@ -292,12 +328,17 @@ Usage:
 Target Models & Providers:
   -m, --model <id|path>    Model preset (e.g. 'qwen3.5-2b', 'gemma-4-e2b') or path to .gguf.
                            If omitted and no models are found, runs in mock simulation mode.
-  --ollama <model>         Target local Ollama model (e.g. 'Qwen3.8-27B:latest', 'jetelain/Qwen3.8-27B:iq3').
+  --all-targets            Benchmark all targets: all GGUF presets + designated Ollama models.
+  --all, --all-presets     Benchmark all supported in-process GGUF presets.
+  --ollama <model>         Target local Ollama model (e.g. 'Qwen3.8-27B:latest').
+  --ollama-models <m1,m2>  Target multiple designated Ollama models (comma-separated).
   --ollama-url <url>       Ollama endpoint URL (default: http://localhost:11434).
-  --all, --all-presets     Benchmark all supported model presets.
-  -d, --download           Download models automatically if missing from local cache.
+  -d, --download           Download GGUF models automatically if missing from local cache.
   --mock, --dry-run        Run with mock simulated chat client (showcases tool calling & metrics immediately).
-  -s, --scenario <name>    Filter scenario: 'weather', 'calculator', 'support', 'direct', 'compaction', 'healing', 'runaway-loop', or 'all'.
+  -s, --scenario <name>    Filter scenario: 'all' (all 16 scenarios across BFCL, SWE-bench & RULER),
+                           'all-small' (13 scenarios: BFCL + SWE-bench + RULER 8k/16k, excluding deep),
+                           'bfcl' (4 scenarios, 70 cases), 'swebench' (7 trace replays),
+                           'ruler' (5 context depths), 'deep' (32k/64k/128k), or comma-separated.
 
 Optimization Matrix:
   --opt-matrix             Run full 7-configuration optimization matrix (Baseline, single utilities, and all combined).
@@ -309,6 +350,7 @@ Hardware & Backend:
   --compare-backends       Run each model on both CPU (0 GPU layers) and Vulkan GPU acceleration.
   -g, --gpu <layers>       GPU layers to offload (default: 99; use 0 for CPU).
   -c, --context <tokens>   Context size (default: 65536 for SLMs < 9B; 131072 for LLMs 9B+).
+  --slm-threads <count>    CPU threads for background speculative SLM summarizer (default: 2).
 
 Reasoning:
   --compare-reasoning      Run each model with and without reasoning enabled to compare speed & token overhead.

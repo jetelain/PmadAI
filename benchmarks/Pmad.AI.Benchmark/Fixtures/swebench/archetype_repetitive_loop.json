@@ -1,0 +1,44 @@
+{
+  "instance_id": "sympy__sympy-20590",
+  "repository": "sympy/sympy",
+  "archetype": "RepetitiveLoop",
+  "problem_statement": "Symbol __slots__ broken in sympy/core/symbol.py, agent enters repetitive grep loop.",
+  "turns": [
+    {
+      "turn_index": 1,
+      "user_prompt": "[SWE-bench: sympy-20590] Locate where __slots__ is defined for Symbol in sympy/core/symbol.py.",
+      "assistant_thought": "I will search for __slots__ in sympy/core/symbol.py.",
+      "expected_tool_name": "search_code",
+      "tool_arguments": { "query": "__slots__", "path": "sympy/core/symbol.py" },
+      "observation": "# sympy/core/symbol.py\n# File empty of direct string literal '__slots__'\n",
+      "expected_completion_substring": "No direct match for __slots__ in sympy/core/symbol.py."
+    },
+    {
+      "turn_index": 2,
+      "user_prompt": "Try searching for __slots__ again in sympy/core/symbol.py.",
+      "assistant_thought": "Let me re-run search for __slots__ in sympy/core/symbol.py.",
+      "expected_tool_name": "search_code",
+      "tool_arguments": { "query": "__slots__", "path": "sympy/core/symbol.py" },
+      "observation": "# sympy/core/symbol.py\n# File empty of direct string literal '__slots__'\n",
+      "expected_completion_substring": "Still no match found."
+    },
+    {
+      "turn_index": 3,
+      "user_prompt": "Please search for __slots__ one more time in sympy/core/symbol.py.",
+      "assistant_thought": "Searching once more for __slots__ in sympy/core/symbol.py.",
+      "expected_tool_name": "search_code",
+      "tool_arguments": { "query": "__slots__", "path": "sympy/core/symbol.py" },
+      "observation": "# sympy/core/symbol.py\n# File empty of direct string literal '__slots__'\n",
+      "expected_completion_substring": "Still no match found."
+    },
+    {
+      "turn_index": 4,
+      "user_prompt": "Search for __slots__ in sympy/core/symbol.py again.",
+      "assistant_thought": "Searching again for __slots__.",
+      "expected_tool_name": "search_code",
+      "tool_arguments": { "query": "__slots__", "path": "sympy/core/symbol.py" },
+      "observation": "Circuit Breaker Tripped: Repetitive invocation detected.",
+      "expected_completion_substring": "Repetitive tool invocation loop intercepted."
+    }
+  ]
+}

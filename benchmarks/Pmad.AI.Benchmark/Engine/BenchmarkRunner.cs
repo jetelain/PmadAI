@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
 using Pmad.AI.Benchmark.Scenarios;
+using Pmad.AI.Transcripts;
 
 namespace Pmad.AI.Benchmark.Engine;
 
@@ -22,6 +23,7 @@ public sealed class BenchmarkRunner
     private readonly string? _configurationLabel;
     private readonly string? _optimizationConfigId;
     private readonly string? _optimizationConfigLabel;
+    private readonly string? _transcriptPath;
 
     public BenchmarkRunner(
         IChatClient client,
@@ -34,7 +36,8 @@ public sealed class BenchmarkRunner
         string? reasoningEffort = null,
         string? configurationLabel = null,
         string? optimizationConfigId = null,
-        string? optimizationConfigLabel = null)
+        string? optimizationConfigLabel = null,
+        string? transcriptPath = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _modelId = modelId ?? throw new ArgumentNullException(nameof(modelId));
@@ -47,6 +50,7 @@ public sealed class BenchmarkRunner
         _configurationLabel = configurationLabel;
         _optimizationConfigId = optimizationConfigId;
         _optimizationConfigLabel = optimizationConfigLabel;
+        _transcriptPath = transcriptPath;
     }
 
     /// <summary>
@@ -54,6 +58,7 @@ public sealed class BenchmarkRunner
     /// </summary>
     public async Task<ModelBenchmarkSummary> RunAllAsync(
         IReadOnlyList<BenchmarkScenario> scenarios,
+        Func<BenchmarkScenarioResult, ModelBenchmarkSummary, Task>? onScenarioCompleted = null,
         CancellationToken cancellationToken = default)
     {
         var isGpu = _gpuLayers > 0 || string.Equals(_backend, "Vulkan", StringComparison.OrdinalIgnoreCase);
@@ -70,6 +75,7 @@ public sealed class BenchmarkRunner
             ConfigurationLabel = _configurationLabel,
             OptimizationConfigId = _optimizationConfigId,
             OptimizationConfigLabel = _optimizationConfigLabel,
+            TranscriptPath = _transcriptPath,
             PeakMemoryMb = GetCurrentWorkingSetMb(),
             BaselineVramMb = baselineVram,
             PeakVramMb = baselineVram
@@ -77,13 +83,38 @@ public sealed class BenchmarkRunner
 
         foreach (var scenario in scenarios)
         {
-            var result = await RunScenarioAsync(scenario, cancellationToken);
+            BenchmarkScenarioResult result;
+            try
+            {
+                result = await RunScenarioAsync(scenario, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _client.GetService<VerbatimTranscriptChatClient>()?.AddNote($"> [!CAUTION]\n> **SCENARIO ERROR:** {ex.Message}", scenario.Id);
+                result = new BenchmarkScenarioResult
+                {
+                    ScenarioId = scenario.Id,
+                    ScenarioName = scenario.Name,
+                    ModelId = _modelId,
+                    Status = BenchmarkStatus.Failed,
+                    Score = 0.0,
+                    Weight = scenario.Weight,
+                    TotalTurns = scenario.Turns.Count,
+                    TurnsPassed = 0,
+                    ErrorMessage = $"Scenario unhandled exception: {ex.Message}"
+                };
+            }
+
             summary.ScenarioResults.Add(result);
             summary.ScenariosRun++;
 
             if (result.Status == BenchmarkStatus.Passed)
             {
                 summary.ScenariosPassed++;
+            }
+            else if (result.Status == BenchmarkStatus.Partial)
+            {
+                summary.ScenariosPartial++;
             }
             else
             {
@@ -110,6 +141,18 @@ public sealed class BenchmarkRunner
             {
                 summary.PeakVramMb = result.PeakVramMb;
             }
+
+            if (onScenarioCompleted != null)
+            {
+                try
+                {
+                    await onScenarioCompleted(result, summary);
+                }
+                catch
+                {
+                    // Best effort checkpoint callback
+                }
+            }
         }
 
         var currentMem = GetCurrentWorkingSetMb();
@@ -132,6 +175,19 @@ public sealed class BenchmarkRunner
             summary.AverageGenerationTokensPerSecond = summary.TotalOutputTokens / (summary.TotalTimeMs / 1000.0);
         }
 
+        var verbatimClient = _client.GetService<VerbatimTranscriptChatClient>();
+        if (verbatimClient != null && !string.IsNullOrWhiteSpace(_transcriptPath))
+        {
+            try
+            {
+                await verbatimClient.SaveTranscriptAsync(_transcriptPath, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best effort save
+            }
+        }
+
         return summary;
     }
 
@@ -144,22 +200,22 @@ public sealed class BenchmarkRunner
     {
         Log($"\n>>> Running Scenario: [{scenario.Id}] \"{scenario.Name}\"");
 
+        _client.GetService<Pmad.AI.Guardrails.ToolLoopCircuitBreaker>()?.Reset();
+
         var isGpu = _gpuLayers > 0 || string.Equals(_backend, "Vulkan", StringComparison.OrdinalIgnoreCase);
         var scenarioResult = new BenchmarkScenarioResult
         {
             ScenarioId = scenario.Id,
             ScenarioName = scenario.Name,
             ModelId = _modelId,
+            Weight = scenario.Weight,
+            TotalTurns = scenario.Turns.Count,
             PeakMemoryMb = GetCurrentWorkingSetMb(),
             PeakVramMb = isGpu ? (NvidiaSmiMonitor.GetUsedVramMb() ?? 0) : 0
         };
 
         var scenarioStopwatch = Stopwatch.StartNew();
         var history = new List<ChatMessage>();
-        var chatOptions = new ChatOptions
-        {
-            Tools = scenario.Tools.ToList()
-        };
 
         int expectedToolCallMatches = 0;
         int totalExpectedToolCalls = 0;
@@ -168,6 +224,17 @@ public sealed class BenchmarkRunner
         {
             var turn = scenario.Turns[turnIdx];
             totalExpectedToolCalls += turn.ExpectedToolNames.Count;
+
+            if (turn.ClearHistoryBeforeTurn)
+            {
+                history.Clear();
+            }
+
+            var chatOptions = new ChatOptions
+            {
+                ConversationId = scenario.Id,
+                Tools = (turn.Tools ?? scenario.Tools).ToList()
+            };
 
             Log($"  [Turn {turnIdx + 1}/{scenario.Turns.Count}] User: \"{turn.UserPrompt}\"");
 
@@ -284,7 +351,20 @@ public sealed class BenchmarkRunner
 
             // Validate Turn Expectations
             // 1. Tool name matching
-            if (turn.ExpectedToolNames.Count > 0)
+            if (turnResult.AssistantFinalText.Contains("[Circuit Breaker Tripped]", StringComparison.OrdinalIgnoreCase))
+            {
+                turnResult.Status = BenchmarkStatus.Passed;
+                turnResult.ValidationMessage = "Circuit breaker intercepted repetitive execution.";
+            }
+            else if (turn.AllowAnyTool)
+            {
+                // Trajectory replay / open coding exploration
+                if (turnResult.ToolCalls.Count > 0)
+                {
+                    expectedToolCallMatches++;
+                }
+            }
+            else if (turn.ExpectedToolNames.Count > 0)
             {
                 var actualToolNames = turnResult.ToolCalls.Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 foreach (var expectedName in turn.ExpectedToolNames)
@@ -337,14 +417,16 @@ public sealed class BenchmarkRunner
             scenarioResult.TotalPromptTokens += turnResult.PromptTokens;
             scenarioResult.TotalOutputTokens += turnResult.OutputTokens;
 
+            var transcriptClient = _client.GetService<VerbatimTranscriptChatClient>();
             if (turnResult.Status == BenchmarkStatus.Failed)
             {
-                scenarioResult.Status = BenchmarkStatus.Failed;
                 Log($"  ❌ [Turn {turnIdx + 1} FAILED]: {turnResult.ValidationMessage}");
+                transcriptClient?.RecordTurnOutcome(false, turnResult.ValidationMessage, scenario.Id);
             }
             else
             {
                 Log($"  ✅ [Turn {turnIdx + 1} PASSED] ({turnResult.DurationMs:F0} ms, {turnResult.OutputTokens} tokens)");
+                transcriptClient?.RecordTurnOutcome(true, "All turn assertions and tool expectations satisfied.", scenario.Id);
             }
 
             var currentMem = GetCurrentWorkingSetMb();
@@ -365,6 +447,26 @@ public sealed class BenchmarkRunner
 
         scenarioStopwatch.Stop();
         scenarioResult.TotalDurationMs = scenarioStopwatch.Elapsed.TotalMilliseconds;
+
+        // Compute subtest score (0 - 100), passed turns, and scenario status
+        scenarioResult.TurnsPassed = scenarioResult.TurnResults.Count(t => t.Status == BenchmarkStatus.Passed);
+        scenarioResult.TotalTurns = scenario.Turns.Count;
+        scenarioResult.Score = scenarioResult.TotalTurns > 0
+            ? Math.Round(scenarioResult.TurnsPassed * 100.0 / scenarioResult.TotalTurns, 1)
+            : 0.0;
+
+        if (scenarioResult.Score >= 100.0)
+        {
+            scenarioResult.Status = BenchmarkStatus.Passed;
+        }
+        else if (scenarioResult.Score > 0.0)
+        {
+            scenarioResult.Status = BenchmarkStatus.Partial;
+        }
+        else
+        {
+            scenarioResult.Status = BenchmarkStatus.Failed;
+        }
 
         var endMem = GetCurrentWorkingSetMb();
         if (endMem > scenarioResult.PeakMemoryMb)
@@ -392,7 +494,7 @@ public sealed class BenchmarkRunner
             memStr += $", VRAM: {FormatMemory(scenarioResult.PeakVramMb)}";
         }
 
-        Log($"--- Scenario [{scenario.Id}] Completed: {scenarioResult.Status} in {scenarioResult.TotalDurationMs:F0} ms (Gen: {scenarioResult.GenerationTokensPerSecond:F1} tok/s, {memStr}) ---");
+        Log($"--- Scenario [{scenario.Id}] Completed: {scenarioResult.Status} (Score: {scenarioResult.Score:F1}%, {scenarioResult.TurnsPassed}/{scenarioResult.TotalTurns} turns, Weight: {scenarioResult.Weight:F1}) in {scenarioResult.TotalDurationMs:F0} ms (Gen: {scenarioResult.GenerationTokensPerSecond:F1} tok/s, {memStr}) ---");
 
         return scenarioResult;
     }

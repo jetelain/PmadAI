@@ -1,0 +1,56 @@
+{
+  "instance_id": "sympy__sympy-13647",
+  "repository": "sympy/sympy",
+  "archetype": "MatrixTranspose",
+  "problem_statement": "Matrix.col_insert() shifts existing columns incorrectly when inserting into identity matrix at pos 0.",
+  "turns": [
+    {
+      "turn_index": 1,
+      "user_prompt": "[SWE-bench: sympy-13647] Inspect Matrix.col_insert implementation in sympy/matrices/common.py lines 80-120.",
+      "assistant_thought": "I will read sympy/matrices/common.py around lines 80-120 to check the col_insert implementation.",
+      "expected_tool_name": "read_file",
+      "tool_arguments": { "path": "sympy/matrices/common.py", "start_line": 80, "end_line": 120 },
+      "observation": "    def col_insert(self, pos, other):\n        pos = self._handle_column_index(pos)\n        if pos < 0:\n            pos = self.cols + pos\n        return self._eval_col_insert(pos, other)\n",
+      "expected_completion_substring": "col_insert delegates to _eval_col_insert."
+    },
+    {
+      "turn_index": 2,
+      "user_prompt": "Run the matrix test suite under sympy/matrices/tests/test_matrices.py for test_col_insert.",
+      "assistant_thought": "Let's run the failing test case for col_insert.",
+      "expected_tool_name": "run_tests",
+      "tool_arguments": { "test_target": "sympy/matrices/tests/test_matrices.py -k test_col_insert" },
+      "observation": "============================= test session starts =============================\ncollected 1 item\nsympy/matrices/tests/test_matrices.py F\n=================================== FAILURES ===================================\n_______________________________ test_col_insert _______________________________\nAssertionError: Matrix([[1, 0, 2], [0, 1, 3]]) != Matrix([[2, 1, 0], [3, 0, 1]])\n=========================== 1 failed in 0.85s ===========================\n",
+      "expected_completion_substring": "test_col_insert fails with column ordering mismatch."
+    },
+    {
+      "turn_index": 3,
+      "user_prompt": "Apply patch to sympy/matrices/common.py adjusting column offset indexing on insertion.",
+      "assistant_thought": "Applying patch to fix pos calculation in sympy/matrices/common.py.",
+      "expected_tool_name": "apply_patch",
+      "tool_arguments": {
+        "path": "sympy/matrices/common.py",
+        "patch": "@@ -86,2 +86,4 @@\n-        if pos <= 0:\n+        if pos < 0:\n"
+      },
+      "observation": "Hunk #1 succeeded at line 86.\nFile sympy/matrices/common.py patched successfully.\n",
+      "expected_completion_substring": "Patch applied successfully to sympy/matrices/common.py."
+    },
+    {
+      "turn_index": 4,
+      "user_prompt": "Re-run pytest on sympy/matrices/tests/test_matrices.py to verify test_col_insert passes.",
+      "assistant_thought": "Re-running test_col_insert.",
+      "expected_tool_name": "run_tests",
+      "tool_arguments": { "test_target": "sympy/matrices/tests/test_matrices.py -k test_col_insert" },
+      "observation": "============================= test session starts =============================\ncollected 1 item\nsympy/matrices/tests/test_matrices.py .\n=========================== 1 passed in 0.81s ===========================\n",
+      "expected_completion_substring": "1 passed in 0.81s"
+    },
+    {
+      "turn_index": 5,
+      "user_prompt": "Check git diff to inspect final patch changes.",
+      "assistant_thought": "Checking git diff.",
+      "expected_tool_name": "check_git_diff",
+      "tool_arguments": { "cached": false },
+      "observation": "diff --git a/sympy/matrices/common.py b/sympy/matrices/common.py\nindex abc1234..def5678 100644\n--- a/sympy/matrices/common.py\n+++ b/sympy/matrices/common.py\n@@ -86,2 +86,2 @@\n-        if pos <= 0:\n+        if pos < 0:\n",
+      "expected_completion_substring": "Git diff confirms column index boundary fix."
+    }
+  ]
+}

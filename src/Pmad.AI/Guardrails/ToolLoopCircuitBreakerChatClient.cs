@@ -87,4 +87,11 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
             yield return update;
         }
     }
+
+    public override object? GetService(Type serviceType, object? serviceKey = null)
+    {
+        if (serviceType == typeof(ToolLoopCircuitBreakerChatClient)) return this;
+        if (serviceType == typeof(ToolLoopCircuitBreaker)) return _breaker;
+        return base.GetService(serviceType, serviceKey);
+    }
 }

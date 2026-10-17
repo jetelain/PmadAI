@@ -262,48 +262,6 @@ When reasoning is disabled (`enable = false` or `effort = none`), dialects pre-f
 
 ---
 
-## Speculative CPU SLM Compaction Engine (`LlamaSharpSpeculativeSummarizer`)
-
-`LlamaSharpSpeculativeSummarizer` implements [`Pmad.AI.ISpeculativeSummarizer`](../Pmad.AI) to asynchronously precompute concise semantic summaries of bulky tool outputs and reasoning traces.
-
-By executing an efficient Small Language Model (such as Qwen 3.5 2B or Gemma 4 E2B) on dedicated host CPU threads with below-normal priority (`GpuLayerCount = 0`, `ThreadPriority.BelowNormal`), it preserves 100% of primary GPU VRAM and bandwidth for the main agent loop.
-
-### Registration & Pipeline Usage
-
-```csharp
-using Microsoft.Extensions.AI;
-using Pmad.AI;
-using Pmad.AI.LlamaSharp;
-
-// 1. Initialize CPU background summarizer
-var summarizer = new LlamaSharpSpeculativeSummarizer(new LlamaSharpSpeculativeSummarizerOptions
-{
-    ModelPath = "models/qwen3.5-2b-ud-q4_k_xl.gguf",
-    CpuThreads = 4,
-    QueueCapacity = 32,
-    MaxSummaryTokens = 120
-});
-
-// 2. Wire into agent pipeline
-var client = new ChatClientBuilder(primaryGpuChatClient)
-    .UseThinkingTraceCompaction(options =>
-    {
-        options.Summarizer = summarizer;
-        options.KeepVerbatimCount = 5;
-    })
-    .UseToolResultCompaction(options =>
-    {
-        options.Summarizer = summarizer;
-        options.KeepVerbatimCount = 10;
-    })
-    .Build();
-
-// 3. On task or session completion, evict cached summaries to free host memory
-summarizer.EvictSession(sessionId);
-```
-
----
-
 ## Model Presets
 
 The library includes verified presets with tested prompt templates, reasoning capabilities, and context configurations:

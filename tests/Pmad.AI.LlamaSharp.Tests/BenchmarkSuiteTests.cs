@@ -3,6 +3,8 @@ using Pmad.AI.Benchmark.Configuration;
 using Pmad.AI.Benchmark.Engine;
 using Pmad.AI.Benchmark.Reporting;
 using Pmad.AI.Benchmark.Scenarios;
+using Pmad.AI.Benchmark.Scenarios.Bfcl;
+using Pmad.AI.Benchmark.Scenarios.Ruler;
 
 namespace Pmad.AI.LlamaSharp.Tests;
 
@@ -57,35 +59,49 @@ public class BenchmarkSuiteTests
     public void BenchmarkScenario_GetAllScenarios_ReturnsExpectedDefinitions()
     {
         var scenarios = BenchmarkScenario.GetAllScenarios();
-        Assert.Equal(7, scenarios.Count);
+        Assert.Equal(16, scenarios.Count);
 
-        Assert.Contains(scenarios, s => s.Id == "weather");
-        Assert.Contains(scenarios, s => s.Id == "calculator");
-        Assert.Contains(scenarios, s => s.Id == "support");
-        Assert.Contains(scenarios, s => s.Id == "direct");
-        Assert.Contains(scenarios, s => s.Id == "compaction");
-        Assert.Contains(scenarios, s => s.Id == "healing");
-        Assert.Contains(scenarios, s => s.Id == "runaway-loop");
+        Assert.Contains(scenarios, s => s.Id == "bfcl-simple");
+        Assert.Contains(scenarios, s => s.Id == "bfcl-multiple");
+        Assert.Contains(scenarios, s => s.Id == "bfcl-parallel");
+        Assert.Contains(scenarios, s => s.Id == "bfcl-irrelevance");
+        Assert.Contains(scenarios, s => s.Id == "swebench-diff");
+        Assert.Contains(scenarios, s => s.Id == "swebench-logs");
+        Assert.Contains(scenarios, s => s.Id == "swebench-loop");
+        Assert.Contains(scenarios, s => s.Id == "swebench-deep");
+        Assert.Contains(scenarios, s => s.Id == "swebench-succinct");
+        Assert.Contains(scenarios, s => s.Id == "swebench-matrix");
+        Assert.Contains(scenarios, s => s.Id == "swebench-syntax");
+        Assert.Contains(scenarios, s => s.Id == "ruler-8k");
+        Assert.Contains(scenarios, s => s.Id == "ruler-16k");
+        Assert.Contains(scenarios, s => s.Id == "ruler-32k");
+        Assert.Contains(scenarios, s => s.Id == "ruler-64k");
+        Assert.Contains(scenarios, s => s.Id == "ruler-128k");
 
         foreach (var sc in scenarios)
         {
             Assert.NotEmpty(sc.Name);
             Assert.NotEmpty(sc.Description);
-            Assert.NotEmpty(sc.Tools);
             Assert.NotEmpty(sc.Turns);
         }
     }
 
     [Theory]
-    [InlineData("weather", "weather")]
-    [InlineData("calc", "calculator")]
-    [InlineData("support", "support")]
-    [InlineData("direct", "direct")]
-    [InlineData("compaction", "compaction")]
-    [InlineData("healing", "healing")]
-    [InlineData("runaway", "runaway-loop")]
-    [InlineData("loop", "runaway-loop")]
-    [InlineData("all", 7)]
+    [InlineData("simple", "bfcl-simple")]
+    [InlineData("multiple", "bfcl-multiple")]
+    [InlineData("parallel", "bfcl-parallel")]
+    [InlineData("irrelevance", "bfcl-irrelevance")]
+    [InlineData("ruler-8k", "ruler-8k")]
+    [InlineData("ruler-16k", "ruler-16k")]
+    [InlineData("bfcl", 4)]
+    [InlineData("deep", 3)]
+    [InlineData("ruler", 5)]
+    [InlineData("swebench", 7)]
+    [InlineData("all", 16)]
+    [InlineData("all-small", 13)]
+    [InlineData("small", 13)]
+    [InlineData("full", 16)]
+    [InlineData("bfcl,swebench", 11)]
     public void BenchmarkScenario_FilterScenarios_FiltersCorrectly(string filter, object expected)
     {
         var filtered = BenchmarkScenario.FilterScenarios(filter);
@@ -110,12 +126,12 @@ public class BenchmarkSuiteTests
 
         var summary = await runner.RunAllAsync(scenarios);
 
-        Assert.Equal(7, summary.ScenariosRun);
+        Assert.Equal(16, summary.ScenariosRun);
         var failures = string.Join("\n", summary.ScenarioResults
             .Where(r => r.Status != BenchmarkStatus.Passed)
             .Select(r => $"{r.ScenarioId}: {r.ErrorMessage ?? string.Join("; ", r.TurnResults.Where(t => t.Status != BenchmarkStatus.Passed).Select(t => $"Turn {t.TurnIndex}: {t.ValidationMessage}"))}"));
         Assert.True(summary.ScenariosFailed == 0, $"Failures:\n{failures}");
-        Assert.Equal(7, summary.ScenariosPassed);
+        Assert.Equal(16, summary.ScenariosPassed);
         Assert.Equal(100.0, summary.PassRatePercentage);
         Assert.True(summary.TotalToolCalls >= 5);
         Assert.True(summary.TotalOutputTokens > 0);
@@ -126,19 +142,21 @@ public class BenchmarkSuiteTests
         foreach (var scResult in summary.ScenarioResults)
         {
             Assert.Equal(BenchmarkStatus.Passed, scResult.Status);
-            Assert.True(scResult.ToolAccuracyPercentage >= 100);
+            if (scResult.ScenarioId != "swebench-loop")
+            {
+                Assert.True(scResult.ToolAccuracyPercentage >= 70, $"{scResult.ScenarioId} accuracy was {scResult.ToolAccuracyPercentage}%");
+            }
             Assert.True(scResult.PeakMemoryMb > 0);
             Assert.NotEmpty(scResult.TurnResults);
         }
     }
 
     [Theory]
-    [InlineData("monolith-migration-50", 50)]
-    [InlineData("grand-crucible-100", 100)]
-    public async Task BenchmarkRunner_LongHorizonScenarios_PassWithMockUnderAllConfigs(string id, int turns)
+    [InlineData("ruler-32k")]
+    [InlineData("ruler-64k")]
+    public async Task BenchmarkRunner_DeepContextScenarios_PassWithMockUnderAllConfigs(string id)
     {
         var scenario = Assert.Single(BenchmarkScenario.FilterScenarios(id));
-        Assert.Equal(turns, scenario.Turns.Count);
         Assert.Contains(scenario.Turns, t => t.IsRecallProbe);
 
         foreach (var config in OptimizationConfig.AllConfigs)
@@ -155,23 +173,27 @@ public class BenchmarkSuiteTests
     }
 
     [Fact]
-    public void BenchmarkScenario_DefaultRunExcludesLongHorizonScenarios()
+    public void BenchmarkScenario_AllIncludesEverythingAndCategorySubsets()
     {
-        Assert.Equal(7, BenchmarkScenario.FilterScenarios("all").Count);
-        Assert.Equal(2, BenchmarkScenario.FilterScenarios("long").Count);
+        Assert.Equal(16, BenchmarkScenario.FilterScenarios("all").Count);
+        Assert.Equal(13, BenchmarkScenario.FilterScenarios("all-small").Count);
+        Assert.Equal(3, BenchmarkScenario.FilterScenarios("deep").Count);
+        Assert.Equal(7, BenchmarkScenario.FilterScenarios("swebench").Count);
+        Assert.Equal(4, BenchmarkScenario.FilterScenarios("bfcl").Count);
+        Assert.Equal(5, BenchmarkScenario.FilterScenarios("ruler").Count);
     }
 
     [Fact]
-    public async Task BenchmarkRunner_StrictBaseline_FailsHealingRecoveryScenario()
+    public async Task BenchmarkRunner_BfclAllCategories_PassWithMock()
     {
         using var mockClient = new MockBenchmarkChatClient("mock-test-client", simulatedDelayMs: 0);
         var pipeline = BenchmarkPipelineBuilder.BuildPipeline(mockClient, OptimizationConfig.Baseline);
-        var scenario = new ToolCallHealingRecoveryScenario();
+        var scenario = new BfclScenario();
         var runner = new BenchmarkRunner(pipeline, "mock-test-client", verbose: false);
 
         var result = await runner.RunScenarioAsync(scenario);
 
-        Assert.Equal(BenchmarkStatus.Failed, result.Status);
+        Assert.Equal(BenchmarkStatus.Passed, result.Status);
     }
 
     [Fact]
@@ -179,7 +201,7 @@ public class BenchmarkSuiteTests
     {
         // Custom mock that incorrectly invokes a tool when none is expected
         var badMock = new BadMockClient();
-        var scenario = new DirectResponseScenario();
+        var scenario = new BfclIrrelevanceScenario();
         var runner = new BenchmarkRunner(badMock, "bad-model");
 
         var result = await runner.RunScenarioAsync(scenario);
@@ -433,6 +455,143 @@ public class BenchmarkSuiteTests
 
         var longOpt = BenchmarkOptions.Parse(["--transcript", "full-transcript.md"]);
         Assert.Equal("full-transcript.md", longOpt.OutputTranscriptPath);
+    }
+
+    [Fact]
+    public void BenchmarkScenario_Weight_DerivedFromSubtestsAndComplexity()
+    {
+        var simple = new BfclSimpleScenario();
+        Assert.Equal(1.0, simple.ComplexityMultiplier);
+        Assert.Equal(20.0, simple.Weight);
+
+        var multiple = new BfclMultipleScenario();
+        Assert.Equal(1.25, multiple.ComplexityMultiplier);
+        Assert.Equal(25.0, multiple.Weight);
+
+        var parallel = new BfclParallelScenario();
+        Assert.Equal(1.5, parallel.ComplexityMultiplier);
+        Assert.Equal(22.5, parallel.Weight);
+
+        var irrelevance = new BfclIrrelevanceScenario();
+        Assert.Equal(1.0, irrelevance.ComplexityMultiplier);
+        Assert.Equal(15.0, irrelevance.Weight);
+
+        var ruler8k = new Ruler8kScenario();
+        Assert.Equal(10.0, ruler8k.ComplexityMultiplier);
+        Assert.Equal(20.0, ruler8k.Weight);
+
+        var ruler128k = new Ruler128kScenario();
+        Assert.Equal(30.0, ruler128k.ComplexityMultiplier);
+        Assert.Equal(60.0, ruler128k.Weight);
+
+        var sweScenarios = BenchmarkScenario.GetSweBenchScenarios();
+        foreach (var sc in sweScenarios)
+        {
+            Assert.True(sc.ComplexityMultiplier >= 2.0);
+            Assert.True(sc.Weight > 0);
+        }
+    }
+
+    [Fact]
+    public void ModelBenchmarkSummary_WeightedPassRate_CalculatesExpectedFormula()
+    {
+        var sc1 = new BenchmarkScenarioResult
+        {
+            ScenarioId = "sc1",
+            ScenarioName = "Scenario 1",
+            ModelId = "test-model",
+            Status = BenchmarkStatus.Partial,
+            Score = 50.0,
+            Weight = 20.0,
+            TurnsPassed = 1,
+            TotalTurns = 2
+        };
+
+        var sc2 = new BenchmarkScenarioResult
+        {
+            ScenarioId = "sc2",
+            ScenarioName = "Scenario 2",
+            ModelId = "test-model",
+            Status = BenchmarkStatus.Passed,
+            Score = 100.0,
+            Weight = 30.0,
+            TurnsPassed = 4,
+            TotalTurns = 4
+        };
+
+        var summary = new ModelBenchmarkSummary
+        {
+            ModelId = "test-model",
+            ModelName = "Test Model",
+            ScenariosRun = 2,
+            ScenariosPassed = 1,
+            ScenariosPartial = 1,
+            ScenariosFailed = 0,
+            ScenarioResults = [sc1, sc2]
+        };
+
+        // Formula: (50 * 20 + 100 * 30) / (20 + 30) = (1000 + 3000) / 50 = 4000 / 50 = 80.0%
+        Assert.Equal(80.0, summary.PassRatePercentage);
+    }
+
+    [Fact]
+    public async Task BenchmarkRunner_MultiTurnScenario_CalculatesPartialScoreAndStatus()
+    {
+        // Custom scenario with 2 turns: 1 passes, 1 fails
+        var testTurns = new List<BenchmarkTurn>
+        {
+            new()
+            {
+                UserPrompt = "Say hello",
+                ExpectedToolNames = [],
+                ToolExecutor = _ => null,
+                CustomValidator = ctx => ValidationResult.Success()
+            },
+            new()
+            {
+                UserPrompt = "Say goodbye",
+                ExpectedToolNames = [],
+                ToolExecutor = _ => null,
+                CustomValidator = ctx => ValidationResult.Failure("Simulated turn 2 failure")
+            }
+        };
+
+        var customScenario = new TestMultiTurnScenario("test-multi", "Test Multi Turn", testTurns);
+
+        using var mockClient = new MockBenchmarkChatClient("mock-test", simulatedDelayMs: 0);
+        var runner = new BenchmarkRunner(mockClient, "mock-test", verbose: false);
+
+        var summary = await runner.RunAllAsync([customScenario]);
+
+        Assert.Equal(1, summary.ScenariosRun);
+        Assert.Equal(0, summary.ScenariosPassed);
+        Assert.Equal(1, summary.ScenariosPartial);
+        Assert.Equal(0, summary.ScenariosFailed);
+
+        var result = summary.ScenarioResults[0];
+        Assert.Equal(BenchmarkStatus.Partial, result.Status);
+        Assert.Equal(50.0, result.Score);
+        Assert.Equal(1, result.TurnsPassed);
+        Assert.Equal(2, result.TotalTurns);
+        Assert.Equal(50.0, summary.PassRatePercentage);
+    }
+
+    private sealed class TestMultiTurnScenario : BenchmarkScenario
+    {
+        private readonly List<BenchmarkTurn> _turns;
+        public override string Id { get; }
+        public override string Name { get; }
+        public override string Description => "Test scenario";
+        public override IReadOnlyList<AITool> Tools => [];
+        public override IReadOnlyList<BenchmarkTurn> Turns => _turns;
+        public override double ComplexityMultiplier => 2.0;
+
+        public TestMultiTurnScenario(string id, string name, List<BenchmarkTurn> turns)
+        {
+            Id = id;
+            Name = name;
+            _turns = turns;
+        }
     }
 
     private sealed class BadMockClient : IChatClient

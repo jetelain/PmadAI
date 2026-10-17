@@ -197,7 +197,13 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
         // Try speculative summary
         if (_options.Summarizer != null && _options.Summarizer.TryGetSummary(sessionId, itemKey, out var summary) && !string.IsNullOrWhiteSpace(summary))
         {
-            return $"[Reasoned Summary: {summary}]";
+            var trimmed = summary.Trim();
+            if (trimmed.StartsWith("[THINKING_SUMMARY]", StringComparison.OrdinalIgnoreCase) ||
+                trimmed.StartsWith("[Reasoned Summary:", StringComparison.OrdinalIgnoreCase))
+            {
+                return trimmed;
+            }
+            return $"[Reasoned Summary: {trimmed}]";
         }
 
         // Deterministic fallback stub

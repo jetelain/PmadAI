@@ -187,212 +187,103 @@ public sealed class MockBenchmarkChatClient : IChatClient
         // 2. If user message:
         var userText = history.LastOrDefault(m => m.Role == ChatRole.User)?.Text ?? string.Empty;
 
-        // Long-horizon scenarios (50 / 100 turns)
-        if (userText.Contains("[LONG-PROBE]", StringComparison.Ordinal))
+        // RULER Scenarios
+        if (toolsAvailable && userText.Contains("fetch the system architecture and audit logs for cluster 'omega-9'", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                [new FunctionCallContent("call_audit_omega9", "fetch_audit_logs", new Dictionary<string, object?> { ["partition"] = "omega-9" })],
+                ChatFinishReason.ToolCalls,
+                PromptTokens: promptTokens,
+                OutputTokens: 20
+            );
+        }
+
+        if (userText.Contains("answer the following three questions", StringComparison.OrdinalIgnoreCase))
         {
             return (
                 [new TextContent(
-                    "Recalled facts: ERR-9021-AUTH-EXPIRED; datetime2(7) DEFAULT SYSUTCDATETIME(); TestExpiredTokenIsRejected_ReturnsUnauthorized; " +
-                    "CVE-2026-4412 fixed in v2.4.5; ConnectionPoolManager.cs:L142; TEST_TOKEN_SECRET_98812; throughput 18,900 ops/sec.")],
+                    "1. The emergency rollback authorization secret key is ROLLBACK-SEC-99042.\n" +
+                    "2. The migrated target IP address for DB-NODE-ALPHA is 10.240.18.42.\n" +
+                    "3. The maximum allowable connection timeout for cluster 'omega-9' is 850 milliseconds.")],
                 ChatFinishReason.Stop,
                 PromptTokens: promptTokens,
-                OutputTokens: 60
+                OutputTokens: 45
             );
         }
 
-        var longAction = System.Text.RegularExpressions.Regex.Match(userText, @"\[LONG-ACTION:([A-Za-z0-9_]+)\] Step (\d+)");
-        if (toolsAvailable && longAction.Success)
+        // BFCL Scenarios (dynamic lookup from loaded fixtures)
+        var bfclEntries = Scenarios.Bfcl.BfclDatasetLoader.LoadEntries("all");
+        var availableTools = options?.Tools?.Select(t => t.Name).Where(n => !string.IsNullOrEmpty(n)).ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+        var matchedBfcl = bfclEntries.FirstOrDefault(e =>
+            (string.Equals(e.Question.Trim(), userText.Trim(), StringComparison.OrdinalIgnoreCase) ||
+             userText.Contains(e.Question, StringComparison.OrdinalIgnoreCase)) &&
+            (availableTools.Count == 0 || e.Tools.Any(t => availableTools.Contains(t.Name))))
+            ?? bfclEntries.FirstOrDefault(e =>
+            string.Equals(e.Question.Trim(), userText.Trim(), StringComparison.OrdinalIgnoreCase) ||
+            userText.Contains(e.Question, StringComparison.OrdinalIgnoreCase));
+
+        if (matchedBfcl != null)
         {
-            return (
-                [new FunctionCallContent($"call_long_{longAction.Groups[2].Value}", longAction.Groups[1].Value,
-                    new Dictionary<string, object?> { ["target"] = $"module_{longAction.Groups[2].Value}" })],
-                ChatFinishReason.ToolCalls,
-                PromptTokens: promptTokens,
-                OutputTokens: 20
-            );
+            if (matchedBfcl.GroundTruth.Count == 0)
+            {
+                return (
+                    [new TextContent($"Direct answer to: {matchedBfcl.Question}")],
+                    ChatFinishReason.Stop,
+                    PromptTokens: promptTokens,
+                    OutputTokens: 15
+                );
+            }
+
+            if (toolsAvailable)
+            {
+                var calls = new List<AIContent>();
+                int callIdx = 1;
+                foreach (var gt in matchedBfcl.GroundTruth)
+                {
+                    calls.Add(new FunctionCallContent(
+                        $"call_{callIdx++}",
+                        gt.Name,
+                        new Dictionary<string, object?>(gt.Arguments)));
+                }
+
+                return (
+                    calls,
+                    ChatFinishReason.ToolCalls,
+                    PromptTokens: promptTokens,
+                    OutputTokens: 25 * calls.Count
+                );
+            }
         }
 
-        // Weather Scenario - Turn 1 (Tool call)
-        if (toolsAvailable && userText.Contains("Paris and Tokyo", StringComparison.OrdinalIgnoreCase))
+        // SWE-bench Trajectory Scenarios (dynamic lookup from loaded fixtures)
+        var sweTrajectories = Scenarios.SweBench.SweBenchTrajectoryLoader.LoadAllArchetypes();
+        foreach (var traj in sweTrajectories)
         {
-            return (
-                [
-                    new FunctionCallContent("call_1", "get_weather", new Dictionary<string, object?> { ["city"] = "Paris", ["unit"] = "celsius" }),
-                    new FunctionCallContent("call_2", "get_weather", new Dictionary<string, object?> { ["city"] = "Tokyo", ["unit"] = "celsius" })
-                ],
-                ChatFinishReason.ToolCalls,
-                PromptTokens: promptTokens,
-                OutputTokens: 42
-            );
-        }
+            var matchedTurn = traj.Turns.FirstOrDefault(t =>
+                !string.IsNullOrEmpty(t.UserPrompt) &&
+                (string.Equals(t.UserPrompt.Trim(), userText.Trim(), StringComparison.OrdinalIgnoreCase) ||
+                 userText.Contains(t.UserPrompt, StringComparison.OrdinalIgnoreCase)));
 
-        // Weather Scenario - Turn 2 (Contextual follow-up, no tools needed)
-        if (userText.Contains("warmer", StringComparison.OrdinalIgnoreCase))
-        {
-            return (
-                [new TextContent("Tokyo is warmer than Paris by 4 degrees celsius (22°C vs 18°C).")],
-                ChatFinishReason.Stop,
-                PromptTokens: promptTokens,
-                OutputTokens: 18
-            );
-        }
+            if (matchedTurn != null)
+            {
+                if (!string.IsNullOrEmpty(matchedTurn.ExpectedToolName) && toolsAvailable)
+                {
+                    var args = matchedTurn.GetArgumentsDictionary();
+                    return (
+                        [new FunctionCallContent($"call_{matchedTurn.TurnIndex}", matchedTurn.ExpectedToolName, args)],
+                        ChatFinishReason.ToolCalls,
+                        PromptTokens: promptTokens,
+                        OutputTokens: 25
+                    );
+                }
 
-        // Calculator Scenario (Tool call)
-        if (toolsAvailable && (userText.Contains("jackets", StringComparison.OrdinalIgnoreCase) || userText.Contains("discount", StringComparison.OrdinalIgnoreCase)))
-        {
-            return (
-                [
-                    new FunctionCallContent("call_calc", "calculate", new Dictionary<string, object?>
-                    {
-                        ["expression"] = "(3 * 49.99 + 2 * 14.50) * 0.85"
-                    })
-                ],
-                ChatFinishReason.ToolCalls,
-                PromptTokens: promptTokens,
-                OutputTokens: 30
-            );
-        }
-
-        // Customer Support - Turn 1 (Lookup order)
-        if (toolsAvailable && userText.Contains("ORD-9921", StringComparison.OrdinalIgnoreCase))
-        {
-            return (
-                [
-                    new FunctionCallContent("call_ord", "lookup_order", new Dictionary<string, object?>
-                    {
-                        ["order_id"] = "ORD-9921"
-                    })
-                ],
-                ChatFinishReason.ToolCalls,
-                PromptTokens: promptTokens,
-                OutputTokens: 22
-            );
-        }
-
-        // Customer Support - Turn 2 (Track package)
-        if (toolsAvailable && userText.Contains("track that DHL package", StringComparison.OrdinalIgnoreCase))
-        {
-            return (
-                [
-                    new FunctionCallContent("call_track", "track_package", new Dictionary<string, object?>
-                    {
-                        ["carrier"] = "DHL",
-                        ["tracking_code"] = "DHL-88319"
-                    })
-                ],
-                ChatFinishReason.ToolCalls,
-                PromptTokens: promptTokens,
-                OutputTokens: 25
-            );
-        }
-
-        // AgentMultiTurnCompactionScenario
-        if (toolsAvailable && userText.Contains("AuthHandler.cs and tell me its structure", StringComparison.OrdinalIgnoreCase))
-        {
-            return (
-                [new FunctionCallContent("call_read", "read_file", new Dictionary<string, object?> { ["path"] = "src/AuthHandler.cs" })],
-                ChatFinishReason.ToolCalls,
-                PromptTokens: promptTokens,
-                OutputTokens: 25
-            );
-        }
-
-        if (toolsAvailable && userText.Contains("Run the unit tests", StringComparison.OrdinalIgnoreCase))
-        {
-            return (
-                [new FunctionCallContent("call_test", "execute_tests", new Dictionary<string, object?> { ["filter"] = "all" })],
-                ChatFinishReason.ToolCalls,
-                PromptTokens: promptTokens,
-                OutputTokens: 25
-            );
-        }
-
-        if (toolsAvailable && userText.Contains("TokenValidator_", StringComparison.OrdinalIgnoreCase))
-        {
-            var match = System.Text.RegularExpressions.Regex.Match(userText, @"TokenValidator_(\d+)");
-            var query = match.Success ? $"TokenValidator_{match.Groups[1].Value}" : "TokenValidator";
-            return (
-                [new FunctionCallContent($"call_search_{query}", "search_code", new Dictionary<string, object?> { ["query"] = query })],
-                ChatFinishReason.ToolCalls,
-                PromptTokens: promptTokens,
-                OutputTokens: 25
-            );
-        }
-
-        if (userText.Contains("what was the exact exit code and failure reason", StringComparison.OrdinalIgnoreCase))
-        {
-            return (
-                [new TextContent("In our initial test run in turn 2, the exit code was 101 with failure reason: NullReferenceException in AuthHandler.cs:L42.")],
-                ChatFinishReason.Stop,
-                PromptTokens: promptTokens,
-                OutputTokens: 35
-            );
-        }
-
-        // ToolCallHealingRecoveryScenario
-        if (toolsAvailable && userText.Contains("Apply this patch wrapped in markdown fences", StringComparison.OrdinalIgnoreCase))
-        {
-            // Returns pseudo XML with markdown code fences inside string argument.
-            // If ToolCallHealingChatClient is active, it heals it to FunctionCallContent("apply_patch", ...).
-            // In baseline raw mode, this stays as raw TextContent, so turn validation fails as expected!
-            return (
-                [new TextContent("<tool_call>{\"name\":\"apply_patch\",\"arguments\":\"```json\\n{\\\"content\\\":\\\"var fixedCode = 42;\\\"}\\n```\"}</tool_call>")],
-                ChatFinishReason.Stop,
-                PromptTokens: promptTokens,
-                OutputTokens: 25
-            );
-        }
-
-        if (toolsAvailable && userText.Contains("Perform a search for 'SessionToken'", StringComparison.OrdinalIgnoreCase))
-        {
-            return (
-                [new TextContent("Action: search\nAction Input: {\"query\":\"SessionToken\"}")],
-                ChatFinishReason.Stop,
-                PromptTokens: promptTokens,
-                OutputTokens: 20
-            );
-        }
-
-        if (toolsAvailable && userText.Contains("Run query_database with trailing commas", StringComparison.OrdinalIgnoreCase))
-        {
-            return (
-                [new TextContent("<tool_call>{\"name\":\"query_database\",\"arguments\":{\"sql\":\"SELECT * FROM sessions\",}}</tool_call>")],
-                ChatFinishReason.Stop,
-                PromptTokens: promptTokens,
-                OutputTokens: 25
-            );
-        }
-
-        // StreamingRunawayAndPingPongScenario
-        if (toolsAvailable && userText.Contains("Check status of auth-service", StringComparison.OrdinalIgnoreCase))
-        {
-            return (
-                [new FunctionCallContent("call_status", "check_status", new Dictionary<string, object?> { ["service"] = "auth-service" })],
-                ChatFinishReason.ToolCalls,
-                PromptTokens: promptTokens,
-                OutputTokens: 20
-            );
-        }
-
-        if (toolsAvailable && userText.Contains("Read same.cs repeatedly", StringComparison.OrdinalIgnoreCase))
-        {
-            return (
-                [new FunctionCallContent("call_read_same", "read", new Dictionary<string, object?> { ["path"] = "same.cs" })],
-                ChatFinishReason.ToolCalls,
-                PromptTokens: promptTokens,
-                OutputTokens: 20
-            );
-        }
-
-        // Direct Knowledge (Negative test - No tools)
-        if (userText.Contains("capital of France", StringComparison.OrdinalIgnoreCase))
-        {
-            return (
-                [new TextContent("The capital of France is Paris.")],
-                ChatFinishReason.Stop,
-                PromptTokens: promptTokens,
-                OutputTokens: 8
-            );
+                return (
+                    [new TextContent(matchedTurn.ExpectedCompletionSubstring ?? "Task completed successfully based on trajectory step.")],
+                    ChatFinishReason.Stop,
+                    PromptTokens: promptTokens,
+                    OutputTokens: 20
+                );
+            }
         }
 
         // Default fallback response

@@ -96,7 +96,8 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
         string? Reasoning,
         IReadOnlyList<ToolCallRecord>? ToolCalls,
         IReadOnlyList<ToolResultRecord>? ToolResults,
-        long DurationMs);
+        long DurationMs,
+        string? ValidationOutcome = null);
 
     private sealed record ToolCallRecord(string Id, string Name, string ArgumentsJson);
     private sealed record ToolResultRecord(string CallId, string ResultText);
@@ -105,6 +106,12 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
         : base(innerClient)
     {
         _options = options ?? new VerbatimTranscriptOptions();
+    }
+
+    public override object? GetService(Type serviceType, object? serviceKey = null)
+    {
+        if (serviceType == typeof(VerbatimTranscriptChatClient)) return this;
+        return base.GetService(serviceType, serviceKey);
     }
 
     public override async Task<ChatResponse> GetResponseAsync(
@@ -536,6 +543,55 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
     }
 
     /// <summary>
+    /// Records a benchmark validation outcome (Passed or Failed with diagnostic message)
+    /// attached to the most recent turn of the specified or active session.
+    /// </summary>
+    public void RecordTurnOutcome(bool passed, string? validationMessage = null, string? sessionId = null)
+    {
+        var targetSessionId = sessionId ?? "default";
+        if (_sessions.TryGetValue(targetSessionId, out var state))
+        {
+            lock (state.Lock)
+            {
+                if (state.Turns.Count > 0)
+                {
+                    var lastIdx = state.Turns.Count - 1;
+                    var lastTurn = state.Turns[lastIdx];
+                    var outcomeText = passed
+                        ? $"✅ **PASSED** - {validationMessage ?? "All turn assertions and tool expectations satisfied."}"
+                        : $"> [!CAUTION]\n> **FAILED:** {validationMessage ?? "Turn assertions failed."}";
+                    state.Turns[lastIdx] = lastTurn with { ValidationOutcome = outcomeText };
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Adds a custom markdown note or diagnostic alert to the specified session's transcript.
+    /// </summary>
+    public void AddNote(string markdownNote, string? sessionId = null)
+    {
+        if (string.IsNullOrWhiteSpace(markdownNote)) return;
+        var targetSessionId = sessionId ?? "default";
+        var state = GetOrCreateState(targetSessionId);
+        lock (state.Lock)
+        {
+            state.TurnCounter++;
+            var turn = new TranscriptTurn(
+                state.TurnCounter,
+                DateTimeOffset.UtcNow,
+                ChatRole.System,
+                markdownNote,
+                null,
+                null,
+                null,
+                0,
+                null);
+            AddTurn(state, turn);
+        }
+    }
+
+    /// <summary>
     /// Generates complete GitHub-flavored Markdown text of the recorded session.
     /// </summary>
     public string ToMarkdown()
@@ -574,7 +630,10 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
 
                 // Title
                 var title = _options.SessionTitle ?? $"Session {sessionId}";
-                sb.AppendLine($"# Transcript: {title}");
+                var header = string.Equals(sessionId, "default", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(_options.SessionTitle)
+                    ? $"# Transcript: {title}"
+                    : $"# Transcript: {title} — Scenario: {sessionId}";
+                sb.AppendLine(header);
                 sb.AppendLine();
 
                 // System instructions and tool declarations collapsible section
@@ -614,6 +673,11 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
 
                     switch (turn.Role)
                     {
+                        case ChatRole system when system == ChatRole.System:
+                            sb.AppendLine(turn.Text);
+                            sb.AppendLine();
+                            break;
+
                         case ChatRole user when user == ChatRole.User:
                             sb.AppendLine($"### 👤 User (Turn {turn.TurnNumber}{timeStr})");
                             sb.AppendLine();
@@ -672,6 +736,13 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
                                 }
                             }
                             break;
+                    }
+
+                    if (!string.IsNullOrEmpty(turn.ValidationOutcome))
+                    {
+                        sb.AppendLine("**Validation Outcome:**");
+                        sb.AppendLine(turn.ValidationOutcome);
+                        sb.AppendLine();
                     }
                 }
             }

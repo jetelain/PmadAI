@@ -4,6 +4,7 @@ using Pmad.AI.Benchmark.Reporting;
 using Pmad.AI.Benchmark.Scenarios;
 using Pmad.AI.Compaction;
 using Pmad.AI.LlamaSharp;
+using Pmad.AI.Transcripts;
 
 namespace Pmad.AI.Benchmark;
 
@@ -40,6 +41,13 @@ public static class Program
         Console.WriteLine();
 
         var scenarios = BenchmarkScenario.FilterScenarios(options.ScenarioFilter);
+        if (scenarios.Count == 0)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("Error: No scenarios match the specified filter. Exiting.");
+            Console.ResetColor();
+            return 1;
+        }
         Console.WriteLine($"Loaded {scenarios.Count} scenario(s): {string.Join(", ", scenarios.Select(s => s.Id))}");
 
         var modelsDir = LocalModelPathResolver.ResolveModelsDirectory(null);
@@ -90,15 +98,35 @@ public static class Program
             transcriptPath = string.IsNullOrWhiteSpace(dir) ? transcriptFile : Path.Combine(dir, transcriptFile);
         }
 
-        var verbatimTranscriptDir = Path.Combine(
-            string.IsNullOrWhiteSpace(options.OutputMarkdownPath)
-                ? AppContext.BaseDirectory
-                : (Path.GetDirectoryName(Path.GetFullPath(options.OutputMarkdownPath)) ?? AppContext.BaseDirectory),
-            "verbatim-transcripts");
+        var baseReportDir = !string.IsNullOrWhiteSpace(options.OutputMarkdownPath)
+            ? (Path.GetDirectoryName(Path.GetFullPath(options.OutputMarkdownPath)) ?? Directory.GetCurrentDirectory())
+            : (!string.IsNullOrWhiteSpace(transcriptPath)
+                ? (Path.GetDirectoryName(Path.GetFullPath(transcriptPath)) ?? Directory.GetCurrentDirectory())
+                : Directory.GetCurrentDirectory());
+
+        var transcriptsDir = Path.Combine(baseReportDir, "transcripts");
+        Directory.CreateDirectory(transcriptsDir);
 
         for (int i = 0; i < executionPlans.Count; i++)
         {
             var plan = executionPlans[i];
+            var planSlug = GetPlanSlug(plan.TargetName, plan.Backend, plan.OptConfig.Id, plan.EnableReasoning);
+            var planTranscriptFileName = $"{planSlug}.transcript.md";
+            var planTranscriptFullPath = Path.Combine(transcriptsDir, planTranscriptFileName);
+            var planTranscriptRelativePath = Path.Combine("transcripts", planTranscriptFileName).Replace('\\', '/');
+
+            var transcriptOptions = new VerbatimTranscriptOptions
+            {
+                FilePath = planTranscriptFullPath,
+                SessionTitle = $"{plan.TargetName} [{plan.ConfigurationLabel}]",
+                Label = plan.OptConfig.Id,
+                IncludeSystemPrompt = true,
+                IncludeToolSchemas = true,
+                IncludeTimestamps = true,
+                IncludeTokenUsage = true,
+                AutoSaveOnDispose = true,
+                FlushAfterEachTurn = true
+            };
 
             // Check if this execution plan was already completed in the checkpoint
             if (options.Resume && completedSummaries.Count > 0)
@@ -119,6 +147,7 @@ public static class Program
                     Console.ForegroundColor = ConsoleColor.DarkGray;
                     Console.WriteLine($"\n[{i + 1}/{executionPlans.Count}] SKIPPING (Already in Checkpoint): {plan.TargetName} [{plan.ConfigurationLabel}]");
                     Console.ResetColor();
+                    alreadyDone.TranscriptPath = planTranscriptRelativePath;
                     allSummaries.Add(alreadyDone);
                     continue;
                 }
@@ -132,8 +161,41 @@ public static class Program
 
             ModelBenchmarkSummary summary;
 
-            // Optional speculative CPU SLM summarizer for background compaction
-            await using var speculativeSummarizer = CreateSpeculativeSummarizer(plan.OptConfig, modelsDir);
+            // Scenario-level incremental checkpointing callback
+            Func<BenchmarkScenarioResult, ModelBenchmarkSummary, Task> onScenarioCheckpoint = async (scenarioRes, currentSummary) =>
+            {
+                currentSummary.TranscriptPath = planTranscriptRelativePath;
+                var existingIdx = completedSummaries.FindIndex(s =>
+                    string.Equals(
+                        BenchmarkCheckpointManager.GetPlanKey(
+                            s.ModelName,
+                            s.Backend ?? "CPU",
+                            s.GpuLayers,
+                            s.ReasoningEnabled,
+                            s.OptimizationConfigId ?? s.ConfigurationLabel ?? ""),
+                        plan.CheckpointKey,
+                        StringComparison.OrdinalIgnoreCase));
+
+                if (existingIdx >= 0)
+                {
+                    completedSummaries[existingIdx] = currentSummary;
+                }
+                else
+                {
+                    completedSummaries.Add(currentSummary);
+                }
+
+                await BenchmarkCheckpointManager.SaveCheckpointAsync(checkpointFile, completedSummaries);
+
+                if (!string.IsNullOrWhiteSpace(options.OutputMarkdownPath))
+                {
+                    var transcriptFileName = !string.IsNullOrWhiteSpace(transcriptPath) ? Path.GetFileName(transcriptPath) : null;
+                    await MarkdownReportWriter.WriteToFileAsync(options.OutputMarkdownPath, completedSummaries, hardware, transcriptFileName);
+                }
+            };
+
+            // Optional speculative SLM summarizer for background compaction (Ollama lightweight HTTP client)
+            await using var speculativeSummarizer = CreateSpeculativeSummarizer(plan.OptConfig, options);
 
             if (plan.Target is ModelTarget.Mock mockTarget)
             {
@@ -146,7 +208,7 @@ public static class Program
                     mockClient,
                     plan.OptConfig,
                     speculativeSummarizer,
-                    verbatimTranscriptDir);
+                    transcriptOptions: transcriptOptions);
 
                 var runner = new BenchmarkRunner(
                     client: pipeline,
@@ -158,9 +220,10 @@ public static class Program
                     reasoningEffort: plan.ReasoningEffort,
                     configurationLabel: plan.ConfigurationLabel,
                     optimizationConfigId: plan.OptConfig.Id,
-                    optimizationConfigLabel: plan.OptConfig.Label);
+                    optimizationConfigLabel: plan.OptConfig.Label,
+                    transcriptPath: planTranscriptRelativePath);
 
-                summary = await runner.RunAllAsync(scenarios);
+                summary = await runner.RunAllAsync(scenarios, onScenarioCheckpoint);
             }
             else if (plan.Target is ModelTarget.PresetTarget presetTarget)
             {
@@ -215,7 +278,7 @@ public static class Program
                     rawClient,
                     plan.OptConfig,
                     speculativeSummarizer,
-                    verbatimTranscriptDir);
+                    transcriptOptions: transcriptOptions);
 
                 var runner = new BenchmarkRunner(
                     client: pipeline,
@@ -227,9 +290,10 @@ public static class Program
                     reasoningEffort: plan.ReasoningEffort,
                     configurationLabel: plan.ConfigurationLabel,
                     optimizationConfigId: plan.OptConfig.Id,
-                    optimizationConfigLabel: plan.OptConfig.Label);
+                    optimizationConfigLabel: plan.OptConfig.Label,
+                    transcriptPath: planTranscriptRelativePath);
 
-                summary = await runner.RunAllAsync(scenarios);
+                summary = await runner.RunAllAsync(scenarios, onScenarioCheckpoint);
             }
             else if (plan.Target is ModelTarget.CustomPath customTarget)
             {
@@ -261,7 +325,7 @@ public static class Program
                     rawClient,
                     plan.OptConfig,
                     speculativeSummarizer,
-                    verbatimTranscriptDir);
+                    transcriptOptions: transcriptOptions);
 
                 var runner = new BenchmarkRunner(
                     client: pipeline,
@@ -273,57 +337,96 @@ public static class Program
                     reasoningEffort: plan.ReasoningEffort,
                     configurationLabel: plan.ConfigurationLabel,
                     optimizationConfigId: plan.OptConfig.Id,
-                    optimizationConfigLabel: plan.OptConfig.Label);
+                    optimizationConfigLabel: plan.OptConfig.Label,
+                    transcriptPath: planTranscriptRelativePath);
 
-                summary = await runner.RunAllAsync(scenarios);
+                summary = await runner.RunAllAsync(scenarios, onScenarioCheckpoint);
             }
             else if (plan.Target is ModelTarget.Ollama ollamaTarget)
             {
                 var contextSize = ResolveContextSize(plan.Target, options);
-                Console.WriteLine($"\nConnecting to Ollama model '{ollamaTarget.ModelName}' at '{ollamaTarget.BaseUrl}' (Context: {contextSize}, Reasoning: {plan.EnableReasoning?.ToString() ?? "Default"})...");
+                Console.WriteLine($"\n[Ollama] Preloading weights for '{ollamaTarget.ModelName}' into VRAM (keep_alive: 1h)...");
+                await OllamaBenchmarkChatClient.PreloadModelAsync(ollamaTarget.ModelName, ollamaTarget.BaseUrl, keepAlive: "1h");
 
-                using var rawClient = new OllamaBenchmarkChatClient(
-                    modelId: ollamaTarget.ModelName,
-                    baseUrl: ollamaTarget.BaseUrl,
-                    contextSize: contextSize);
+                try
+                {
+                    Console.WriteLine($"Connecting to Ollama model '{ollamaTarget.ModelName}' at '{ollamaTarget.BaseUrl}' (Context: {contextSize}, Reasoning: {plan.EnableReasoning?.ToString() ?? "Default"})...");
 
-                var pipeline = BenchmarkPipelineBuilder.BuildPipeline(
-                    rawClient,
-                    plan.OptConfig,
-                    speculativeSummarizer,
-                    verbatimTranscriptDir);
+                    using var rawClient = new OllamaBenchmarkChatClient(
+                        modelId: ollamaTarget.ModelName,
+                        baseUrl: ollamaTarget.BaseUrl,
+                        contextSize: contextSize);
 
-                var runner = new BenchmarkRunner(
-                    client: pipeline,
-                    modelId: ollamaTarget.ModelName,
-                    verbose: options.Verbose,
-                    backend: "Ollama",
-                    gpuLayers: 0,
-                    reasoningEnabled: plan.EnableReasoning,
-                    reasoningEffort: plan.ReasoningEffort,
-                    configurationLabel: plan.ConfigurationLabel,
-                    optimizationConfigId: plan.OptConfig.Id,
-                    optimizationConfigLabel: plan.OptConfig.Label);
+                    var pipeline = BenchmarkPipelineBuilder.BuildPipeline(
+                        rawClient,
+                        plan.OptConfig,
+                        speculativeSummarizer,
+                        transcriptOptions: transcriptOptions);
 
-                summary = await runner.RunAllAsync(scenarios);
+                    var runner = new BenchmarkRunner(
+                        client: pipeline,
+                        modelId: ollamaTarget.ModelName,
+                        verbose: options.Verbose,
+                        backend: "Ollama",
+                        gpuLayers: 0,
+                        reasoningEnabled: plan.EnableReasoning,
+                        reasoningEffort: plan.ReasoningEffort,
+                        configurationLabel: plan.ConfigurationLabel,
+                        optimizationConfigId: plan.OptConfig.Id,
+                        optimizationConfigLabel: plan.OptConfig.Label,
+                        transcriptPath: planTranscriptRelativePath);
+
+                    summary = await runner.RunAllAsync(scenarios, onScenarioCheckpoint);
+                }
+                finally
+                {
+                    Console.WriteLine($"[Ollama] Offloading model '{ollamaTarget.ModelName}' from VRAM (freeing GPU memory)...");
+                    await OllamaBenchmarkChatClient.OffloadModelAsync(ollamaTarget.ModelName, ollamaTarget.BaseUrl);
+                }
             }
             else
             {
                 continue;
             }
 
+            summary.TranscriptPath = planTranscriptRelativePath;
             ConsoleReportFormatter.PrintScenarioResultsTable(summary);
             allSummaries.Add(summary);
 
-            // Persist incremental checkpoint
-            completedSummaries.Add(summary);
+            if (File.Exists(planTranscriptFullPath))
+            {
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine($"[Transcript] Verbatim transcript saved to '{planTranscriptFullPath}'.");
+                Console.ResetColor();
+            }
+
+            // Ensure checkpoint and report are fully synced
+            var summaryIndex = completedSummaries.FindIndex(s =>
+                string.Equals(
+                    BenchmarkCheckpointManager.GetPlanKey(
+                        s.ModelName,
+                        s.Backend ?? "CPU",
+                        s.GpuLayers,
+                        s.ReasoningEnabled,
+                        s.OptimizationConfigId ?? s.ConfigurationLabel ?? ""),
+                    plan.CheckpointKey,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (summaryIndex >= 0)
+            {
+                completedSummaries[summaryIndex] = summary;
+            }
+            else
+            {
+                completedSummaries.Add(summary);
+            }
+
             await BenchmarkCheckpointManager.SaveCheckpointAsync(checkpointFile, completedSummaries);
 
-            // Persist incremental markdown report
             if (!string.IsNullOrWhiteSpace(options.OutputMarkdownPath))
             {
                 var transcriptFileName = !string.IsNullOrWhiteSpace(transcriptPath) ? Path.GetFileName(transcriptPath) : null;
-                await MarkdownReportWriter.WriteToFileAsync(options.OutputMarkdownPath, allSummaries, hardware, transcriptFileName);
+                await MarkdownReportWriter.WriteToFileAsync(options.OutputMarkdownPath, completedSummaries, hardware, transcriptFileName);
             }
 
             // Reclaim native allocations between model runs
@@ -497,6 +600,44 @@ public static class Program
             return targets;
         }
 
+        if (options.AllTargets)
+        {
+            foreach (var preset in LlamaModelPreset.Presets)
+            {
+                targets.Add(new ModelTarget.PresetTarget(preset));
+            }
+
+            var designatedOllama = new List<string>();
+            if (!string.IsNullOrWhiteSpace(options.OllamaModelsList))
+            {
+                designatedOllama.AddRange(options.OllamaModelsList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            }
+            else if (!string.IsNullOrWhiteSpace(options.OllamaModel))
+            {
+                designatedOllama.Add(options.OllamaModel.Trim());
+            }
+            else
+            {
+                designatedOllama.Add("Qwen3.8-27B:latest");
+                designatedOllama.Add("jetelain/Qwen3.8-27B:iq3");
+            }
+
+            foreach (var m in designatedOllama)
+            {
+                targets.Add(new ModelTarget.Ollama(m, options.OllamaBaseUrl));
+            }
+
+            return targets;
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.OllamaModelsList))
+        {
+            foreach (var m in options.OllamaModelsList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                targets.Add(new ModelTarget.Ollama(m, options.OllamaBaseUrl));
+            }
+        }
+
         if (!string.IsNullOrWhiteSpace(options.OllamaModel))
         {
             targets.Add(new ModelTarget.Ollama(options.OllamaModel, options.OllamaBaseUrl));
@@ -563,34 +704,21 @@ public static class Program
         };
     }
 
-    private static ISpeculativeSummarizer? CreateSpeculativeSummarizer(OptimizationConfig config, string modelsDir)
+    private static ISpeculativeSummarizer? CreateSpeculativeSummarizer(OptimizationConfig config, BenchmarkOptions options)
     {
         if (config.Id is not ("opt-speculative-slm" or "all-optimizations"))
         {
             return null;
         }
 
-        var slmPreset = LlamaModelPreset.Find("qwen3.5-2b");
-        if (slmPreset == null)
-        {
-            WarnNoSummarizer(config, "preset 'qwen3.5-2b' not found");
-            return null;
-        }
-
-        var slmPath = slmPreset.GetLocalPath(modelsDir);
-        if (!File.Exists(slmPath))
-        {
-            WarnNoSummarizer(config, $"model file '{slmPath}' not found (use --download)");
-            return null;
-        }
-
         try
         {
-            return new LlamaSharpSpeculativeSummarizer(new LlamaSharpSpeculativeSummarizerOptions
+            var endpoint = new Uri(options.OllamaBaseUrl);
+            return new OllamaSpeculativeSummarizer(new OllamaSpeculativeSummarizerOptions
             {
-                ModelPath = slmPath,
-                ContextSize = 4096,
-                CpuThreads = 4
+                Endpoint = endpoint,
+                Model = "qwen3.5:2b",
+                ContextSize = 4096
             });
         }
         catch (Exception ex)
@@ -635,5 +763,21 @@ public static class Program
 
         public string CheckpointKey =>
             BenchmarkCheckpointManager.GetPlanKey(TargetName, Backend, GpuLayers, EnableReasoning, OptConfig.Id);
+    }
+
+    private static string GetPlanSlug(string modelName, string backend, string configId, bool? reasoning = null)
+    {
+        var modelSlug = SanitizeSlug(modelName);
+        var backendSlug = SanitizeSlug(backend);
+        var configSlug = SanitizeSlug(configId);
+        var reasSlug = reasoning.HasValue ? (reasoning.Value ? "_reasoning" : "_no-reasoning") : "";
+        return $"{modelSlug}_{backendSlug}_{configSlug}{reasSlug}";
+    }
+
+    private static string SanitizeSlug(string text)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var chars = text.ToLowerInvariant().Select(c => invalid.Contains(c) || c == ' ' || c == '/' || c == '\\' || c == ':' ? '-' : c).ToArray();
+        return new string(chars).Trim('-');
     }
 }

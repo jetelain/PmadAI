@@ -229,4 +229,28 @@ public class VerbatimTranscriptChatClientTests
         Assert.Contains("output_tokens: 25", markdown);
         Assert.Contains("total_tokens: 40", markdown);
     }
+
+    [Fact]
+    public async Task RecordTurnOutcome_AppendsValidationOutcomeToMarkdown()
+    {
+        var fake = new SimpleFakeClient(getResponse: (_, _, _) =>
+            Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "Result is 42"))));
+
+        var client = new VerbatimTranscriptChatClient(fake, new VerbatimTranscriptOptions
+        {
+            SessionTitle = "Validation Test"
+        });
+
+        var options = new ChatOptions { ConversationId = "scenario-1" };
+        await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Query")], options);
+
+        client.RecordTurnOutcome(false, "Expected tool 'calc' not called.", "scenario-1");
+        client.AddNote("> [!NOTE]\n> Note text", "scenario-1");
+
+        var markdown = client.ToMarkdown();
+        Assert.Contains("**Validation Outcome:**", markdown);
+        Assert.Contains("**FAILED:** Expected tool 'calc' not called.", markdown);
+        Assert.Contains("Note text", markdown);
+        Assert.Equal(client, client.GetService<VerbatimTranscriptChatClient>());
+    }
 }

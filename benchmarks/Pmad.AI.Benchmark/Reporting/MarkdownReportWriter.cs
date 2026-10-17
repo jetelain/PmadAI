@@ -28,7 +28,13 @@ public static class MarkdownReportWriter
         sb.AppendLine($"- **OS:** {hw.OsDescription}");
         sb.AppendLine();
 
-        if (!string.IsNullOrWhiteSpace(transcriptFileName))
+        if (summaries.Any(s => !string.IsNullOrWhiteSpace(s.TranscriptPath)))
+        {
+            sb.AppendLine($"> [!NOTE]");
+            sb.AppendLine($"> 📄 **Execution Transcripts:** Individual turn-by-turn verbatim transcripts and failure analyses for each configuration are saved in the `transcripts/` directory and linked directly in the tables below.");
+            sb.AppendLine();
+        }
+        else if (!string.IsNullOrWhiteSpace(transcriptFileName))
         {
             sb.AppendLine($"> [!NOTE]");
             sb.AppendLine($"> 📄 **Execution Transcript & Failure Analysis:** Detailed turn-by-turn prompts, reasoning traces, tool inputs/outputs, and failure analysis are recorded in [{transcriptFileName}]({transcriptFileName}).");
@@ -45,7 +51,10 @@ public static class MarkdownReportWriter
             var backendStr = m.Backend ?? (m.GpuLayers > 0 ? "Vulkan" : "CPU");
             var reasStr = m.ReasoningEnabled.HasValue ? (m.ReasoningEnabled.Value ? "Enabled" : "Disabled") : "Default";
             var vramStr = m.PeakVramMb > 0 ? BenchmarkRunner.FormatMemory(m.PeakVramMb) : "-";
-            sb.AppendLine($"| `{m.ModelName}` | {backendStr} | {reasStr} | {m.ScenariosPassed}/{m.ScenariosRun} | {m.PassRatePercentage:F0}% | {m.TotalToolCalls} | {m.TotalOutputTokens} | {m.AverageGenerationTokensPerSecond:F1} | {BenchmarkRunner.FormatMemory(m.PeakMemoryMb)} | {vramStr} | {m.TotalTimeMs / 1000.0:F2}s |");
+            var modelDisplay = !string.IsNullOrWhiteSpace(m.TranscriptPath)
+                ? $"[`{m.DisplayName}`]({m.TranscriptPath})"
+                : $"`{m.DisplayName}`";
+            sb.AppendLine($"| {modelDisplay} | {backendStr} | {reasStr} | {m.ScenariosPassed}/{m.ScenariosRun} | {m.PassRatePercentage:F1}% | {m.TotalToolCalls} | {m.TotalOutputTokens} | {m.AverageGenerationTokensPerSecond:F1} | {BenchmarkRunner.FormatMemory(m.PeakMemoryMb)} | {vramStr} | {m.TotalTimeMs / 1000.0:F2}s |");
         }
 
         // Hardware acceleration comparison (CPU vs Vulkan)
@@ -182,7 +191,11 @@ public static class MarkdownReportWriter
                         ? opt.OptimizationConfigLabel
                         : (opt.ConfigurationLabel ?? "Default");
 
-                    sb.AppendLine($"| `{opt.ModelName}` | **{configName}** | {opt.PassRatePercentage:F0}% | {opt.TotalPromptTokens} | {savingsStr} | {opt.PeakContextTokens} tok | {contextRedStr} | {opt.AverageGenerationTokensPerSecond:F1} tok/s | {opt.TotalTimeMs / 1000.0:F2}s | {timeSavingsStr} |");
+                    var configDisplay = !string.IsNullOrWhiteSpace(opt.TranscriptPath)
+                        ? $"[**{configName}**]({opt.TranscriptPath})"
+                        : $"**{configName}**";
+
+                    sb.AppendLine($"| `{opt.ModelName}` | {configDisplay} | {opt.PassRatePercentage:F1}% | {opt.TotalPromptTokens} | {savingsStr} | {opt.PeakContextTokens} tok | {contextRedStr} | {opt.AverageGenerationTokensPerSecond:F1} tok/s | {opt.TotalTimeMs / 1000.0:F2}s | {timeSavingsStr} |");
                 }
             }
 
@@ -253,33 +266,39 @@ public static class MarkdownReportWriter
 
         foreach (var m in summaries)
         {
-            sb.AppendLine($"### Model: `{m.DisplayName}`");
+            var transcriptLink = !string.IsNullOrWhiteSpace(m.TranscriptPath)
+                ? $" — [📄 View Full Transcript]({m.TranscriptPath})"
+                : "";
+            sb.AppendLine($"### Model: `{m.DisplayName}`{transcriptLink}");
             sb.AppendLine();
-            sb.AppendLine("| Scenario | Status | Tool Calls | Tool Acc. | Prompt Tokens | Gen Tokens | Gen Speed | RAM | GPU VRAM | Duration |");
-            sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|");
+            sb.AppendLine("| Scenario | Status | Score | Weight | Tool Calls | Tool Acc. | Prompt Tokens | Gen Tokens | Gen Speed | RAM | GPU VRAM | Duration |");
+            sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|---|");
 
             foreach (var sc in m.ScenarioResults)
             {
                 var statusBadge = sc.Status switch
                 {
                     BenchmarkStatus.Passed => "✅ PASS",
-                    BenchmarkStatus.Failed => "❌ FAIL",
-                    _ => "⚠️ PARTIAL"
+                    BenchmarkStatus.Partial => "⚠️ PARTIAL",
+                    _ => "❌ FAIL"
                 };
 
                 var vramStr = sc.PeakVramMb > 0 ? BenchmarkRunner.FormatMemory(sc.PeakVramMb) : "-";
 
-                sb.AppendLine($"| **{sc.ScenarioName}** | {statusBadge} | {sc.TotalToolCalls} | {sc.ToolAccuracyPercentage:F0}% | {sc.TotalPromptTokens} | {sc.TotalOutputTokens} | {sc.GenerationTokensPerSecond:F1} tok/s | {BenchmarkRunner.FormatMemory(sc.PeakMemoryMb)} | {vramStr} | {sc.TotalDurationMs:F0} ms |");
+                sb.AppendLine($"| **{sc.ScenarioName}** | {statusBadge} | {sc.Score:F1}% | {sc.Weight:F1} | {sc.TotalToolCalls} | {sc.ToolAccuracyPercentage:F0}% | {sc.TotalPromptTokens} | {sc.TotalOutputTokens} | {sc.GenerationTokensPerSecond:F1} tok/s | {BenchmarkRunner.FormatMemory(sc.PeakMemoryMb)} | {vramStr} | {sc.TotalDurationMs:F0} ms |");
             }
 
             sb.AppendLine();
 
             foreach (var sc in m.ScenarioResults)
             {
-                if (sc.Status == BenchmarkStatus.Failed || !string.IsNullOrWhiteSpace(sc.ErrorMessage))
+                if (sc.Status != BenchmarkStatus.Passed || !string.IsNullOrWhiteSpace(sc.ErrorMessage))
                 {
                     sb.AppendLine($"> [!WARNING]");
-                    sb.AppendLine($"> **Failure Details for {sc.ScenarioName}:** {sc.ErrorMessage}");
+                    var detailHeader = sc.Status == BenchmarkStatus.Partial
+                        ? $"**Partial Outcome Details for {sc.ScenarioName} (Score: {sc.Score:F1}%, {sc.TurnsPassed}/{sc.TotalTurns} turns passed):**"
+                        : $"**Failure Details for {sc.ScenarioName}:**";
+                    sb.AppendLine($"> {detailHeader} {sc.ErrorMessage}");
                     foreach (var turn in sc.TurnResults.Where(t => t.Status == BenchmarkStatus.Failed))
                     {
                         sb.AppendLine($"> - Turn {turn.TurnIndex}: {turn.ValidationMessage}");
