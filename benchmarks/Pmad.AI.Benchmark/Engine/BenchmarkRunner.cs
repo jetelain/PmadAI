@@ -20,6 +20,8 @@ public sealed class BenchmarkRunner
     private readonly bool? _reasoningEnabled;
     private readonly string? _reasoningEffort;
     private readonly string? _configurationLabel;
+    private readonly string? _optimizationConfigId;
+    private readonly string? _optimizationConfigLabel;
 
     public BenchmarkRunner(
         IChatClient client,
@@ -30,7 +32,9 @@ public sealed class BenchmarkRunner
         int gpuLayers = 0,
         bool? reasoningEnabled = null,
         string? reasoningEffort = null,
-        string? configurationLabel = null)
+        string? configurationLabel = null,
+        string? optimizationConfigId = null,
+        string? optimizationConfigLabel = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _modelId = modelId ?? throw new ArgumentNullException(nameof(modelId));
@@ -41,6 +45,8 @@ public sealed class BenchmarkRunner
         _reasoningEnabled = reasoningEnabled;
         _reasoningEffort = reasoningEffort;
         _configurationLabel = configurationLabel;
+        _optimizationConfigId = optimizationConfigId;
+        _optimizationConfigLabel = optimizationConfigLabel;
     }
 
     /// <summary>
@@ -62,6 +68,8 @@ public sealed class BenchmarkRunner
             ReasoningEnabled = _reasoningEnabled,
             ReasoningEffort = _reasoningEffort,
             ConfigurationLabel = _configurationLabel,
+            OptimizationConfigId = _optimizationConfigId,
+            OptimizationConfigLabel = _optimizationConfigLabel,
             PeakMemoryMb = GetCurrentWorkingSetMb(),
             BaselineVramMb = baselineVram,
             PeakVramMb = baselineVram
@@ -85,7 +93,13 @@ public sealed class BenchmarkRunner
             summary.TotalTimeMs += result.TotalDurationMs;
             summary.TotalPromptTokens += result.TotalPromptTokens;
             summary.TotalOutputTokens += result.TotalOutputTokens;
+            summary.TotalReasoningTokens += result.TotalReasoningTokens;
             summary.TotalToolCalls += result.TotalToolCalls;
+
+            if (result.PeakContextTokens > summary.PeakContextTokens)
+            {
+                summary.PeakContextTokens = result.PeakContextTokens;
+            }
 
             if (result.PeakMemoryMb > summary.PeakMemoryMb)
             {
@@ -189,8 +203,15 @@ public sealed class BenchmarkRunner
 
                 if (response.Usage != null)
                 {
-                    turnResult.PromptTokens += (int)(response.Usage.InputTokenCount ?? 0);
+                    var inTokens = (int)(response.Usage.InputTokenCount ?? 0);
+                    turnResult.PromptTokens += inTokens;
+                    turnResult.ContextTokens = inTokens;
                     turnResult.OutputTokens += (int)(response.Usage.OutputTokenCount ?? 0);
+
+                    if (inTokens > scenarioResult.PeakContextTokens)
+                    {
+                        scenarioResult.PeakContextTokens = inTokens;
+                    }
                 }
 
                 var assistantMessage = response.Messages.FirstOrDefault()
@@ -202,6 +223,10 @@ public sealed class BenchmarkRunner
                 foreach (var reasoning in assistantMessage.Contents.OfType<TextReasoningContent>())
                 {
                     turnResult.AssistantReasoning = reasoning.Text;
+                    var estTokens = Pmad.AI.Tokens.HeuristicTokenEstimator.Default.Estimate(reasoning.Text);
+                    turnResult.ReasoningTokens += estTokens;
+                    scenarioResult.TotalReasoningTokens += estTokens;
+
                     if (_verbose)
                     {
                         Log($"    [Reasoning] {reasoning.Text}");
@@ -300,6 +325,12 @@ public sealed class BenchmarkRunner
                     turnResult.Status = BenchmarkStatus.Failed;
                     turnResult.ValidationMessage = validationOutcome.Message ?? "Turn custom validation failed.";
                 }
+            }
+
+            if (turn.IsRecallProbe && turnResult.Status == BenchmarkStatus.Failed)
+            {
+                turnResult.SemanticRecallPassed = false;
+                scenarioResult.SemanticRecallPassed = false;
             }
 
             scenarioResult.TurnResults.Add(turnResult);

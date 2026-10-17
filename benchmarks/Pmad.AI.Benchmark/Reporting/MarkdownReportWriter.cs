@@ -137,6 +137,116 @@ public static class MarkdownReportWriter
             }
         }
 
+        // Optimization Matrix Gain Comparison
+        var modelsWithBaseline = summaries
+            .GroupBy(s => s.ModelName)
+            .Where(g => g.Any(s => s.OptimizationConfigId == "baseline" || s.ConfigurationLabel?.Contains("baseline", StringComparison.OrdinalIgnoreCase) == true))
+            .ToList();
+
+        if (modelsWithBaseline.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Pmad.AI Optimization Matrix: Empirical Utility Gains");
+            sb.AppendLine();
+            sb.AppendLine("> Quantifies prompt token reduction, context ceiling capping, execution time savings, and accuracy improvements achieved by Pmad.AI utilities vs. unassisted baseline model execution.");
+            sb.AppendLine();
+            sb.AppendLine("| Model | Configuration | Pass Rate | Prompt Tokens | Token Savings % | Peak Context | Context Reduction % | Gen Speed | Duration | Time Savings % |");
+            sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|");
+
+            foreach (var group in modelsWithBaseline)
+            {
+                var baseline = group.First(s => s.OptimizationConfigId == "baseline" || s.ConfigurationLabel?.Contains("baseline", StringComparison.OrdinalIgnoreCase) == true);
+
+                foreach (var opt in group)
+                {
+                    var tokenSavings = baseline.TotalPromptTokens > 0
+                        ? ((baseline.TotalPromptTokens - opt.TotalPromptTokens) * 100.0 / baseline.TotalPromptTokens)
+                        : 0.0;
+                    opt.PromptTokenSavingsPercentage = tokenSavings;
+
+                    var contextReduction = baseline.PeakContextTokens > 0
+                        ? ((baseline.PeakContextTokens - opt.PeakContextTokens) * 100.0 / baseline.PeakContextTokens)
+                        : 0.0;
+                    opt.PeakContextReductionPercentage = contextReduction;
+
+                    var timeSavings = baseline.TotalTimeMs > 0
+                        ? ((baseline.TotalTimeMs - opt.TotalTimeMs) * 100.0 / baseline.TotalTimeMs)
+                        : 0.0;
+                    opt.TimeSavingsPercentage = timeSavings;
+
+                    var savingsStr = opt == baseline ? "—" : (tokenSavings >= 0 ? $"**-{tokenSavings:F1}%**" : $"+{-tokenSavings:F1}%");
+                    var contextRedStr = opt == baseline ? "—" : (contextReduction >= 0 ? $"**-{contextReduction:F1}%**" : $"+{-contextReduction:F1}%");
+                    var timeSavingsStr = opt == baseline ? "—" : (timeSavings >= 0 ? $"**-{timeSavings:F1}%**" : $"+{-timeSavings:F1}%");
+
+                    var configName = !string.IsNullOrWhiteSpace(opt.OptimizationConfigLabel)
+                        ? opt.OptimizationConfigLabel
+                        : (opt.ConfigurationLabel ?? "Default");
+
+                    sb.AppendLine($"| `{opt.ModelName}` | **{configName}** | {opt.PassRatePercentage:F0}% | {opt.TotalPromptTokens} | {savingsStr} | {opt.PeakContextTokens} tok | {contextRedStr} | {opt.AverageGenerationTokensPerSecond:F1} tok/s | {opt.TotalTimeMs / 1000.0:F2}s | {timeSavingsStr} |");
+                }
+            }
+
+            // Semantic Recall Scorecard
+            var hasCompaction = summaries.Any(s => s.ScenarioResults.Any(r => r.ScenarioId == "compaction"));
+            if (hasCompaction)
+            {
+                sb.AppendLine();
+                sb.AppendLine("### Semantic Probe Recall Scorecard (15-Turn Coding Agent)");
+                sb.AppendLine();
+                sb.AppendLine("| Model | Configuration | 15-Turn Workflow | Turn 15 Semantic Probe | Peak Context Window | Total Scenario Tokens |");
+                sb.AppendLine("|---|---|---|---|---|---|");
+
+                foreach (var group in modelsWithBaseline)
+                {
+                    foreach (var s in group)
+                    {
+                        var compSc = s.ScenarioResults.FirstOrDefault(r => r.ScenarioId == "compaction");
+                        if (compSc != null)
+                        {
+                            var recallStatus = compSc.SemanticRecallPassed ? "✅ PASS" : "❌ FAIL";
+                            var workflowStatus = compSc.Status == BenchmarkStatus.Passed ? "✅ PASS" : "❌ FAIL";
+                            var configName = s.OptimizationConfigLabel ?? s.ConfigurationLabel ?? "Default";
+                            sb.AppendLine($"| `{s.ModelName}` | **{configName}** | {workflowStatus} | {recallStatus} | {compSc.PeakContextTokens} tok | {compSc.TotalTokens} |");
+                        }
+                    }
+                }
+            }
+
+            // Resilience & Recovery Scorecard
+            var hasRecoveryOrLoop = summaries.Any(s => s.ScenarioResults.Any(r => r.ScenarioId is "healing" or "runaway-loop"));
+            if (hasRecoveryOrLoop)
+            {
+                sb.AppendLine();
+                sb.AppendLine("### Resilience & Model Error Recovery Scorecard");
+                sb.AppendLine();
+                sb.AppendLine("| Model | Scenario | Baseline Status | Optimized Status | Healing / Breaker Active |");
+                sb.AppendLine("|---|---|---|---|---|");
+
+                foreach (var group in modelsWithBaseline)
+                {
+                    var baseline = group.First(s => s.OptimizationConfigId == "baseline" || s.ConfigurationLabel?.Contains("baseline", StringComparison.OrdinalIgnoreCase) == true);
+                    foreach (var scId in new[] { "healing", "runaway-loop" })
+                    {
+                        var bSc = baseline.ScenarioResults.FirstOrDefault(r => r.ScenarioId == scId);
+                        if (bSc != null)
+                        {
+                            var bStatus = bSc.Status == BenchmarkStatus.Passed ? "✅ PASS" : "❌ FAIL";
+                            foreach (var opt in group.Where(s => s != baseline))
+                            {
+                                var oSc = opt.ScenarioResults.FirstOrDefault(r => r.ScenarioId == scId);
+                                if (oSc != null)
+                                {
+                                    var oStatus = oSc.Status == BenchmarkStatus.Passed ? "✅ PASS" : "❌ FAIL";
+                                    var configName = opt.OptimizationConfigLabel ?? opt.ConfigurationLabel ?? "Default";
+                                    sb.AppendLine($"| `{opt.ModelName}` | {bSc.ScenarioName} | {bStatus} | {oStatus} | **{configName}** |");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         sb.AppendLine();
         sb.AppendLine("## Detailed Scenario Breakdown");
         sb.AppendLine();

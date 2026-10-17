@@ -52,7 +52,17 @@ public abstract class BenchmarkScenario
     ];
 
     /// <summary>
-    /// Filters scenarios according to the provided filter string ("all" or matching Id/Name).
+    /// Returns the opt-in ultra-long scenarios (50 and 100 turns). Excluded from the default run;
+    /// select them with <c>--scenarios long</c> or by id.
+    /// </summary>
+    public static IReadOnlyList<BenchmarkScenario> GetLongHorizonScenarios() =>
+    [
+        new MonolithMigration50Scenario(),
+        new GrandCrucible100Scenario()
+    ];
+
+    /// <summary>
+    /// Filters scenarios according to the provided filter string ("all", "long" or matching Id/Name).
     /// </summary>
     public static IReadOnlyList<BenchmarkScenario> FilterScenarios(string? filter)
     {
@@ -62,7 +72,13 @@ public abstract class BenchmarkScenario
             return all;
         }
 
-        var matched = all.Where(s =>
+        var long_ = GetLongHorizonScenarios();
+        if (filter.Equals("long", StringComparison.OrdinalIgnoreCase))
+        {
+            return long_;
+        }
+
+        var matched = all.Concat(long_).Where(s =>
             s.Id.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
             s.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)).ToList();
 

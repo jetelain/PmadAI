@@ -33,7 +33,17 @@ public sealed class ToolCallHealingRecoveryScenario : BenchmarkScenario
         "Searches data."
     );
 
-    public override IReadOnlyList<AITool> Tools => [_patchTool, _searchTool];
+    private static readonly AIFunction _queryDbTool = AIFunctionFactory.Create(
+        [Description("Queries a database with SQL.")]
+        ([Description("SQL query")] string sql) =>
+        {
+            return "Rows: 1, Data: AdminSession";
+        },
+        "query_database",
+        "Queries a database with SQL."
+    );
+
+    public override IReadOnlyList<AITool> Tools => [_patchTool, _searchTool, _queryDbTool];
 
     public override IReadOnlyList<BenchmarkTurn> Turns =>
     [
@@ -50,6 +60,14 @@ public sealed class ToolCallHealingRecoveryScenario : BenchmarkScenario
         {
             UserPrompt = "Perform a search for 'SessionToken' using pseudo-tag format.",
             ExpectedToolNames = ["search"],
+            ToolExecutor = call => "Success",
+            CustomValidator = ctx => ValidationResult.Success()
+        },
+        // Turn 3: Trailing commas and unescaped newlines in JSON arguments
+        new BenchmarkTurn
+        {
+            UserPrompt = "Run query_database with trailing commas in parameters.",
+            ExpectedToolNames = ["query_database"],
             ToolExecutor = call => "Success",
             CustomValidator = ctx => ValidationResult.Success()
         }

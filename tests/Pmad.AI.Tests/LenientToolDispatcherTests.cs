@@ -276,6 +276,29 @@ public class LenientToolDispatcherTests
         Assert.Equal("read", firstCall.Name);
     }
 
+    [Fact]
+    public void NormalizeCall_ConfiguredToolWithoutRegisteredInstance_ResolvesCanonicalToolAndMapping()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["unregistered_tool"] = new ToolMapping(
+                    aliases: ["alias_tool"],
+                    parameterAliases: new Dictionary<string, IEnumerable<string>>
+                    {
+                        ["param"] = ["arg"]
+                    })
+            }
+        });
+
+        var dispatched = dispatcher.NormalizeCall("unregistered_tool", "{\"arg\": \"val\"}");
+
+        Assert.Equal("unregistered_tool", dispatched.CanonicalToolName);
+        Assert.Equal("val", dispatched.Arguments["param"]);
+    }
+
     private class FakePipelineChatClient : IChatClient
     {
         private readonly Func<IEnumerable<ChatMessage>, ChatOptions?, CancellationToken, Task<ChatResponse>> _getResponse;

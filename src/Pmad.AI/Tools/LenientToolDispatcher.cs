@@ -362,6 +362,10 @@ public class LenientToolDispatcher
             canonicalTool = toolName;
             _configuration.Tools.TryGetValue(toolName, out mapping);
         }
+        else if (_configuration.Tools.TryGetValue(toolName, out mapping))
+        {
+            canonicalTool = toolName;
+        }
         else
         {
             // Search aliases

@@ -34,12 +34,15 @@ public sealed class TurnResult
     public double DurationMs { get; set; }
     public int PromptTokens { get; set; }
     public int OutputTokens { get; set; }
+    public int ReasoningTokens { get; set; }
+    public int ContextTokens { get; set; }
     public double TokensPerSecond => DurationMs > 0 ? (OutputTokens / (DurationMs / 1000.0)) : 0;
     public List<FunctionCallContent> ToolCalls { get; init; } = [];
     public List<ToolCallRecord> ToolExecutions { get; init; } = [];
     public string AssistantFinalText { get; set; } = string.Empty;
     public string? AssistantReasoning { get; set; }
     public string? ValidationMessage { get; set; }
+    public bool SemanticRecallPassed { get; set; } = true;
 }
 
 /// <summary>
@@ -54,12 +57,15 @@ public sealed class BenchmarkScenarioResult
     public double TotalDurationMs { get; set; }
     public int TotalPromptTokens { get; set; }
     public int TotalOutputTokens { get; set; }
+    public int TotalReasoningTokens { get; set; }
+    public int PeakContextTokens { get; set; }
     public int TotalTokens => TotalPromptTokens + TotalOutputTokens;
     public double GenerationTokensPerSecond => TotalDurationMs > 0 ? (TotalOutputTokens / (TotalDurationMs / 1000.0)) : 0;
     public int TotalToolCalls { get; set; }
     public double ToolAccuracyPercentage { get; set; } = 100.0;
     public double PeakMemoryMb { get; set; }
     public double PeakVramMb { get; set; }
+    public bool SemanticRecallPassed { get; set; } = true;
     public List<TurnResult> TurnResults { get; init; } = [];
     public string? ErrorMessage { get; set; }
 }
@@ -98,6 +104,16 @@ public sealed class ModelBenchmarkSummary
     public string? ConfigurationLabel { get; set; }
 
     /// <summary>
+    /// Optimization configuration ID (e.g. "baseline", "opt-healing", "all-optimizations").
+    /// </summary>
+    public string? OptimizationConfigId { get; set; }
+
+    /// <summary>
+    /// Optimization configuration label (e.g. "Baseline (Raw)", "All Optimizations").
+    /// </summary>
+    public string? OptimizationConfigLabel { get; set; }
+
+    /// <summary>
     /// Combined model name and configuration label for display.
     /// </summary>
     public string DisplayName => string.IsNullOrWhiteSpace(ConfigurationLabel)
@@ -111,6 +127,8 @@ public sealed class ModelBenchmarkSummary
     public double TotalTimeMs { get; set; }
     public int TotalPromptTokens { get; set; }
     public int TotalOutputTokens { get; set; }
+    public int TotalReasoningTokens { get; set; }
+    public int PeakContextTokens { get; set; }
     public double AverageGenerationTokensPerSecond { get; set; }
     public int TotalToolCalls { get; set; }
     public double PeakMemoryMb { get; set; }
@@ -129,6 +147,12 @@ public sealed class ModelBenchmarkSummary
     /// Estimated VRAM in MiB allocated specifically by this model (Peak - Baseline).
     /// </summary>
     public double ModelVramMb => PeakVramMb > BaselineVramMb ? (PeakVramMb - BaselineVramMb) : 0.0;
+
+    // Gain metrics vs baseline
+    public double? PromptTokenSavingsPercentage { get; set; }
+    public double? PeakContextReductionPercentage { get; set; }
+    public double? TimeSavingsPercentage { get; set; }
+    public double? AccuracyGainPercentage { get; set; }
 
     public List<BenchmarkScenarioResult> ScenarioResults { get; init; } = [];
 }

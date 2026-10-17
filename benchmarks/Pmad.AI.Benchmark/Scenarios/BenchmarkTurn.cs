@@ -47,4 +47,9 @@ public sealed class BenchmarkTurn
     /// Optional custom validation callback to inspect the assistant's final response and tool execution.
     /// </summary>
     public Func<TurnValidationContext, ValidationResult>? CustomValidator { get; init; }
+
+    /// <summary>
+    /// Marks this turn as a semantic recall probe; any failure on it marks semantic recall as failed.
+    /// </summary>
+    public bool IsRecallProbe { get; init; }
 }

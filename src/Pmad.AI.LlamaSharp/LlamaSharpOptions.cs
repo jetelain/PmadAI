@@ -118,6 +118,13 @@ public sealed class LlamaSharpOptions
     public ILogger? Logger { get; set; }
 
     /// <summary>
+    /// Controls whether built-in tool call healing, JSON sanitization, and lenient fallback parsers are active.
+    /// Defaults to true for production resilience.
+    /// Set to false during benchmarking to evaluate raw, unassisted model outputs.
+    /// </summary>
+    public bool EnableBuiltInHealing { get; set; } = true;
+
+    /// <summary>
     /// Optional <see cref="ILoggerFactory"/> used to create the per-chat-client logger when <see cref="Logger"/> is not specified.
     /// </summary>
     public ILoggerFactory? LoggerFactory { get; set; }

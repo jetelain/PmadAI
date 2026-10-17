@@ -99,6 +99,42 @@ public sealed class BenchmarkOptions
     public bool RunUtilities { get; set; }
 
     /// <summary>
+    /// When true, executes the systematic optimization matrix (Baseline, individual utilities, and all combined).
+    /// </summary>
+    public bool OptMatrix { get; set; }
+
+    /// <summary>
+    /// Identifier of a specific optimization configuration to execute (e.g. "baseline", "opt-healing", "all-optimizations").
+    /// </summary>
+    public string? ConfigId { get; set; }
+
+    /// <summary>
+    /// Name or tag of local Ollama model to benchmark (e.g. "Qwen3.8-27B:latest", "jetelain/Qwen3.8-27B:iq3").
+    /// </summary>
+    public string? OllamaModel { get; set; }
+
+    /// <summary>
+    /// Base URL for Ollama daemon (default: http://localhost:11434).
+    /// </summary>
+    public string OllamaBaseUrl { get; set; } = "http://localhost:11434";
+
+    /// <summary>
+    /// When true, resumes execution from the latest checkpoint file, skipping already completed runs.
+    /// </summary>
+    public bool Resume { get; set; }
+
+    /// <summary>
+    /// Optional custom path for the checkpoint progress JSON file.
+    /// Defaults to "benchmark-progress.json".
+    /// </summary>
+    public string? CheckpointPath { get; set; }
+
+    /// <summary>
+    /// True if context size was explicitly set via CLI options.
+    /// </summary>
+    public bool IsContextSizeExplicit { get; set; }
+
+    /// <summary>
     /// Whether help was requested.
     /// </summary>
     public bool ShowHelp { get; set; }
@@ -166,6 +202,30 @@ public sealed class BenchmarkOptions
                 options.CompareBackends = true;
                 options.CompareReasoning = true;
             }
+            else if (arg is "--opt-matrix" or "--optimization-matrix" or "--opt")
+            {
+                options.OptMatrix = true;
+            }
+            else if (arg is "--config" && i + 1 < args.Length)
+            {
+                options.ConfigId = args[++i];
+            }
+            else if (arg is "--ollama" && i + 1 < args.Length)
+            {
+                options.OllamaModel = args[++i];
+            }
+            else if (arg is "--ollama-url" && i + 1 < args.Length)
+            {
+                options.OllamaBaseUrl = args[++i];
+            }
+            else if (arg is "--resume")
+            {
+                options.Resume = true;
+            }
+            else if (arg is "--checkpoint" && i + 1 < args.Length)
+            {
+                options.CheckpointPath = args[++i];
+            }
             else if (arg is "-g" or "--gpu" && i + 1 < args.Length && int.TryParse(args[++i], out var gpu))
             {
                 options.GpuLayerCount = gpu;
@@ -173,6 +233,7 @@ public sealed class BenchmarkOptions
             else if (arg is "-c" or "--context" && i + 1 < args.Length && int.TryParse(args[++i], out var ctx))
             {
                 options.ContextSize = ctx;
+                options.IsContextSizeExplicit = true;
             }
             else if (arg is "-o" or "--output" or "--markdown" && i + 1 < args.Length)
             {
@@ -228,19 +289,26 @@ Pmad.AI Tool Calling Benchmark & Model Metrics Suite
 Usage:
   dotnet run --project benchmarks/Pmad.AI.Benchmark -- [options]
 
-Options:
+Target Models & Providers:
   -m, --model <id|path>    Model preset (e.g. 'qwen3.5-2b', 'gemma-4-e2b') or path to .gguf.
                            If omitted and no models are found, runs in mock simulation mode.
+  --ollama <model>         Target local Ollama model (e.g. 'Qwen3.8-27B:latest', 'jetelain/Qwen3.8-27B:iq3').
+  --ollama-url <url>       Ollama endpoint URL (default: http://localhost:11434).
   --all, --all-presets     Benchmark all supported model presets.
   -d, --download           Download models automatically if missing from local cache.
   --mock, --dry-run        Run with mock simulated chat client (showcases tool calling & metrics immediately).
-  -s, --scenario <name>    Filter scenario to run: 'weather', 'calculator', 'support', 'direct', or 'all' (default: all).
+  -s, --scenario <name>    Filter scenario: 'weather', 'calculator', 'support', 'direct', 'compaction', 'healing', 'runaway-loop', or 'all'.
+
+Optimization Matrix:
+  --opt-matrix             Run full 7-configuration optimization matrix (Baseline, single utilities, and all combined).
+  --config <id>            Execute specific configuration: 'baseline', 'opt-healing', 'opt-thinking-compaction',
+                           'opt-tool-compaction', 'opt-speculative-slm', 'opt-lenient-dispatch', 'all-optimizations'.
 
 Hardware & Backend:
   -b, --backend <name>     Backend to use: 'cpu', 'vulkan', or 'all' (default: vulkan if GPU layers > 0, else cpu).
   --compare-backends       Run each model on both CPU (0 GPU layers) and Vulkan GPU acceleration.
   -g, --gpu <layers>       GPU layers to offload (default: 99; use 0 for CPU).
-  -c, --context <tokens>   Context size (default: 8192).
+  -c, --context <tokens>   Context size (default: 65536 for SLMs < 9B; 131072 for LLMs 9B+).
 
 Reasoning:
   --compare-reasoning      Run each model with and without reasoning enabled to compare speed & token overhead.
@@ -248,29 +316,16 @@ Reasoning:
   --no-reasoning           Explicitly disable reasoning / thinking tokens for reasoning models.
   -re, --reasoning-effort  Reasoning effort level ('low', 'medium', 'high', 'xhigh', 'none').
 
-Comparative Matrix:
-  --compare-all, --matrix  Full 2x2 comparison matrix: CPU vs Vulkan AND With vs Without reasoning.
+Resilience & Checkpointing:
+  --resume                 Resume benchmark from latest checkpoint, skipping already completed runs.
+  --checkpoint <path>      Path to checkpoint progress JSON (default: benchmark-progress.json).
 
 Reporting & Diagnostics:
   -o, --output <file>      Export benchmark report to a Markdown file.
-  -t, --transcript <file>  Export full turn-by-turn prompts, reasoning traces, tool inputs/outputs, and failure analysis to a Markdown file.
-                           (Defaults to <output>.transcript.md when -o is specified).
+  -t, --transcript <file>  Export full turn-by-turn prompts, reasoning traces, tool inputs/outputs, and failure analysis.
   -j, --json <file>        Export benchmark metrics to a JSON file.
   -v, --verbose            Print detailed turn-by-turn prompts, tool calls, and model outputs.
   -h, --help               Display this help message.
-
-Examples:
-  # Quick mock simulation comparing CPU vs Vulkan and with/without reasoning:
-  dotnet run --project benchmarks/Pmad.AI.Benchmark -- --mock --compare-all
-
-  # Compare a downloaded model on CPU vs Vulkan:
-  dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --compare-backends
-
-  # Compare reasoning impact on a model and generate Markdown report:
-  dotnet run --project benchmarks/Pmad.AI.Benchmark -- --model qwen3.5-2b --compare-reasoning -o report.md
-
-  # Full comparison matrix across all presets:
-  dotnet run --project benchmarks/Pmad.AI.Benchmark -- --all --compare-all -o full-report.md
 ");
     }
 }

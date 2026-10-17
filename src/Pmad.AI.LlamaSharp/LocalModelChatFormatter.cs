@@ -189,9 +189,12 @@ public static partial class LocalModelChatFormatter
     /// <summary>
     /// Parses raw assistant output into structured contents: reasoning traces, tool calls, and text.
     /// </summary>
+    /// <summary>
+    /// Parses raw assistant output into structured contents: reasoning traces, tool calls, and text.
+    /// </summary>
     public static ChatMessage ParseAssistantResponse(string rawText, FunctionCallNormalizer? normalizer = null)
     {
-        return ParseAssistantResponse(rawText, dialect: null, normalizer: normalizer);
+        return ParseAssistantResponse(rawText, dialect: null, normalizer: normalizer, enableHealing: true);
     }
 
     /// <summary>
@@ -199,6 +202,15 @@ public static partial class LocalModelChatFormatter
     /// using the specified dialect to strip dialect-specific stop tokens.
     /// </summary>
     public static ChatMessage ParseAssistantResponse(string rawText, ChatDialect? dialect, FunctionCallNormalizer? normalizer = null)
+    {
+        return ParseAssistantResponse(rawText, dialect, normalizer, enableHealing: true);
+    }
+
+    /// <summary>
+    /// Parses raw assistant output into structured contents: reasoning traces, tool calls, and text,
+    /// with optional control over built-in healing and lenient fallback parsers.
+    /// </summary>
+    public static ChatMessage ParseAssistantResponse(string rawText, ChatDialect? dialect, FunctionCallNormalizer? normalizer, bool enableHealing)
     {
         if (string.IsNullOrWhiteSpace(rawText))
         {
@@ -259,7 +271,10 @@ public static partial class LocalModelChatFormatter
             if (string.IsNullOrWhiteSpace(callBlock)) continue;
 
             callBlock = StripStrayTokens(callBlock, dialect);
-            callBlock = ToolCallHealingTransform.SanitizeJson(callBlock);
+            if (enableHealing)
+            {
+                callBlock = ToolCallHealingTransform.SanitizeJson(callBlock);
+            }
 
             if (callBlock.StartsWith('[') && callBlock.EndsWith(']'))
             {
@@ -270,7 +285,7 @@ public static partial class LocalModelChatFormatter
                     {
                         foreach (var item in arrayDoc.RootElement.EnumerateArray())
                         {
-                            var itemParsed = TryParseFunctionCall(item.GetRawText(), normalizer);
+                            var itemParsed = TryParseFunctionCall(item.GetRawText(), normalizer, enableHealing);
                             if (itemParsed != null)
                             {
                                 contents.Add(itemParsed);
@@ -285,7 +300,7 @@ public static partial class LocalModelChatFormatter
                 }
             }
 
-            var parsed = TryParseFunctionCall(callBlock, normalizer);
+            var parsed = TryParseFunctionCall(callBlock, normalizer, enableHealing);
             if (parsed != null)
             {
                 contents.Add(parsed);
@@ -298,57 +313,60 @@ public static partial class LocalModelChatFormatter
             text = ToolCallRegex().Replace(text, string.Empty).Trim();
         }
 
-        // 3. Fallback: markdown code blocks ```tool_call or ```json containing JSON object
-        if (!contents.OfType<FunctionCallContent>().Any())
+        if (enableHealing)
         {
-            var jsonCodeBlockMatch = JsonCodeBlockRegex().Match(text);
-            if (jsonCodeBlockMatch.Success)
+            // 3. Fallback: markdown code blocks ```tool_call or ```json containing JSON object
+            if (!contents.OfType<FunctionCallContent>().Any())
             {
-                var blockContent = jsonCodeBlockMatch.Groups[1].Value.Trim();
-                var parsed = TryParseFunctionCall(blockContent, normalizer);
-                if (parsed != null)
+                var jsonCodeBlockMatch = JsonCodeBlockRegex().Match(text);
+                if (jsonCodeBlockMatch.Success)
                 {
-                    contents.Add(parsed);
-                    text = text.Remove(jsonCodeBlockMatch.Index, jsonCodeBlockMatch.Length).Trim();
-                }
-            }
-        }
-
-        // 4. Fallback: raw call:function_name{args} syntax (e.g. Gemma native output without XML tags)
-        if (!contents.OfType<FunctionCallContent>().Any())
-        {
-            var rawCallMatches = RawCallRegex().Matches(text);
-            foreach (Match match in rawCallMatches)
-            {
-                var parsed = TryParseCallSyntax(match.Value, normalizer);
-                if (parsed != null)
-                {
-                    contents.Add(parsed);
-                }
-            }
-            if (rawCallMatches.Count > 0)
-            {
-                text = RawCallRegex().Replace(text, string.Empty).Trim();
-            }
-        }
-
-        // 5. Fallback: ReAct Action: / Action Input: syntax
-        if (!contents.OfType<FunctionCallContent>().Any())
-        {
-            if (ToolCallHealingTransform.TryExtractToolCalls(ref text, out var reactCalls))
-            {
-                foreach (var call in reactCalls)
-                {
-                    if (normalizer != null)
+                    var blockContent = jsonCodeBlockMatch.Groups[1].Value.Trim();
+                    var parsed = TryParseFunctionCall(blockContent, normalizer, enableHealing: true);
+                    if (parsed != null)
                     {
-                        var normalized = normalizer(call.Name, call.Arguments ?? new Dictionary<string, object?>());
-                        if (normalized.HasValue)
-                        {
-                            contents.Add(new FunctionCallContent(call.CallId, normalized.Value.Name, normalized.Value.Arguments));
-                            continue;
-                        }
+                        contents.Add(parsed);
+                        text = text.Remove(jsonCodeBlockMatch.Index, jsonCodeBlockMatch.Length).Trim();
                     }
-                    contents.Add(call);
+                }
+            }
+
+            // 4. Fallback: raw call:function_name{args} syntax (e.g. Gemma native output without XML tags)
+            if (!contents.OfType<FunctionCallContent>().Any())
+            {
+                var rawCallMatches = RawCallRegex().Matches(text);
+                foreach (Match match in rawCallMatches)
+                {
+                    var parsed = TryParseCallSyntax(match.Value, normalizer);
+                    if (parsed != null)
+                    {
+                        contents.Add(parsed);
+                    }
+                }
+                if (rawCallMatches.Count > 0)
+                {
+                    text = RawCallRegex().Replace(text, string.Empty).Trim();
+                }
+            }
+
+            // 5. Fallback: ReAct Action: / Action Input: syntax
+            if (!contents.OfType<FunctionCallContent>().Any())
+            {
+                if (ToolCallHealingTransform.TryExtractToolCalls(ref text, out var reactCalls))
+                {
+                    foreach (var call in reactCalls)
+                    {
+                        if (normalizer != null)
+                        {
+                            var normalized = normalizer(call.Name, call.Arguments ?? new Dictionary<string, object?>());
+                            if (normalized.HasValue)
+                            {
+                                contents.Add(new FunctionCallContent(call.CallId, normalized.Value.Name, normalized.Value.Arguments));
+                                continue;
+                            }
+                        }
+                        contents.Add(call);
+                    }
                 }
             }
         }
@@ -368,7 +386,7 @@ public static partial class LocalModelChatFormatter
         }
 
         var assistantMsg = new ChatMessage(ChatRole.Assistant, contents);
-        return ToolCallHealingTransform.HealChatMessage(assistantMsg);
+        return enableHealing ? ToolCallHealingTransform.HealChatMessage(assistantMsg) : assistantMsg;
     }
 
     private static string StripStrayTokens(string text, ChatDialect? dialect)
@@ -394,13 +412,21 @@ public static partial class LocalModelChatFormatter
     /// </summary>
     public static FunctionCallContent? TryParseFunctionCall(string jsonText, FunctionCallNormalizer? normalizer = null)
     {
+        return TryParseFunctionCall(jsonText, normalizer, enableHealing: true);
+    }
+
+    /// <summary>
+    /// Attempts to parse a JSON payload representing a function call with optional healing control.
+    /// </summary>
+    public static FunctionCallContent? TryParseFunctionCall(string jsonText, FunctionCallNormalizer? normalizer, bool enableHealing)
+    {
         if (string.IsNullOrWhiteSpace(jsonText))
         {
             return null;
         }
 
         var trimmed = jsonText.Trim();
-        if (trimmed.StartsWith("call:", StringComparison.OrdinalIgnoreCase))
+        if (enableHealing && trimmed.StartsWith("call:", StringComparison.OrdinalIgnoreCase))
         {
             var callParsed = TryParseCallSyntax(trimmed, normalizer);
             if (callParsed != null)
@@ -411,8 +437,8 @@ public static partial class LocalModelChatFormatter
 
         try
         {
-            var sanitizedJson = ToolCallHealingTransform.SanitizeJson(jsonText);
-            using var doc = JsonDocument.Parse(sanitizedJson);
+            var jsonToParse = enableHealing ? ToolCallHealingTransform.SanitizeJson(jsonText) : jsonText;
+            using var doc = JsonDocument.Parse(jsonToParse);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
             {
@@ -477,17 +503,39 @@ public static partial class LocalModelChatFormatter
                     var innerJson = argsElement.GetString();
                     if (!string.IsNullOrWhiteSpace(innerJson))
                     {
-                        var parsedArgs = ToolCallHealingTransform.ParseArgumentsJson(innerJson);
-                        if (parsedArgs.Count > 0)
+                        if (enableHealing)
                         {
-                            foreach (var prop in parsedArgs)
+                            var parsedArgs = ToolCallHealingTransform.ParseArgumentsJson(innerJson);
+                            if (parsedArgs.Count > 0)
                             {
-                                arguments[prop.Key] = prop.Value;
+                                foreach (var prop in parsedArgs)
+                                {
+                                    arguments[prop.Key] = prop.Value;
+                                }
+                            }
+                            else
+                            {
+                                arguments["input"] = innerJson;
                             }
                         }
                         else
                         {
-                            arguments["input"] = innerJson;
+                            // Strict parse: only valid JSON object permitted
+                            try
+                            {
+                                using var innerDoc = JsonDocument.Parse(innerJson);
+                                if (innerDoc.RootElement.ValueKind == JsonValueKind.Object)
+                                {
+                                    foreach (var prop in innerDoc.RootElement.EnumerateObject())
+                                    {
+                                        arguments[prop.Name] = UnwrapJsonElement(prop.Value);
+                                    }
+                                }
+                            }
+                            catch
+                            {
+                                return null;
+                            }
                         }
                     }
                 }

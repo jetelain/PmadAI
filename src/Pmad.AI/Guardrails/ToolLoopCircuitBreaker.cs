@@ -127,6 +127,14 @@ public sealed class ToolLoopCircuitBreaker
     }
 
     /// <summary>
+    /// Records and evaluates a tool invocation with arguments supplied as a dictionary.
+    /// </summary>
+    public LoopCheckResult EvaluateToolInvocation(string toolName, IDictionary<string, object?>? arguments, string? stateSignature = null)
+    {
+        return EvaluateToolInvocation(toolName, SerializeArguments(arguments), stateSignature);
+    }
+
+    /// <summary>
     /// Records and evaluates a tool invocation.
     /// <paramref name="stateSignature"/> is an opaque caller-supplied token (e.g. hash of workspace/file state).
     /// When null, state is considered unknown and consecutive identical calls are evaluated directly.
@@ -275,5 +283,53 @@ public sealed class ToolLoopCircuitBreaker
     {
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(input));
         return Convert.ToHexString(bytes);
+    }
+
+    /// <summary>
+    /// Serializes an arguments dictionary to a canonical JSON string without reflection.
+    /// </summary>
+    public static string SerializeArguments(IDictionary<string, object?>? arguments)
+    {
+        if (arguments == null || arguments.Count == 0)
+        {
+            return "{}";
+        }
+
+        var sb = new StringBuilder("{");
+        bool first = true;
+        foreach (var kvp in arguments.OrderBy(k => k.Key, StringComparer.Ordinal))
+        {
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append('"').Append(kvp.Key).Append("\":");
+            WriteValue(sb, kvp.Value);
+        }
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    private static void WriteValue(StringBuilder sb, object? value)
+    {
+        switch (value)
+        {
+            case null:
+                sb.Append("null");
+                break;
+            case string s:
+                sb.Append('"').Append(s.Replace("\"", "\\\"")).Append('"');
+                break;
+            case bool b:
+                sb.Append(b ? "true" : "false");
+                break;
+            case sbyte or byte or short or ushort or int or uint or long or ulong or float or double or decimal:
+                sb.Append(Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture));
+                break;
+            case JsonElement je:
+                sb.Append(je.GetRawText());
+                break;
+            default:
+                sb.Append('"').Append(value.ToString()?.Replace("\"", "\\\"")).Append('"');
+                break;
+        }
     }
 }

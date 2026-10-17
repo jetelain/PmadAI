@@ -460,7 +460,7 @@ public sealed class LlamaSharpChatClient : IChatClient
                     }
 
                     var text = responseBuilder.ToString().Trim();
-                    var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(text, _dialect, _options.FunctionCallNormalizer);
+                    var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(text, _dialect, _options.FunctionCallNormalizer, _options.EnableBuiltInHealing);
 
                     LogOperation("Completed inference. Output tokens: {OutputTokens}, Total tokens: {TotalTokens}",
                         outputTokenCount, inputTokens + outputTokenCount);
@@ -600,7 +600,7 @@ public sealed class LlamaSharpChatClient : IChatClient
 
             if (hasTools)
             {
-                var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(responseBuilder.ToString().Trim(), _dialect, _options.FunctionCallNormalizer);
+                var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(responseBuilder.ToString().Trim(), _dialect, _options.FunctionCallNormalizer, _options.EnableBuiltInHealing);
                 ChatFinishReason finishReason = assistantMessage.Contents.OfType<FunctionCallContent>().Any()
                     ? ChatFinishReason.ToolCalls
                     : (outputTokenCount >= maxOutputTokens ? ChatFinishReason.Length : ChatFinishReason.Stop);

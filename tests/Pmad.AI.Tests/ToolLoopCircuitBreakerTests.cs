@@ -140,4 +140,92 @@ public class ToolLoopCircuitBreakerTests
             MaxToolHistory = maxHistory
         }));
     }
+
+    [Fact]
+    public void EvaluateToolInvocation_DictionaryArguments_TripsOnDuplicate()
+    {
+        var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
+        {
+            PingPongThreshold = 2
+        });
+
+        var args1 = new Dictionary<string, object?> { ["path"] = "main.cs", ["count"] = 42 };
+        var args2 = new Dictionary<string, object?> { ["count"] = 42, ["path"] = "main.cs" };
+
+        var r1 = breaker.EvaluateToolInvocation("read_file", args1, "state_1");
+        Assert.False(r1.IsLoopDetected);
+
+        var r2 = breaker.EvaluateToolInvocation("read_file", args2, "state_1");
+        Assert.True(r2.IsLoopDetected);
+        Assert.Equal(LoopType.ToolPingPong, r2.Type);
+    }
+
+    [Fact]
+    public void EvaluateToolInvocation_DictionaryArguments_NullArgumentsHandledSafely()
+    {
+        var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
+        {
+            PingPongThreshold = 2
+        });
+
+        var r1 = breaker.EvaluateToolInvocation("status", (IDictionary<string, object?>?)null, "state_1");
+        Assert.False(r1.IsLoopDetected);
+
+        var r2 = breaker.EvaluateToolInvocation("status", new Dictionary<string, object?>(), "state_1");
+        Assert.True(r2.IsLoopDetected);
+        Assert.Equal(LoopType.ToolPingPong, r2.Type);
+    }
+
+    [Fact]
+    public void SerializeArguments_NullOrEmpty_ReturnsEmptyJsonObject()
+    {
+        Assert.Equal("{}", ToolLoopCircuitBreaker.SerializeArguments(null));
+        Assert.Equal("{}", ToolLoopCircuitBreaker.SerializeArguments(new Dictionary<string, object?>()));
+    }
+
+    [Fact]
+    public void SerializeArguments_SerializesSortedDictionary()
+    {
+        var args = new Dictionary<string, object?>
+        {
+            ["z"] = "last",
+            ["a"] = "first",
+            ["b"] = 123,
+            ["c"] = true,
+            ["d"] = null
+        };
+
+        var json = ToolLoopCircuitBreaker.SerializeArguments(args);
+        Assert.Equal("{\"a\":\"first\",\"b\":123,\"c\":true,\"d\":null,\"z\":\"last\"}", json);
+    }
+
+    [Fact]
+    public void SerializeArguments_EscapesQuotesInStrings()
+    {
+        var args = new Dictionary<string, object?>
+        {
+            ["text"] = "hello \"world\""
+        };
+
+        var json = ToolLoopCircuitBreaker.SerializeArguments(args);
+        Assert.Equal("{\"text\":\"hello \\\"world\\\"\"}", json);
+    }
+
+    [Fact]
+    public void SerializeArguments_HandlesJsonElementAndPrimitives()
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse("{\"inner\":\"value\"}");
+        var args = new Dictionary<string, object?>
+        {
+            ["elem"] = doc.RootElement,
+            ["pi"] = 3.14159,
+            ["flag"] = false
+        };
+
+        var json = ToolLoopCircuitBreaker.SerializeArguments(args);
+        Assert.Contains("\"elem\":{\"inner\":\"value\"}", json);
+        Assert.Contains("\"flag\":false", json);
+        Assert.Contains("\"pi\":3.14159", json);
+    }
 }
+

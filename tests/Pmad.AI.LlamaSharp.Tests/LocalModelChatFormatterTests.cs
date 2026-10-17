@@ -658,4 +658,45 @@ public class LocalModelChatFormatterTests
         Assert.DoesNotContain("Action:", text);
         Assert.Contains("I will search now.", text);
     }
+
+    [Fact]
+    public void ParseAssistantResponse_WithStrictMode_RejectsReActActionSyntax()
+    {
+        var raw = "I will search now.\nAction: web_search\nAction Input: {\"query\":\"csharp 10\"}\nDone.";
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw, dialect: null, normalizer: null, enableHealing: false);
+
+        Assert.Empty(msg.Contents.OfType<FunctionCallContent>());
+        var text = msg.Contents.OfType<TextContent>().Single().Text;
+        Assert.Contains("Action: web_search", text);
+    }
+
+    [Fact]
+    public void ParseAssistantResponse_WithStrictMode_RejectsMarkdownFencesFallback()
+    {
+        var raw = "```json\n{\"name\":\"web_search\",\"arguments\":{\"query\":\"csharp 10\"}}\n```";
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw, dialect: null, normalizer: null, enableHealing: false);
+
+        Assert.Empty(msg.Contents.OfType<FunctionCallContent>());
+    }
+
+    [Fact]
+    public void ParseAssistantResponse_WithStrictMode_RejectsTrailingCommaMalformedJson()
+    {
+        var raw = "<tool_call>{\"name\":\"web_search\",\"arguments\":{\"query\":\"test\",}}</tool_call>";
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw, dialect: null, normalizer: null, enableHealing: false);
+
+        Assert.Empty(msg.Contents.OfType<FunctionCallContent>());
+    }
+
+    [Fact]
+    public void ParseAssistantResponse_WithStrictMode_AcceptsValidXmlToolCall()
+    {
+        var raw = "<tool_call>{\"name\":\"web_search\",\"arguments\":{\"query\":\"test\"}}</tool_call>";
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw, dialect: null, normalizer: null, enableHealing: false);
+
+        var call = Assert.Single(msg.Contents.OfType<FunctionCallContent>());
+        Assert.Equal("web_search", call.Name);
+        Assert.Equal("test", call.Arguments?["query"]);
+    }
 }
+

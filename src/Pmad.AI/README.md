@@ -22,9 +22,12 @@ Targeting `.NET 10.0` with `<IsAotCompatible>true</IsAotCompatible>`, `Pmad.AI` 
     - `FullBuffer`: buffers the entire streaming response before emission.
     - `Disabled`: passes streaming tokens through untouched.
 
-- **Tool Loop Circuit Breaker (`ToolLoopCircuitBreaker`)**:
-  - $N$-gram streaming repetition scanner to halt degenerate runaway loops ($\le 48$ characters before trip).
-  - Tool invocation ping-pong detector with recursive, reflection-free JSON argument canonicalization and hash tracking on unchanged workspace state.
+- **Tool Loop Circuit Breaker (`ToolLoopCircuitBreaker` & `ToolLoopCircuitBreakerChatClient`)**:
+  - Seamless pipeline middleware integration via `.UseToolLoopCircuitBreaker(breaker)` on `ChatClientBuilder`.
+  - Non-streaming protection: intercepts tool calls in `GetResponseAsync`, tracks invocations on unchanged state, and replaces infinite ping-pong loops with diagnostic circuit-breaker messages (`[Circuit Breaker Tripped] ...`).
+  - Streaming protection: $N$-gram streaming repetition scanner in `GetStreamingResponseAsync` (and manual `DetectStreamingRepetition`) to halt degenerate runaway loops ($\le 48$ characters before trip), gracefully terminating the stream with a diagnostic stop reason.
+  - Multi-tool alternating cycle detection (detects $A \to B \to A \to B$ ping-pong patterns across tool history).
+  - Native AOT trim-safe argument serialization (`EvaluateToolInvocation(name, dictionary)` and `SerializeArguments`) with recursive, reflection-free JSON canonicalization.
 
 - **Shell Security Validation (`ReadOnlyCommandValidator`)**:
   - Multi-dialect shell security validator supporting `Bash` and `PowerShell`.
@@ -73,10 +76,10 @@ dotnet add package Pmad.AI
 
 | Namespace | Responsibility | Primary Types |
 | :--- | :--- | :--- |
-| **`Pmad.AI`** | Root pipeline registration & middleware extensions | `UseToolCallHealing`, `UseThinkingTraceCompaction`, `UseToolResultCompaction`, `UseLenientToolDispatch`, `UseVerbatimTranscript` |
+| **`Pmad.AI`** | Root pipeline registration & middleware extensions | `UseToolCallHealing`, `UseToolLoopCircuitBreaker`, `UseThinkingTraceCompaction`, `UseToolResultCompaction`, `UseLenientToolDispatch`, `UseVerbatimTranscript` |
 | **`Pmad.AI.Tools`** | Tool dispatching, aliasing, translations, and attributes | `LenientToolDispatcher`, `ToolMapping`, `ToolTranslation`, `[ToolAlias]`, `[ToolParameterAlias]`, `[ToolTranslation]` |
 | **`Pmad.AI.Healing`** | Payload healing and protocol repair for local/open-weights models | `ToolCallHealingTransform`, `ToolCallHealingChatClient`, `StreamingHealingMode` |
-| **`Pmad.AI.Guardrails`** | Execution loop breaker and shell security validation | `ToolLoopCircuitBreaker`, `ReadOnlyCommandValidator`, `ShellDialect` |
+| **`Pmad.AI.Guardrails`** | Execution loop breaker and shell security validation | `ToolLoopCircuitBreaker`, `ToolLoopCircuitBreakerChatClient`, `ReadOnlyCommandValidator`, `ShellDialect` |
 | **`Pmad.AI.Compaction`** | Context window history compaction and speculative summarization | `ToolResultCompactor`, `ThinkingTraceCompactionChatClient`, `ISpeculativeSummarizer` |
 | **`Pmad.AI.Transcripts`** | Audit-grade Markdown transcript logging | `VerbatimTranscriptChatClient`, `VerbatimTranscriptOptions` |
 | **`Pmad.AI.Tokens`** | Fast zero-allocation token estimation | `HeuristicTokenEstimator` |
@@ -102,14 +105,16 @@ var client = new ChatClientBuilder(innerChatClient)
         options.SessionTitle = "Feature Implementation Agent";
         options.FlushAfterEachTurn = true;
     })
-    // 2. Reasoning trace compaction (keeps last 5 turns verbatim)
+    // 2. Loop circuit breaker (halts runaway token loops and tool ping-pong)
+    .UseToolLoopCircuitBreaker()
+    // 3. Reasoning trace compaction (keeps last 5 turns verbatim)
     .UseThinkingTraceCompaction(options =>
     {
         options.KeepVerbatimCount = 5;
         options.FallbackCharacterLimit = 120;
         options.MutateInPlace = false;
     })
-    // 3. Bulky tool result compaction (keeps last 10 turns verbatim)
+    // 4. Bulky tool result compaction (keeps last 10 turns verbatim)
     .UseToolResultCompaction(options =>
     {
         options.KeepVerbatimCount = 10;
@@ -118,9 +123,9 @@ var client = new ChatClientBuilder(innerChatClient)
         options.FallbackSuffixLength = 250;
         options.MutateInPlace = false;
     })
-    // 4. Lenient tool dispatching (alias resolution & parameter coercion)
+    // 5. Lenient tool dispatching (alias resolution & parameter coercion)
     .UseLenientToolDispatch(dispatcher)
-    // 5. Automatic healing of malformed tool calls & pseudo-tags
+    // 6. Automatic healing of malformed tool calls & pseudo-tags
     .UseToolCallHealing(options =>
     {
         options.StreamingMode = StreamingHealingMode.PrefixTriggered;
@@ -176,9 +181,42 @@ var result = await dispatcher.ExecuteAsync("get_file", new Dictionary<string, ob
 
 ---
 
-### 3. Tool Loop Circuit Breaker (`ToolLoopCircuitBreaker`)
+### 3. Tool Loop Circuit Breaker (`ToolLoopCircuitBreaker` & `UseToolLoopCircuitBreaker`)
 
-Detect runaway token repetitions during streaming and infinite tool invocation ping-pong:
+Detect and halt degenerate token loops during streaming and infinite tool invocation ping-pong:
+
+#### Pipeline Middleware (`UseToolLoopCircuitBreaker`)
+
+Register `ToolLoopCircuitBreakerChatClient` middleware directly with `ChatClientBuilder`:
+
+```csharp
+using Microsoft.Extensions.AI;
+using Pmad.AI;
+using Pmad.AI.Guardrails;
+
+var client = new ChatClientBuilder(innerChatClient)
+    // Intercepts repetitive tool calls and streaming loops automatically
+    .UseToolLoopCircuitBreaker(new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
+    {
+        PingPongThreshold = 2,
+        NgramMinLength = 16,
+        NgramMinOccurrences = 3
+    }))
+    .Build();
+
+// 1. Non-streaming (GetResponseAsync):
+// If the model invokes identical tools/arguments on unchanged state consecutively,
+// the call is intercepted and replaced with a diagnostic circuit-breaker message:
+// "[Circuit Breaker Tripped] Duplicate tool invocation detected: 'read_file'..."
+
+// 2. Streaming (GetStreamingResponseAsync):
+// If repeating token n-grams are detected, the stream emits a diagnostic stop update
+// with FinishReason = ChatFinishReason.Stop and aborts early, saving GPU/CPU cycles.
+```
+
+#### Standalone & Programmatic Evaluation
+
+`ToolLoopCircuitBreaker` can also be evaluated directly for custom agent loops:
 
 ```csharp
 using Pmad.AI.Guardrails;
@@ -191,20 +229,21 @@ var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
     NgramMinOccurrences = 3
 });
 
-// 1. Streaming repetition inspection (e.g. within streaming handler)
+// 1. Tool invocation evaluation (supports dictionaries or raw JSON strings)
+var args = new Dictionary<string, object?> { ["path"] = "src/App.cs" };
+var invocationCheck = breaker.EvaluateToolInvocation("read_file", args, stateSignature: "git_rev_123");
+if (invocationCheck.IsLoopDetected)
+{
+    // Tripped: inject corrective instruction instead of spinning
+    Console.WriteLine($"Loop tripped: {invocationCheck.DiagnosticMessage}");
+}
+
+// 2. Streaming repetition inspection over ReadOnlySpan<char>
 var streamCheck = breaker.DetectStreamingRepetition(accumulatedOutputSpan);
 if (streamCheck.IsLoopDetected)
 {
     // Abort streaming generation early
     cancellationSource.Cancel();
-}
-
-// 2. Tool invocation ping-pong check
-var invocationCheck = breaker.EvaluateToolInvocation("read_file", "{\"path\": \"src/App.cs\"}");
-if (invocationCheck.IsLoopDetected)
-{
-    // Tripped: inject corrective instruction instead of spinning
-    Console.WriteLine($"Loop tripped: {invocationCheck.DiagnosticMessage}");
 }
 ```
 

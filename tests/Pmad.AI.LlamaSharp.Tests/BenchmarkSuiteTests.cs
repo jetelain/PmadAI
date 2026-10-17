@@ -65,7 +65,7 @@ public class BenchmarkSuiteTests
         Assert.Contains(scenarios, s => s.Id == "direct");
         Assert.Contains(scenarios, s => s.Id == "compaction");
         Assert.Contains(scenarios, s => s.Id == "healing");
-        Assert.Contains(scenarios, s => s.Id == "circuit-breaker");
+        Assert.Contains(scenarios, s => s.Id == "runaway-loop");
 
         foreach (var sc in scenarios)
         {
@@ -83,7 +83,8 @@ public class BenchmarkSuiteTests
     [InlineData("direct", "direct")]
     [InlineData("compaction", "compaction")]
     [InlineData("healing", "healing")]
-    [InlineData("circuit", "circuit-breaker")]
+    [InlineData("runaway", "runaway-loop")]
+    [InlineData("loop", "runaway-loop")]
     [InlineData("all", 7)]
     public void BenchmarkScenario_FilterScenarios_FiltersCorrectly(string filter, object expected)
     {
@@ -103,14 +104,18 @@ public class BenchmarkSuiteTests
     public async Task BenchmarkRunner_WithMockClient_RunsAllScenariosSuccessfully()
     {
         using var mockClient = new MockBenchmarkChatClient("mock-test-client", simulatedDelayMs: 0);
+        var pipeline = BenchmarkPipelineBuilder.BuildPipeline(mockClient, OptimizationConfig.All);
         var scenarios = BenchmarkScenario.GetAllScenarios();
-        var runner = new BenchmarkRunner(mockClient, "mock-test-client", verbose: false);
+        var runner = new BenchmarkRunner(pipeline, "mock-test-client", verbose: false);
 
         var summary = await runner.RunAllAsync(scenarios);
 
         Assert.Equal(7, summary.ScenariosRun);
+        var failures = string.Join("\n", summary.ScenarioResults
+            .Where(r => r.Status != BenchmarkStatus.Passed)
+            .Select(r => $"{r.ScenarioId}: {r.ErrorMessage ?? string.Join("; ", r.TurnResults.Where(t => t.Status != BenchmarkStatus.Passed).Select(t => $"Turn {t.TurnIndex}: {t.ValidationMessage}"))}"));
+        Assert.True(summary.ScenariosFailed == 0, $"Failures:\n{failures}");
         Assert.Equal(7, summary.ScenariosPassed);
-        Assert.Equal(0, summary.ScenariosFailed);
         Assert.Equal(100.0, summary.PassRatePercentage);
         Assert.True(summary.TotalToolCalls >= 5);
         Assert.True(summary.TotalOutputTokens > 0);
@@ -125,6 +130,48 @@ public class BenchmarkSuiteTests
             Assert.True(scResult.PeakMemoryMb > 0);
             Assert.NotEmpty(scResult.TurnResults);
         }
+    }
+
+    [Theory]
+    [InlineData("monolith-migration-50", 50)]
+    [InlineData("grand-crucible-100", 100)]
+    public async Task BenchmarkRunner_LongHorizonScenarios_PassWithMockUnderAllConfigs(string id, int turns)
+    {
+        var scenario = Assert.Single(BenchmarkScenario.FilterScenarios(id));
+        Assert.Equal(turns, scenario.Turns.Count);
+        Assert.Contains(scenario.Turns, t => t.IsRecallProbe);
+
+        foreach (var config in OptimizationConfig.AllConfigs)
+        {
+            using var mockClient = new MockBenchmarkChatClient("mock-test-client", simulatedDelayMs: 0);
+            var pipeline = BenchmarkPipelineBuilder.BuildPipeline(mockClient, config);
+            var runner = new BenchmarkRunner(pipeline, "mock-test-client", verbose: false);
+
+            var result = await runner.RunScenarioAsync(scenario);
+
+            Assert.True(result.Status == BenchmarkStatus.Passed && result.SemanticRecallPassed,
+                $"{id} failed under {config.Id}: {string.Join("; ", result.TurnResults.Where(t => t.Status != BenchmarkStatus.Passed).Select(t => t.ValidationMessage))}");
+        }
+    }
+
+    [Fact]
+    public void BenchmarkScenario_DefaultRunExcludesLongHorizonScenarios()
+    {
+        Assert.Equal(7, BenchmarkScenario.FilterScenarios("all").Count);
+        Assert.Equal(2, BenchmarkScenario.FilterScenarios("long").Count);
+    }
+
+    [Fact]
+    public async Task BenchmarkRunner_StrictBaseline_FailsHealingRecoveryScenario()
+    {
+        using var mockClient = new MockBenchmarkChatClient("mock-test-client", simulatedDelayMs: 0);
+        var pipeline = BenchmarkPipelineBuilder.BuildPipeline(mockClient, OptimizationConfig.Baseline);
+        var scenario = new ToolCallHealingRecoveryScenario();
+        var runner = new BenchmarkRunner(pipeline, "mock-test-client", verbose: false);
+
+        var result = await runner.RunScenarioAsync(scenario);
+
+        Assert.Equal(BenchmarkStatus.Failed, result.Status);
     }
 
     [Fact]

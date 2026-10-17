@@ -56,7 +56,9 @@ public sealed class AgentMultiTurnCompactionScenario : BenchmarkScenario
         {
             UserPrompt = "Please inspect src/AuthHandler.cs and tell me its structure.",
             ExpectedToolNames = ["read_file"],
-            ToolExecutor = call => "File src/AuthHandler.cs contains AuthHandler class with 50 methods.",
+            ToolExecutor = call =>
+                "// File: src/AuthHandler.cs\n// Namespace: Pmad.Security\n// Methods: 40 declared endpoints\n" +
+                string.Join("\n", Enumerable.Range(1, 40).Select(i => $"    public Task<AuthResult> ValidateSession_{i}Async(string token) => Task.FromResult(AuthResult.Success({i}));")),
             CustomValidator = ctx => ValidationResult.Success()
         });
 
@@ -65,7 +67,13 @@ public sealed class AgentMultiTurnCompactionScenario : BenchmarkScenario
         {
             UserPrompt = "Run the unit tests to see what is failing.",
             ExpectedToolNames = ["execute_tests"],
-            ToolExecutor = call => "Test run failed with ExitCode: 101, Reason: NullReferenceException in AuthHandler.cs:L42.",
+            ToolExecutor = call =>
+                "Test Run Failed: AuthIntegrationTestSuite\n" +
+                "ExitCode: 101\n" +
+                "Failure: NullReferenceException in AuthHandler.cs:L42 during token signature validation.\n" +
+                "Stack Trace: at Pmad.Security.AuthHandler.ValidateAsync(AuthContext ctx) in C:\\src\\AuthHandler.cs:line 42\n" +
+                "             at Pmad.Tests.AuthTests.TestInvalidToken() in C:\\tests\\AuthTests.cs:line 108\n" +
+                string.Join("\n", Enumerable.Range(1, 35).Select(i => $"[Passed] Pmad.Tests.AuthTests.TestValidScenario_{i} (duration: {i}ms)")),
             CustomValidator = ctx => ValidationResult.Success()
         });
 
@@ -77,7 +85,12 @@ public sealed class AgentMultiTurnCompactionScenario : BenchmarkScenario
             {
                 UserPrompt = $"Turn {turnNum}: Search for pattern 'TokenValidator_{turnNum}' in the codebase.",
                 ExpectedToolNames = ["search_code"],
-                ToolExecutor = call => $"Match found for TokenValidator_{turnNum} in Module{turnNum}.cs line {turnNum * 10}.",
+                ToolExecutor = call =>
+                    $"Search results for 'TokenValidator_{turnNum}' in repository:\n" +
+                    $"Match 1: src/Security/TokenValidator_{turnNum}.cs:10 -> public sealed class TokenValidator_{turnNum} : ITokenValidator\n" +
+                    $"Match 2: src/Security/TokenValidator_{turnNum}.cs:25 -> public bool Verify(ReadOnlySpan<byte> tokenBytes) => true;\n" +
+                    $"Match 3: tests/TokenValidator_{turnNum}Tests.cs:42 -> Assert.True(validator.Verify(sampleBytes));\n" +
+                    string.Join("\n", Enumerable.Range(1, 15).Select(idx => $"// Context line {idx}: Reference token payload verification pipeline buffer {turnNum}-{idx}")),
                 CustomValidator = ctx => ValidationResult.Success()
             });
         }
@@ -88,6 +101,7 @@ public sealed class AgentMultiTurnCompactionScenario : BenchmarkScenario
             UserPrompt = "Based on our initial test run in turn 2, what was the exact exit code and failure reason?",
             ExpectedToolNames = [],
             ToolExecutor = _ => null,
+            IsRecallProbe = true,
             CustomValidator = ctx =>
             {
                 var text = ctx.AssistantFinalText;

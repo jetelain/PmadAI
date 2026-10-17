@@ -11,7 +11,7 @@
 
 | Project | NuGet | Description |
 |:---|:---:|:---|
-| [**`Pmad.AI`**](src/Pmad.AI/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.svg)](https://www.nuget.org/packages/Pmad.AI) | Core agent utilities: protocol-level tool call healing (`ToolCallHealingChatClient`), history compaction (`ThinkingTraceCompactionChatClient`, `ToolResultCompactor`), loop circuit breaker (`ToolLoopCircuitBreaker`), shell security validator (`ReadOnlyCommandValidator`), verbatim audit transcripts (`VerbatimTranscriptChatClient`), declarative tool dispatching (`LenientToolDispatcher`), and token heuristics. Native AOT ready (`IsAotCompatible = true`). |
+| [**`Pmad.AI`**](src/Pmad.AI/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.svg)](https://www.nuget.org/packages/Pmad.AI) | Core agent utilities: protocol-level tool call healing (`ToolCallHealingChatClient`), history compaction (`ThinkingTraceCompactionChatClient`, `ToolResultCompactor`), loop circuit breaker (`ToolLoopCircuitBreaker`, `ToolLoopCircuitBreakerChatClient`), shell security validator (`ReadOnlyCommandValidator`), verbatim audit transcripts (`VerbatimTranscriptChatClient`), declarative tool dispatching (`LenientToolDispatcher`), and token heuristics. Native AOT ready (`IsAotCompatible = true`). |
 | [**`Pmad.AI.SourceGenerators`**](src/Pmad.AI.SourceGenerators) | *Analyzer* | Roslyn incremental source generator and analyzers emitting compile-time diagnostics (`PMAD001`-`PMAD003`) and automatic tool mapping registries from `[ToolAlias]` attributes. |
 | [**`Pmad.AI.LlamaSharp`**](src/Pmad.AI.LlamaSharp/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.LlamaSharp.svg)](https://www.nuget.org/packages/Pmad.AI.LlamaSharp) | High-performance in-process GGUF inference adapter implementing [`Microsoft.Extensions.AI.IChatClient`](https://learn.microsoft.com/dotnet/api/microsoft.extensions.ai.ichatclient) powered by [LLamaSharp](https://github.com/SciSharp/LLamaSharp) and [llama.cpp](https://github.com/ggerganov/llama.cpp). Includes the `LlamaSharpSpeculativeSummarizer` background CPU engine. |
 | [**`Pmad.AI.Benchmark`**](benchmarks/Pmad.AI.Benchmark) | *Tool* | Evaluation suite measuring tool calling accuracy, compaction efficiency, loop breaker trips, and inference tok/s, latency, RAM, and GPU VRAM across CPU and Vulkan backends. |
@@ -22,7 +22,7 @@
 
 - **Agent Utilities & Pipeline Middleware**: [`src/Pmad.AI/README.md`](src/Pmad.AI/README.md)
   - Resilient tool call healing (`PrefixTriggered` & `FullBuffer`)
-  - Loop circuit breaking (runaway streaming repetition & tool ping-pong)
+  - Loop circuit breaking (runaway streaming repetition & tool ping-pong via `UseToolLoopCircuitBreaker`)
   - Multi-dialect shell security validation (Bash & PowerShell default-deny policies)
   - Audit-grade verbatim Markdown transcript generation (`FlushAfterEachTurn`)
   - Conversation history compaction (reasoning traces and bulky tool outputs)
