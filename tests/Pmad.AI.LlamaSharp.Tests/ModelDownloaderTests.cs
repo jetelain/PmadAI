@@ -472,5 +472,197 @@ public class ModelDownloaderTests
             }
         }
     }
+
+    [Fact]
+    public async Task DownloadModelAsync_WithMtp_DownloadsBothModelAndMtp()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "test_download_" + Guid.NewGuid().ToString("N"));
+        var preset = LlamaModelPreset.Find("gemma-4-12b")!;
+        Assert.True(preset.HasMtp);
+
+        var modelData = Encoding.UTF8.GetBytes("MODEL_DATA");
+        var mmprojData = Encoding.UTF8.GetBytes("MMPROJ_DATA");
+        var mtpData = Encoding.UTF8.GetBytes("MTP_DATA");
+
+        var requestedUrls = new List<string>();
+
+        var handler = new MockHttpMessageHandler(req =>
+        {
+            var url = req.RequestUri?.ToString() ?? "";
+            requestedUrls.Add(url);
+
+            byte[] data;
+            if (url.Contains("mtp"))
+            {
+                data = mtpData;
+            }
+            else if (url.Contains("mmproj"))
+            {
+                data = mmprojData;
+            }
+            else
+            {
+                data = modelData;
+            }
+
+            if (req.Method == HttpMethod.Head)
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.OK);
+                response.Content = new ByteArrayContent([]);
+                response.Content.Headers.ContentLength = data.Length;
+                return response;
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(data)
+            };
+        });
+
+        using var client = new HttpClient(handler);
+        var downloader = new ModelDownloader(client);
+
+        try
+        {
+            var success = await downloader.DownloadModelAsync(
+                preset,
+                tempDir,
+                downloadVision: true,
+                downloadMtp: true);
+
+            Assert.True(success);
+
+            var targetModelFile = preset.GetLocalPath(tempDir);
+            var targetMmprojFile = preset.GetMmprojLocalPath(tempDir);
+            var targetMtpFile = preset.GetMtpLocalPath(tempDir);
+
+            Assert.True(File.Exists(targetModelFile));
+            Assert.NotNull(targetMmprojFile);
+            Assert.True(File.Exists(targetMmprojFile));
+            Assert.NotNull(targetMtpFile);
+            Assert.True(File.Exists(targetMtpFile));
+
+            Assert.Contains(requestedUrls, u => u == preset.DownloadUrl);
+            Assert.Contains(requestedUrls, u => u == preset.MmprojDownloadUrl);
+            Assert.Contains(requestedUrls, u => u == preset.MtpDownloadUrl);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task DownloadModelAsync_WithoutMtp_SkipsMtpDownload()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "test_download_" + Guid.NewGuid().ToString("N"));
+        var preset = LlamaModelPreset.Find("gemma-4-12b")!;
+        Assert.True(preset.HasMtp);
+
+        var modelData = Encoding.UTF8.GetBytes("MODEL_DATA");
+        var requestedUrls = new List<string>();
+
+        var handler = new MockHttpMessageHandler(req =>
+        {
+            var url = req.RequestUri?.ToString() ?? "";
+            requestedUrls.Add(url);
+
+            if (req.Method == HttpMethod.Head)
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.OK);
+                response.Content = new ByteArrayContent([]);
+                response.Content.Headers.ContentLength = modelData.Length;
+                return response;
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(modelData)
+            };
+        });
+
+        using var client = new HttpClient(handler);
+        var downloader = new ModelDownloader(client);
+
+        try
+        {
+            var success = await downloader.DownloadModelAsync(
+                preset,
+                tempDir,
+                downloadVision: false,
+                downloadMtp: false);
+
+            Assert.True(success);
+
+            var targetModelFile = preset.GetLocalPath(tempDir);
+            var targetMtpFile = preset.GetMtpLocalPath(tempDir);
+
+            Assert.True(File.Exists(targetModelFile));
+            Assert.NotNull(targetMtpFile);
+            Assert.False(File.Exists(targetMtpFile));
+
+            Assert.Contains(requestedUrls, u => u == preset.DownloadUrl);
+            Assert.DoesNotContain(requestedUrls, u => u == preset.MtpDownloadUrl);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task DownloadModelAsync_WhenMtpDownloadFails_Throws()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "test_download_" + Guid.NewGuid().ToString("N"));
+        var preset = LlamaModelPreset.Find("gemma-4-e2b")!;
+
+        var modelData = Encoding.UTF8.GetBytes("MODEL_DATA");
+
+        var handler = new MockHttpMessageHandler(req =>
+        {
+            var url = req.RequestUri?.ToString() ?? "";
+            if (url.Contains("mtp"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+
+            if (req.Method == HttpMethod.Head)
+            {
+                var res = new HttpResponseMessage(HttpStatusCode.OK);
+                res.Content = new ByteArrayContent([]);
+                res.Content.Headers.ContentLength = modelData.Length;
+                return res;
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(modelData)
+            };
+        });
+
+        using var client = new HttpClient(handler);
+        var downloader = new ModelDownloader(client);
+
+        try
+        {
+            await Assert.ThrowsAsync<HttpRequestException>(async () =>
+            {
+                await downloader.DownloadModelAsync(preset, tempDir, downloadVision: false, downloadMtp: true);
+            });
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
 }
 

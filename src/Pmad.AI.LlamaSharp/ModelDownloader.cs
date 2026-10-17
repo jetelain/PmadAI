@@ -72,11 +72,13 @@ public sealed class ModelDownloader
     /// <summary>
     /// Downloads a preset model into the specified models cache directory if not already present.
     /// Also downloads the companion vision projector (<c>mmproj-*.gguf</c>) when available and <paramref name="downloadVision"/> is true.
+    /// Also downloads the companion Multi-Token Prediction (MTP) draft model (<c>mtp-*.gguf</c>) when available and <paramref name="downloadMtp"/> is true.
     /// </summary>
     public async Task<bool> DownloadModelAsync(
         LlamaModelPreset preset,
         string destinationDir,
         bool downloadVision = true,
+        bool downloadMtp = true,
         Action<string>? statusLogger = null,
         IProgress<ModelDownloadProgress>? progress = null,
         CancellationToken ct = default)
@@ -99,8 +101,29 @@ public sealed class ModelDownloader
             if (!visionSuccess) return false;
         }
 
+        if (downloadMtp && preset.HasMtp && !string.IsNullOrEmpty(preset.MtpDownloadUrl))
+        {
+            var mtpTarget = preset.GetMtpLocalPath(destinationDir)!;
+            LogStatus($"Preparing MTP draft model for '{preset.Id}' from {preset.MtpDownloadUrl}...", statusLogger);
+            var mtpSuccess = await DownloadFileWithProgressAsync(preset.MtpDownloadUrl, mtpTarget, statusLogger, progress, ct).ConfigureAwait(false);
+            if (!mtpSuccess) return false;
+        }
+
         return true;
     }
+
+    /// <summary>
+    /// Downloads a preset model into the specified models cache directory if not already present.
+    /// Also downloads the companion vision projector (<c>mmproj-*.gguf</c>) when available and <paramref name="downloadVision"/> is true.
+    /// </summary>
+    public Task<bool> DownloadModelAsync(
+        LlamaModelPreset preset,
+        string destinationDir,
+        bool downloadVision,
+        Action<string>? statusLogger,
+        IProgress<ModelDownloadProgress>? progress = null,
+        CancellationToken ct = default)
+        => DownloadModelAsync(preset, destinationDir, downloadVision, downloadMtp: true, statusLogger, progress, ct);
 
     /// <summary>
     /// Streams a remote file to a local destination using a .part temporary file,

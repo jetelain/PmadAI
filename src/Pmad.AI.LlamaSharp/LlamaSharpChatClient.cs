@@ -208,14 +208,16 @@ public sealed class LlamaSharpChatClient : IChatClient
         LlamaSharpOptions? options = null,
         string? mmprojPath = null,
         string promptFormat = "chatml",
-        ILogger? logger = null)
+        ILogger? logger = null,
+        string? mtpPath = null)
     {
         return CreateFromFile(
             modelPath,
             options?.Dialect ?? (promptFormat != "chatml" ? ChatDialect.FromName(promptFormat) : ChatDialect.FromName(options?.PromptFormat ?? promptFormat)),
             options,
             mmprojPath,
-            logger);
+            logger,
+            mtpPath);
     }
 
     /// <summary>
@@ -238,7 +240,8 @@ public sealed class LlamaSharpChatClient : IChatClient
             options.Dialect ?? ChatDialect.FromName(options.PromptFormat),
             options,
             options.MmprojPath,
-            logger);
+            logger,
+            options.MtpPath);
     }
 
     /// <summary>
@@ -250,7 +253,8 @@ public sealed class LlamaSharpChatClient : IChatClient
         ChatDialect dialect,
         LlamaSharpOptions? options = null,
         string? mmprojPath = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        string? mtpPath = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modelPath);
         if (!File.Exists(modelPath))
@@ -259,6 +263,11 @@ public sealed class LlamaSharpChatClient : IChatClient
         }
 
         options ??= new LlamaSharpOptions();
+        if (!string.IsNullOrWhiteSpace(mtpPath))
+        {
+            options.MtpPath = mtpPath;
+        }
+
         var instanceLogger = logger
             ?? options.Logger
             ?? options.LoggerFactory?.CreateLogger<LlamaSharpChatClient>()
@@ -267,6 +276,12 @@ public sealed class LlamaSharpChatClient : IChatClient
         instanceLogger.LogInformation(
             "Loading GGUF model from '{ModelPath}' (ContextSize: {ContextSize}, GpuLayerCount: {GpuLayerCount})",
             modelPath, options.ContextSize, options.GpuLayerCount);
+
+        var effectiveMtpPath = options.MtpPath;
+        if (!string.IsNullOrWhiteSpace(effectiveMtpPath) && File.Exists(effectiveMtpPath))
+        {
+            instanceLogger.LogInformation("Multi-Token Prediction (MTP) draft model found at '{MtpPath}'", effectiveMtpPath);
+        }
 
         var modelParams = new ModelParams(modelPath)
         {
@@ -323,6 +338,11 @@ public sealed class LlamaSharpChatClient : IChatClient
     /// Gets the detected preset metadata for this model, or null if unrecognized or custom.
     /// </summary>
     public LlamaModelPreset? Preset => _preset;
+
+    /// <summary>
+    /// Gets the path to the companion Multi-Token Prediction (MTP) draft model, or null if not configured.
+    /// </summary>
+    public string? MtpPath => _options.MtpPath;
 
     /// <inheritdoc />
     public ChatClientMetadata Metadata => _metadata;

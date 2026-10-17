@@ -129,7 +129,8 @@ public static class Program
                     GpuLayerCount = plan.GpuLayers,
                     PromptFormat = preset.PromptFormat,
                     EnableReasoning = plan.EnableReasoning,
-                    ReasoningEffort = plan.ReasoningEffort
+                    ReasoningEffort = plan.ReasoningEffort,
+                    MtpPath = preset.GetMtpLocalPath(modelsDir)
                 };
 
                 using var client = LlamaSharpChatClient.CreateFromFile(

@@ -16,7 +16,8 @@ public sealed record LlamaModelPreset(
     IReadOnlyList<string>? Aliases = null,
     string? MmprojFileName = "mmproj-bf16.gguf",
     bool SupportsReasoning = false,
-    bool SupportsReasoningEffort = false
+    bool SupportsReasoningEffort = false,
+    string? MtpFileName = null
 )
 {
     /// <summary>
@@ -28,6 +29,11 @@ public sealed record LlamaModelPreset(
     /// Gets whether this preset has a companion multimodal projector (<c>mmproj-*.gguf</c>).
     /// </summary>
     public bool HasVision => !string.IsNullOrWhiteSpace(MmprojFileName);
+
+    /// <summary>
+    /// Gets whether this preset has a companion Multi-Token Prediction (MTP) draft model (<c>mtp-*.gguf</c>).
+    /// </summary>
+    public bool HasMtp => !string.IsNullOrWhiteSpace(MtpFileName);
 
     /// <summary>
     /// Base URL with trailing slash for downloading model artifacts.
@@ -45,6 +51,11 @@ public sealed record LlamaModelPreset(
     /// Full URL to download the companion vision projector, or null if vision is not supported.
     /// </summary>
     public string? MmprojDownloadUrl => HasVision ? $"{ResolvedBaseUrl}{MmprojFileName}" : null;
+
+    /// <summary>
+    /// Full URL to download the companion Multi-Token Prediction (MTP) draft model, or null if MTP is not supported.
+    /// </summary>
+    public string? MtpDownloadUrl => HasMtp ? $"{ResolvedBaseUrl}{MtpFileName}" : null;
 
     /// <summary>
     /// Collection of verified presets.
@@ -68,10 +79,22 @@ public sealed record LlamaModelPreset(
             Name: "Qwen 3.5 4B (Q4_K_XL)",
             FileName: "qwen3.5-4b-ud-q4_k_xl.gguf",
             ApproxSize: "~2.7 GB",
-            Description: "Balanced Qwen 3.5 4B instruct GGUF model with strong reasoning.",
+            Description: "Balanced Qwen 3.5 4B instruct GGUF model.",
             PromptFormat: "chatml",
             ContextLength: 49152,
             Aliases: ["qwen3.5-4b-gguf", "qwen3.5-4b-q4"],
+            SupportsReasoning: true,
+            SupportsReasoningEffort: false
+        ),
+        new(
+            Id: "qwen3.5-9b",
+            Name: "Qwen 3.5 9B (Q4_K_XL)",
+            FileName: "qwen3.5-9b-ud-q4_k_xl.gguf",
+            ApproxSize: "~5.6 GB",
+            Description: "High-capability Qwen 3.5 9B instruct GGUF model.",
+            PromptFormat: "chatml",
+            ContextLength: 49152,
+            Aliases: ["qwen3.5-9b-gguf", "qwen3.5-9b-q4", "qwen-9b", "qwen3.5-9b-it"],
             SupportsReasoning: true,
             SupportsReasoningEffort: false
         ),
@@ -85,19 +108,34 @@ public sealed record LlamaModelPreset(
             ContextLength: 49152,
             Aliases: ["gemma-4-e2b-gguf", "gemma-4-e2b-it", "gemma4-e2b", "gemma-4", "gemma-2b"],
             SupportsReasoning: true,
-            SupportsReasoningEffort: false
+            SupportsReasoningEffort: false,
+            MtpFileName: "mtp-gemma-4-e2b-it.gguf"
         ),
         new(
             Id: "gemma-4-e4b",
             Name: "Gemma 4 E4B (Q4_K_XL)",
             FileName: "gemma-4-e4b-it-ud-q4_k_xl.gguf",
             ApproxSize: "~4.8 GB",
-            Description: "Google Gemma 4 E4B instruct GGUF model for advanced generation.",
+            Description: "Google Gemma 4 E4B instruct GGUF model.",
             PromptFormat: "gemma4",
             ContextLength: 49152,
             Aliases: ["gemma-4-e4b-gguf", "gemma-4-e4b-it", "gemma4-e4b", "gemma-4b"],
             SupportsReasoning: true,
-            SupportsReasoningEffort: false
+            SupportsReasoningEffort: false,
+            MtpFileName: "mtp-gemma-4-e4b-it.gguf"
+        ),
+        new(
+            Id: "gemma-4-12b",
+            Name: "Gemma 4 12B (Q4_K_XL)",
+            FileName: "gemma-4-12b-it-ud-q4_k_xl.gguf",
+            ApproxSize: "~7.2 GB",
+            Description: "Google Gemma 4 12B instruct GGUF model.",
+            PromptFormat: "gemma4",
+            ContextLength: 49152,
+            Aliases: ["gemma-4-12b-gguf", "gemma-4-12b-it", "gemma4-12b", "gemma-12b"],
+            SupportsReasoning: true,
+            SupportsReasoningEffort: false,
+            MtpFileName: "mtp-gemma-4-12b-it.gguf"
         )
     ];
 
@@ -119,6 +157,7 @@ public sealed record LlamaModelPreset(
             p.Id.Equals(trimmed, StringComparison.OrdinalIgnoreCase) ||
             p.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase) ||
             p.FileName.Equals(trimmed, StringComparison.OrdinalIgnoreCase) ||
+            (p.MtpFileName != null && p.MtpFileName.Equals(trimmed, StringComparison.OrdinalIgnoreCase)) ||
             (p.Aliases != null && p.Aliases.Any(a => a.Equals(trimmed, StringComparison.OrdinalIgnoreCase))));
 
         if (direct != null) return direct;
@@ -127,12 +166,19 @@ public sealed record LlamaModelPreset(
             trimmed.Equals("qwen3.5", StringComparison.OrdinalIgnoreCase) ||
             trimmed.Equals("qwen3", StringComparison.OrdinalIgnoreCase))
         {
-            return Presets[0];
+            return Presets.FirstOrDefault(p => p.Id == "qwen3.5-2b") ?? Default;
         }
 
         if (trimmed.Equals("qwen3.5-4b", StringComparison.OrdinalIgnoreCase))
         {
-            return Presets[1];
+            return Presets.FirstOrDefault(p => p.Id == "qwen3.5-4b");
+        }
+
+        if (trimmed.Equals("qwen3.5-9b", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("qwen-9b", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("qwen3.5-9b-it", StringComparison.OrdinalIgnoreCase))
+        {
+            return Presets.FirstOrDefault(p => p.Id == "qwen3.5-9b");
         }
 
         if (trimmed.Equals("gemma-4-e2b", StringComparison.OrdinalIgnoreCase) ||
@@ -140,14 +186,21 @@ public sealed record LlamaModelPreset(
             trimmed.Equals("gemma4", StringComparison.OrdinalIgnoreCase) ||
             trimmed.Equals("gemma", StringComparison.OrdinalIgnoreCase))
         {
-            return Presets[2];
+            return Presets.FirstOrDefault(p => p.Id == "gemma-4-e2b");
         }
 
         if (trimmed.Equals("gemma-4-e4b", StringComparison.OrdinalIgnoreCase) ||
             trimmed.Equals("gemma4-e4b", StringComparison.OrdinalIgnoreCase) ||
             trimmed.Equals("gemma-4b", StringComparison.OrdinalIgnoreCase))
         {
-            return Presets[3];
+            return Presets.FirstOrDefault(p => p.Id == "gemma-4-e4b");
+        }
+
+        if (trimmed.Equals("gemma-4-12b", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("gemma4-12b", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("gemma-12b", StringComparison.OrdinalIgnoreCase))
+        {
+            return Presets.FirstOrDefault(p => p.Id == "gemma-4-12b");
         }
 
         if (trimmed.StartsWith("qwen", StringComparison.OrdinalIgnoreCase))
@@ -168,4 +221,16 @@ public sealed record LlamaModelPreset(
     /// </summary>
     public string? GetMmprojLocalPath(string baseModelsDir) =>
         HasVision ? Path.Combine(baseModelsDir, $"{Id}-{MmprojFileName}") : null;
+
+    /// <summary>
+    /// Returns the target local Multi-Token Prediction (MTP) draft model file path under the base models cache directory, or null if MTP is not supported.
+    /// </summary>
+    public string? GetMtpLocalPath(string baseModelsDir)
+    {
+        if (!HasMtp) return null;
+        var fileName = MtpFileName!.StartsWith("mtp-", StringComparison.OrdinalIgnoreCase)
+            ? MtpFileName
+            : $"{Id}-{MtpFileName}";
+        return Path.Combine(baseModelsDir, fileName);
+    }
 }

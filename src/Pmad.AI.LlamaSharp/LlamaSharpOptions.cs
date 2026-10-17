@@ -31,6 +31,11 @@ public sealed class LlamaSharpOptions
     public string? MmprojPath { get; set; }
 
     /// <summary>
+    /// Explicit absolute path to a Multi-Token Prediction (MTP) draft model (<c>mtp-*.gguf</c>) file for speculative decoding acceleration.
+    /// </summary>
+    public string? MtpPath { get; set; }
+
+    /// <summary>
     /// Context window size (in tokens) to allocate for model execution.
     /// Default is 49152 tokens (48k), supporting long-context agent scenarios.
     /// </summary>

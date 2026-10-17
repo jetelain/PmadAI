@@ -308,22 +308,26 @@ summarizer.EvictSession(sessionId);
 
 The library includes verified presets with tested prompt templates, reasoning capabilities, and context configurations:
 
-| Preset ID | Aliases | Model Name | Format | Context Size | Approx Size | Vision | Reasoning | Effort Tuning |
-|:---|:---|:---|:---|:---:|:---:|:---:|:---:|:---:|
-| `qwen3.5-2b` *(Default)* | `qwen3.5`, `qwen3.5-2b-gguf` | Qwen 3.5 2B (Q4_K_XL) | ChatML | 48k | ~1.2 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
-| `qwen3.5-4b` | `qwen3.5-4b-gguf`, `qwen3.5-4b-q4` | Qwen 3.5 4B (Q4_K_XL) | ChatML | 48k | ~2.7 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
-| `gemma-4-e2b` | `gemma4-e2b`, `gemma-4-e2b-it` | Gemma 4 E2B (Q4_K_XL) | Gemma 4 | 48k | ~3.0 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
-| `gemma-4-e4b` | `gemma4-e4b`, `gemma-4-e4b-it` | Gemma 4 E4B (Q4_K_XL) | Gemma 4 | 48k | ~4.8 GB | Yes (`mmproj-bf16`) | Yes | No (Binary toggle) |
+| Preset ID | Aliases | Model Name | Format | Context Size | Approx Size | Vision | MTP Draft Model | Reasoning | Effort Tuning |
+|:---|:---|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
+| `qwen3.5-2b` *(Default)* | `qwen3.5`, `qwen3.5-2b-gguf` | Qwen 3.5 2B (Q4_K_XL) | ChatML | 48k | ~1.2 GB | Yes (`mmproj-bf16`) | No | Yes | No (Binary toggle) |
+| `qwen3.5-4b` | `qwen3.5-4b-gguf`, `qwen3.5-4b-q4` | Qwen 3.5 4B (Q4_K_XL) | ChatML | 48k | ~2.7 GB | Yes (`mmproj-bf16`) | No | Yes | No (Binary toggle) |
+| `qwen3.5-9b` | `qwen-9b`, `qwen3.5-9b-gguf` | Qwen 3.5 9B (Q4_K_XL) | ChatML | 48k | ~5.6 GB | Yes (`mmproj-bf16`) | No | Yes | No (Binary toggle) |
+| `gemma-4-e2b` | `gemma4-e2b`, `gemma-4-e2b-it` | Gemma 4 E2B (Q4_K_XL) | Gemma 4 | 48k | ~3.0 GB | Yes (`mmproj-bf16`) | Yes (`mtp-gemma-4-e2b-it`) | Yes | No (Binary toggle) |
+| `gemma-4-e4b` | `gemma4-e4b`, `gemma-4-e4b-it` | Gemma 4 E4B (Q4_K_XL) | Gemma 4 | 48k | ~4.8 GB | Yes (`mmproj-bf16`) | Yes (`mtp-gemma-4-e4b-it`) | Yes | No (Binary toggle) |
+| `gemma-4-12b` | `gemma4-12b`, `gemma-4-12b-it` | Gemma 4 12B (Q4_K_XL) | Gemma 4 | 48k | ~7.2 GB | Yes (`mmproj-bf16`) | Yes (`mtp-gemma-4-12b-it`) | Yes | No (Binary toggle) |
 
 ### Recommended Models by Target Platform
 
-Based on tool calling, reasoning, and hardware acceleration evaluations (see full [Benchmark Report](../../docs/benchmark.md) and [Transcript](../../docs/transcript.md)):
+Based on tool calling, reasoning, and hardware acceleration evaluations:
 
-| Target Platform | Recommended Model | Backend | Reasoning | Pass Rate | Memory Footprint | Avg Speed / Duration | Key Benefit |
-|---|---|---|---|---|---|---|---|
-| **Tablet (Android)** | **Gemma 4 E2B (Q4_K_XL)** | Vulkan (or CPU) | **Enabled** | **100%** | ~1.8 – 1.9 GB RAM (~4.4 GB VRAM) | **154 tok/s (GPU)** / 24.6 tok/s (CPU) | Fits mobile RAM limits, no token runaway, fast & reliable |
-| **Desktop (Fast / Snappy)** | **Gemma 4 E4B (Q4_K_XL)** | Vulkan | **Enabled** | **100%** | 3.3 GB RAM / 6.1 GB VRAM | **100 tok/s** (3.88s total) | 100% pass rate across all tests, zero reasoning token bloat |
-| **Desktop (Deep Reasoning)** | **Qwen 3.5 4B (Q4_K_XL)** | Vulkan | **Enabled** | **100%** | 3.0 GB RAM / 5.65 GB VRAM | **135 tok/s** (11.38s total) | Thorough chain-of-thought for complex multi-turn logic |
+| Target Platform | Recommended Model | Backend | Reasoning | Pass Rate | Memory Footprint | Key Benefit |
+|---|---|---|---|---|---|---|
+| **Tablet (Android)** | **Gemma 4 E2B (Q4_K_XL)** | Vulkan (or CPU) | **Enabled** | **100%** | ~1.8 – 1.9 GB RAM (~4.4 GB VRAM) | Fits mobile RAM limits, no token runaway, fast & reliable |
+| **Desktop (Fast / Snappy)** | **Gemma 4 E4B (Q4_K_XL)** | Vulkan | **Enabled** | **100%** | 3.3 GB RAM / 6.1 GB VRAM | 100% pass rate across all tests, zero reasoning token bloat |
+| **Desktop (Deep Reasoning)** | **Qwen 3.5 4B (Q4_K_XL)** | Vulkan | **Enabled** | **100%** | 3.0 GB RAM / 5.65 GB VRAM | Thorough chain-of-thought for complex multi-turn logic |
+| **8 GB GPU (Coding Agent - Qwen)** | **Qwen 3.5 9B (Q4_K_XL)** | Vulkan / CUDA | **Enabled** | High | ~5.6 GB VRAM | High-accuracy coding agent capable of fitting comfortably within 8 GB VRAM |
+| **8 GB GPU (Coding Agent - Gemma)** | **Gemma 4 12B (Q4_K_XL)** | Vulkan / CUDA | **Enabled** | High | ~7.2 GB VRAM | Advanced coding model with companion MTP speculative decoding drafter for 8 GB VRAM |
 
 ---
 
