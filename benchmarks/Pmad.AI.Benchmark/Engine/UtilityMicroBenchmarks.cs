@@ -56,7 +56,7 @@ public static class UtilityMicroBenchmarks
             try
             {
                 var healed = ToolCallHealingTransform.HealChatMessage(rawMsg);
-                var fcc = healed.Contents.OfType<FunctionCallContent>().FirstOrDefault();
+                var fcc = healed.SelectMany(m => m.Contents).OfType<FunctionCallContent>().FirstOrDefault();
                 if (fcc != null && fcc.Name == expectedTool && fcc.Arguments != null && fcc.Arguments.Count > 0)
                 {
                     healedSuccess++;

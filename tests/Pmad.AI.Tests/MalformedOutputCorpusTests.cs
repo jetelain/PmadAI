@@ -66,7 +66,7 @@ public class MalformedOutputCorpusTests
     public void MalformedCorpus_All100CasesRecoverSuccessfully(string caseName, ChatMessage rawMessage, string expectedToolName)
     {
         var healed = ToolCallHealingTransform.HealChatMessage(rawMessage);
-        var fcc = healed.Contents.OfType<FunctionCallContent>().FirstOrDefault();
+        var fcc = healed.SelectMany(m => m.Contents).OfType<FunctionCallContent>().FirstOrDefault();
 
         Assert.NotNull(fcc);
         Assert.Equal(expectedToolName, fcc.Name);

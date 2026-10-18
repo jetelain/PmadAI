@@ -203,6 +203,8 @@ public class CompactionTelemetryTests
         {
             KeepVerbatimCount = 1,
             FallbackCharacterLimit = 30,
+            FallbackPrefixLength = 15,
+            FallbackSuffixLength = 10,
             Summarizer = mockSummarizer.Object,
             Telemetry = telemetry
         });
@@ -220,6 +222,61 @@ public class CompactionTelemetryTests
         Assert.Equal(SummarizationTarget.ThinkingMonologue, thinkEvent.Target);
         Assert.True(thinkEvent.WasSpeculativeHit);
         Assert.Equal(CompactionMethods.SemanticSummary, thinkEvent.Method);
+    }
+
+    [Fact]
+    public async Task ThinkingTraceCompactor_EmitsCompactionEvents_OnPrefixSuffixTruncation()
+    {
+        var telemetry = new CompactionTelemetry();
+        var fake = new FakeChatClient((msgs, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "OK"))));
+        var client = new ThinkingTraceCompactionChatClient(fake, new ThinkingTraceCompactionOptions
+        {
+            KeepVerbatimCount = 1,
+            FallbackCharacterLimit = 100,
+            FallbackPrefixLength = 50,
+            FallbackSuffixLength = 20,
+            Telemetry = telemetry
+        });
+
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.Assistant, [new TextReasoningContent(new string('R', 300)), new TextContent("A")]),
+            new(ChatRole.Assistant, [new TextReasoningContent(new string('R', 300)), new TextContent("B")])
+        };
+
+        await client.GetResponseAsync(messages);
+
+        var thinkEvent = Assert.Single(telemetry.Events);
+        Assert.Equal(SummarizationTarget.ThinkingMonologue, thinkEvent.Target);
+        Assert.False(thinkEvent.WasSpeculativeHit);
+        Assert.Equal(CompactionMethods.PrefixSuffixTruncation, thinkEvent.Method);
+        Assert.Equal(300, thinkEvent.OriginalChars);
+        Assert.True(thinkEvent.CompactedChars < 300);
+    }
+
+    [Fact]
+    public async Task ThinkingTraceCompactor_DoesNotEmitEvents_WhenUnderFallbackCharacterLimit()
+    {
+        var telemetry = new CompactionTelemetry();
+        var fake = new FakeChatClient((msgs, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "OK"))));
+        var client = new ThinkingTraceCompactionChatClient(fake, new ThinkingTraceCompactionOptions
+        {
+            KeepVerbatimCount = 1,
+            FallbackCharacterLimit = 100,
+            FallbackPrefixLength = 50,
+            FallbackSuffixLength = 20,
+            Telemetry = telemetry
+        });
+
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.Assistant, [new TextReasoningContent("Short thinking trace"), new TextContent("A")]),
+            new(ChatRole.Assistant, [new TextReasoningContent("Recent monologue"), new TextContent("B")])
+        };
+
+        await client.GetResponseAsync(messages);
+
+        Assert.Equal(0, telemetry.TotalEvents);
     }
 
     [Fact]

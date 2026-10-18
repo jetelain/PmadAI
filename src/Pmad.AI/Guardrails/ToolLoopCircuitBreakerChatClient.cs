@@ -27,6 +27,8 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        InspectChatMessages(chatMessages);
+
         var response = await base.GetResponseAsync(chatMessages, options, cancellationToken);
         if (response?.Messages != null)
         {
@@ -60,6 +62,8 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
         ChatOptions? options = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        InspectChatMessages(chatMessages);
+
         var sb = new StringBuilder();
         await foreach (var update in base.GetStreamingResponseAsync(chatMessages, options, cancellationToken))
         {
@@ -85,6 +89,52 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
                 }
             }
             yield return update;
+        }
+    }
+
+    private void InspectChatMessages(IEnumerable<ChatMessage>? chatMessages)
+    {
+        if (chatMessages == null) return;
+
+        var messagesList = chatMessages as IList<ChatMessage> ?? chatMessages.ToList();
+
+        // 1. Inspect for new guiding prompt from user
+        var lastUserMsg = messagesList.LastOrDefault(m => m.Role == ChatRole.User);
+        if (lastUserMsg != null && !string.IsNullOrWhiteSpace(lastUserMsg.Text))
+        {
+            _breaker.RecordUserPrompt(lastUserMsg.Text);
+        }
+
+        // 2. Inspect for tool observation in message history (aggregate all trailing Tool messages)
+        var sb = new StringBuilder();
+        for (int i = messagesList.Count - 1; i >= 0; i--)
+        {
+            var msg = messagesList[i];
+            if (msg.Role == ChatRole.Tool)
+            {
+                if (msg.Contents != null)
+                {
+                    foreach (var content in msg.Contents)
+                    {
+                        if (content is FunctionResultContent frc && frc.Result != null)
+                        {
+                            sb.Append(frc.Result);
+                        }
+                        else if (content is TextContent tc && !string.IsNullOrEmpty(tc.Text))
+                        {
+                            sb.Append(tc.Text);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                break;
+            }
+        }
+        if (sb.Length > 0)
+        {
+            _breaker.RecordObservation(sb.ToString());
         }
     }
 

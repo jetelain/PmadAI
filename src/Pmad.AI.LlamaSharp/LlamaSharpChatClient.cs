@@ -478,13 +478,13 @@ public sealed class LlamaSharpChatClient : IChatClient
                     }
 
                     var text = responseBuilder.ToString().Trim();
-                    var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(text, _dialect, _options.FunctionCallNormalizer, _options.EnableBuiltInHealing);
+                    var assistantMessages = LocalModelChatFormatter.ParseAssistantMessages(text, _dialect, _options.FunctionCallNormalizer, _options.EnableBuiltInHealing);
 
                     LogOperation("Completed inference. Output tokens: {OutputTokens}, Total tokens: {TotalTokens}",
                         outputTokenCount, inputTokens + outputTokenCount);
 
                     ChatFinishReason finishReason;
-                    if (assistantMessage.Contents.OfType<FunctionCallContent>().Any())
+                    if (assistantMessages.Any(m => m.Contents.OfType<FunctionCallContent>().Any()))
                     {
                         finishReason = ChatFinishReason.ToolCalls;
                     }
@@ -497,7 +497,7 @@ public sealed class LlamaSharpChatClient : IChatClient
                         finishReason = ChatFinishReason.Stop;
                     }
 
-                    var chatResponse = new ChatResponse(new List<ChatMessage> { assistantMessage })
+                    var chatResponse = new ChatResponse(assistantMessages)
                     {
                         FinishReason = finishReason,
                         Usage = new UsageDetails
@@ -618,17 +618,20 @@ public sealed class LlamaSharpChatClient : IChatClient
 
             if (hasTools)
             {
-                var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(responseBuilder.ToString().Trim(), _dialect, _options.FunctionCallNormalizer, _options.EnableBuiltInHealing);
-                ChatFinishReason finishReason = assistantMessage.Contents.OfType<FunctionCallContent>().Any()
-                    ? ChatFinishReason.ToolCalls
-                    : (outputTokenCount >= maxOutputTokens ? ChatFinishReason.Length : ChatFinishReason.Stop);
-
-                yield return new ChatResponseUpdate
+                var assistantMessages = LocalModelChatFormatter.ParseAssistantMessages(responseBuilder.ToString().Trim(), _dialect, _options.FunctionCallNormalizer, _options.EnableBuiltInHealing);
+                foreach (var assistantMessage in assistantMessages)
                 {
-                    Role = ChatRole.Assistant,
-                    Contents = assistantMessage.Contents.ToList(),
-                    FinishReason = finishReason
-                };
+                    ChatFinishReason finishReason = assistantMessage.Contents.OfType<FunctionCallContent>().Any()
+                        ? ChatFinishReason.ToolCalls
+                        : (outputTokenCount >= maxOutputTokens ? ChatFinishReason.Length : ChatFinishReason.Stop);
+
+                    yield return new ChatResponseUpdate
+                    {
+                        Role = ChatRole.Assistant,
+                        Contents = assistantMessage.Contents.ToList(),
+                        FinishReason = finishReason
+                    };
+                }
             }
             else
             {

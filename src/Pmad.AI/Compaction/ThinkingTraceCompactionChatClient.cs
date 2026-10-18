@@ -4,113 +4,66 @@ using Microsoft.Extensions.AI;
 namespace Pmad.AI.Compaction;
 
 /// <summary>
-/// Configuration options for <see cref="ThinkingTraceCompactionChatClient"/>.
+/// Configuration options for <see cref="ThinkingTraceCompactor"/> and <see cref="ThinkingTraceCompactionChatClient"/>.
 /// </summary>
-public class ThinkingTraceCompactionOptions
+public class ThinkingTraceCompactionOptions : CompactionOptionsBase
 {
-    /// <summary>Number of recent assistant reasoning turns to retain verbatim. Default: 10.</summary>
-    public int KeepVerbatimCount { get; set; } = 10;
-
-    /// <summary>Maximum character length of the fallback deterministic reasoning stub. Default: 120.</summary>
-    public int FallbackCharacterLimit { get; set; } = 120;
-
-    /// <summary>Whether to truncate fallback text at the first newline if shorter than FallbackCharacterLimit. Default: true.</summary>
-    public bool FallbackTruncateAtFirstLine { get; set; } = true;
-
-    /// <summary>Format string for deterministic fallback stub. Default: "[Reasoned: {0}...]"</summary>
-    public string FallbackFormat { get; set; } = "[Reasoned: {0}...]";
-
-    /// <summary>
-    /// When true, modifies the passed ChatMessage list and instances in-place (zero-allocations).
-    /// When false (default), returns a shallow copy with modified messages, ensuring caller's
-    /// conversation history remains pristine and immutable.
-    /// </summary>
-    public bool MutateInPlace { get; set; } = false;
-
-    /// <summary>Optional background SLM summarizer.</summary>
-    public ISpeculativeSummarizer? Summarizer { get; set; }
-
-    /// <summary>Resolves the session id used to scope summaries. (default: ChatOptions.ConversationId, then "default").</summary>
-    public Func<ChatOptions?, string>? SessionIdResolver { get; set; }
-
-    /// <summary>Optional compaction telemetry instance to collect compaction events.</summary>
-    public CompactionTelemetry? Telemetry { get; set; }
-
-    /// <summary>Optional callback invoked whenever a thinking trace compaction event occurs.</summary>
-    public Action<CompactionEvent>? OnCompaction { get; set; }
+    public ThinkingTraceCompactionOptions()
+    {
+        KeepVerbatimCount = 10;
+    }
 }
 
 /// <summary>
-/// IChatClient middleware compacting historical <see cref="TextReasoningContent"/> outside the active turn window.
+/// Conversation history optimizer that trims verbose reasoning traces outside the active turn window.
 /// </summary>
-public class ThinkingTraceCompactionChatClient : DelegatingChatClient
+public class ThinkingTraceCompactor
 {
     private readonly ThinkingTraceCompactionOptions _options;
 
-    public ThinkingTraceCompactionChatClient(IChatClient innerClient, ThinkingTraceCompactionOptions? options = null)
-        : base(innerClient)
+    public ThinkingTraceCompactor(ThinkingTraceCompactionOptions? options = null)
     {
         _options = options ?? new ThinkingTraceCompactionOptions();
-    }
-
-    public override object? GetService(Type serviceType, object? serviceKey = null)
-    {
-        if (serviceType == typeof(ThinkingTraceCompactionChatClient)) return this;
-        if (serviceType == typeof(CompactionTelemetry) && _options.Telemetry != null) return _options.Telemetry;
-        return base.GetService(serviceType, serviceKey);
-    }
-
-    public override async Task<ChatResponse> GetResponseAsync(
-        IEnumerable<ChatMessage> chatMessages,
-        ChatOptions? options = null,
-        CancellationToken cancellationToken = default)
-    {
-        var sessionId = CompactionItemKeyResolver.ResolveSessionId(options, _options.SessionIdResolver);
-        var msgList = chatMessages as IList<ChatMessage> ?? chatMessages.ToList();
-
-        // Enqueue from original uncompacted messages before compaction
-        TriggerSpeculativeEnqueue(msgList, sessionId);
-
-        var effectiveMessages = CompactMessages(msgList, sessionId);
-
-        var response = await base.GetResponseAsync(effectiveMessages, options, cancellationToken);
-
-        if (response?.Messages != null)
+        if (_options.FallbackCharacterLimit < _options.FallbackPrefixLength + _options.FallbackSuffixLength)
         {
-            EnqueueResponseReasoning(response.Messages, sessionId);
-        }
-
-        return response!;
-    }
-
-    public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
-        IEnumerable<ChatMessage> chatMessages,
-        ChatOptions? options = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        var sessionId = CompactionItemKeyResolver.ResolveSessionId(options, _options.SessionIdResolver);
-        var msgList = chatMessages as IList<ChatMessage> ?? chatMessages.ToList();
-
-        // Enqueue from original uncompacted messages before compaction
-        TriggerSpeculativeEnqueue(msgList, sessionId);
-
-        var effectiveMessages = CompactMessages(msgList, sessionId);
-
-        await foreach (var update in base.GetStreamingResponseAsync(effectiveMessages, options, cancellationToken))
-        {
-            yield return update;
+            throw new ArgumentException($"FallbackCharacterLimit ({_options.FallbackCharacterLimit}) must be >= FallbackPrefixLength ({_options.FallbackPrefixLength}) + FallbackSuffixLength ({_options.FallbackSuffixLength}).");
         }
     }
 
-    private IEnumerable<ChatMessage> CompactMessages(IEnumerable<ChatMessage> messages, string sessionId)
+    public ThinkingTraceCompactor(
+        ISpeculativeSummarizer? summarizer,
+        int keepVerbatimCount = 10,
+        int fallbackCharacterLimit = 1750,
+        int fallbackPrefixLength = 1500,
+        int fallbackSuffixLength = 250)
     {
-        var msgList = messages as IList<ChatMessage> ?? messages.ToList();
+        if (fallbackCharacterLimit < fallbackPrefixLength + fallbackSuffixLength)
+        {
+            throw new ArgumentException($"fallbackCharacterLimit ({fallbackCharacterLimit}) must be >= fallbackPrefixLength ({fallbackPrefixLength}) + fallbackSuffixLength ({fallbackSuffixLength}).");
+        }
 
-        // 1. Identify assistant messages containing TextReasoningContent
+        _options = new ThinkingTraceCompactionOptions
+        {
+            Summarizer = summarizer,
+            KeepVerbatimCount = keepVerbatimCount,
+            FallbackPrefixLength = fallbackPrefixLength,
+            FallbackSuffixLength = fallbackSuffixLength,
+            FallbackCharacterLimit = fallbackCharacterLimit
+        };
+    }
+
+    /// <summary>
+    /// Compacts conversation history, pruning verbose reasoning traces outside the active turn window.
+    /// </summary>
+    public IList<ChatMessage> Compact(IList<ChatMessage> messages, string? sessionId = null)
+    {
+        var effectiveSessionId = sessionId ?? "default";
+
+        // Identify assistant messages containing TextReasoningContent
         var reasoningIndices = new List<int>();
-        for (int i = 0; i < msgList.Count; i++)
+        for (int i = 0; i < messages.Count; i++)
         {
-            var msg = msgList[i];
+            var msg = messages[i];
             if (msg.Role == ChatRole.Assistant && msg.Contents.OfType<TextReasoningContent>().Any())
             {
                 reasoningIndices.Add(i);
@@ -119,29 +72,28 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
 
         if (reasoningIndices.Count <= _options.KeepVerbatimCount)
         {
-            return msgList;
+            return messages;
         }
 
-        // Indices outside the protected verbatim window (oldest first)
         var toCompact = new HashSet<int>(reasoningIndices.Take(reasoningIndices.Count - _options.KeepVerbatimCount));
 
         if (_options.MutateInPlace)
         {
             foreach (var idx in toCompact)
             {
-                CompactMessageInPlace(msgList[idx], sessionId);
+                CompactMessageInPlace(messages[idx], effectiveSessionId);
             }
-            return msgList;
+            return messages;
         }
         else
         {
-            var result = new List<ChatMessage>(msgList.Count);
-            for (int i = 0; i < msgList.Count; i++)
+            var result = new List<ChatMessage>(messages.Count);
+            for (int i = 0; i < messages.Count; i++)
             {
-                var msg = msgList[i];
+                var msg = messages[i];
                 if (toCompact.Contains(i))
                 {
-                    result.Add(CloneAndCompactMessage(msg, sessionId));
+                    result.Add(CloneAndCompactMessage(msg, effectiveSessionId));
                 }
                 else
                 {
@@ -158,9 +110,11 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
         if (reasoningList.Count == 0) return;
 
         var rawReasoning = string.Concat(reasoningList.Select(r => r.Text));
+        if (string.IsNullOrEmpty(rawReasoning) || rawReasoning.Length <= _options.FallbackCharacterLimit) return;
+
         var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, SummarizationTarget.ThinkingMonologue, rawReasoning);
 
-        var compactedText = ResolveCompactedText(rawReasoning, sessionId, itemKey);
+        var compactedText = ResolveCompactedResult(rawReasoning, sessionId, itemKey);
 
         // Remove existing TextReasoningContent items
         for (int i = message.Contents.Count - 1; i >= 0; i--)
@@ -180,9 +134,11 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
         if (reasoningList.Count == 0) return message;
 
         var rawReasoning = string.Concat(reasoningList.Select(r => r.Text));
+        if (string.IsNullOrEmpty(rawReasoning) || rawReasoning.Length <= _options.FallbackCharacterLimit) return message;
+
         var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, SummarizationTarget.ThinkingMonologue, rawReasoning);
 
-        var compactedText = ResolveCompactedText(rawReasoning, sessionId, itemKey);
+        var compactedText = ResolveCompactedResult(rawReasoning, sessionId, itemKey);
 
         var newContents = new List<AIContent>(message.Contents.Count);
         newContents.Add(new TextReasoningContent(compactedText));
@@ -205,7 +161,7 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
         };
     }
 
-    private string ResolveCompactedText(string rawReasoning, string sessionId, string itemKey)
+    private string ResolveCompactedResult(string rawReasoning, string sessionId, string itemKey)
     {
         // Try speculative summary
         if (_options.Summarizer != null && _options.Summarizer.TryGetSummary(sessionId, itemKey, out var summary) && !string.IsNullOrWhiteSpace(summary))
@@ -220,25 +176,14 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
             return compacted;
         }
 
-        // Deterministic fallback stub
-        var firstLine = rawReasoning.Trim();
-        if (_options.FallbackTruncateAtFirstLine)
-        {
-            var newlineIdx = firstLine.IndexOfAny(['\r', '\n']);
-            if (newlineIdx >= 0)
-            {
-                firstLine = firstLine.Substring(0, newlineIdx).Trim();
-            }
-        }
+        // Deterministic prefix + truncation marker + suffix
+        var prefix = rawReasoning[.._options.FallbackPrefixLength];
+        var suffix = rawReasoning[^_options.FallbackSuffixLength..];
+        var truncatedChars = rawReasoning.Length - _options.FallbackPrefixLength - _options.FallbackSuffixLength;
+        var marker = string.Format(_options.FallbackTruncationMarker, truncatedChars);
+        var fallback = prefix + marker + suffix;
 
-        if (firstLine.Length > _options.FallbackCharacterLimit)
-        {
-            int maxChars = Math.Max(0, _options.FallbackCharacterLimit - 3);
-            firstLine = firstLine.Substring(0, maxChars) + "...";
-        }
-
-        var fallback = string.Format(_options.FallbackFormat, firstLine);
-        RecordCompactionEvent(sessionId, itemKey, rawReasoning.Length, fallback.Length, wasSpeculativeHit: false, CompactionMethods.DeterministicStub);
+        RecordCompactionEvent(sessionId, itemKey, rawReasoning.Length, fallback.Length, wasSpeculativeHit: false, CompactionMethods.PrefixSuffixTruncation);
         return fallback;
     }
 
@@ -257,6 +202,72 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
         _options.Telemetry?.Record(evt);
         _options.OnCompaction?.Invoke(evt);
     }
+}
+
+/// <summary>
+/// IChatClient middleware compacting historical <see cref="TextReasoningContent"/> outside the active turn window.
+/// </summary>
+public class ThinkingTraceCompactionChatClient : DelegatingChatClient
+{
+    private readonly ThinkingTraceCompactionOptions _options;
+    private readonly ThinkingTraceCompactor _compactor;
+
+    public ThinkingTraceCompactionChatClient(IChatClient innerClient, ThinkingTraceCompactionOptions? options = null)
+        : base(innerClient)
+    {
+        _options = options ?? new ThinkingTraceCompactionOptions();
+        _compactor = new ThinkingTraceCompactor(_options);
+    }
+
+    public override object? GetService(Type serviceType, object? serviceKey = null)
+    {
+        if (serviceType == typeof(ThinkingTraceCompactionChatClient)) return this;
+        if (serviceType == typeof(ThinkingTraceCompactor)) return _compactor;
+        if (serviceType == typeof(CompactionTelemetry) && _options.Telemetry != null) return _options.Telemetry;
+        return base.GetService(serviceType, serviceKey);
+    }
+
+    public override async Task<ChatResponse> GetResponseAsync(
+        IEnumerable<ChatMessage> chatMessages,
+        ChatOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        var sessionId = CompactionItemKeyResolver.ResolveSessionId(options, _options.SessionIdResolver);
+        var msgList = chatMessages as IList<ChatMessage> ?? chatMessages.ToList();
+
+        // Enqueue from original uncompacted messages before compaction
+        TriggerSpeculativeEnqueue(msgList, sessionId);
+
+        var effectiveMessages = _compactor.Compact(msgList, sessionId);
+
+        var response = await base.GetResponseAsync(effectiveMessages, options, cancellationToken);
+
+        if (response?.Messages != null)
+        {
+            EnqueueResponseReasoning(response.Messages, sessionId);
+        }
+
+        return response!;
+    }
+
+    public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+        IEnumerable<ChatMessage> chatMessages,
+        ChatOptions? options = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var sessionId = CompactionItemKeyResolver.ResolveSessionId(options, _options.SessionIdResolver);
+        var msgList = chatMessages as IList<ChatMessage> ?? chatMessages.ToList();
+
+        // Enqueue from original uncompacted messages before compaction
+        TriggerSpeculativeEnqueue(msgList, sessionId);
+
+        var effectiveMessages = _compactor.Compact(msgList, sessionId);
+
+        await foreach (var update in base.GetStreamingResponseAsync(effectiveMessages, options, cancellationToken))
+        {
+            yield return update;
+        }
+    }
 
     private void TriggerSpeculativeEnqueue(IList<ChatMessage> msgList, string sessionId)
     {
@@ -270,7 +281,7 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
         {
             var msg = reasoningMsgs[i];
             var raw = string.Concat(msg.Contents.OfType<TextReasoningContent>().Select(r => r.Text));
-            if (!string.IsNullOrEmpty(raw))
+            if (!string.IsNullOrEmpty(raw) && raw.Length > _options.FallbackCharacterLimit)
             {
                 var itemKey = CompactionItemKeyResolver.ResolveItemKey(msg, SummarizationTarget.ThinkingMonologue, raw);
                 _options.Summarizer.EnqueueSummarization(sessionId, itemKey, SummarizationTarget.ThinkingMonologue, raw);
@@ -285,7 +296,7 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
         foreach (var msg in messages.Where(m => m.Role == ChatRole.Assistant && m.Contents.OfType<TextReasoningContent>().Any()))
         {
             var raw = string.Concat(msg.Contents.OfType<TextReasoningContent>().Select(r => r.Text));
-            if (!string.IsNullOrEmpty(raw))
+            if (!string.IsNullOrEmpty(raw) && raw.Length > _options.FallbackCharacterLimit)
             {
                 var itemKey = CompactionItemKeyResolver.ResolveItemKey(msg, SummarizationTarget.ThinkingMonologue, raw);
                 _options.Summarizer.EnqueueSummarization(sessionId, itemKey, SummarizationTarget.ThinkingMonologue, raw);

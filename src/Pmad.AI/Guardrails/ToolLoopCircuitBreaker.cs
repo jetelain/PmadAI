@@ -63,6 +63,8 @@ public sealed class ToolLoopCircuitBreaker
     private string? _lastToolHash;
     private string? _lastStateSignature;
     private int _consecutiveIdenticalCount;
+    private string? _lastObservationHash;
+    private string? _lastUserPromptHash;
 
     public ToolLoopCircuitBreaker(ToolLoopCircuitBreakerOptions? options = null)
     {
@@ -94,6 +96,75 @@ public sealed class ToolLoopCircuitBreaker
         _lastToolHash = null;
         _lastStateSignature = null;
         _consecutiveIdenticalCount = 0;
+        _lastObservationHash = null;
+        _lastUserPromptHash = null;
+    }
+
+    /// <summary>
+    /// Resets the ping-pong counter and consecutive identical call tracking without clearing invocation history.
+    /// Call this when forward step progress is observed to ensure valid multi-step exploration is not prematurely terminated.
+    /// </summary>
+    public void ResetPingPong()
+    {
+        _consecutiveIdenticalCount = 0;
+        _lastToolHash = null;
+        _lastStateSignature = null;
+    }
+
+    /// <summary>
+    /// Records a tool execution observation or result. If the observation is distinct from the prior observation,
+    /// resets the ping-pong counter to signal that the agent has received new information and is making forward progress.
+    /// </summary>
+    public void RecordObservation(string? observation)
+    {
+        if (observation == null) return;
+        var obsHash = ComputeHash(observation);
+        if (_lastObservationHash == null || !string.Equals(_lastObservationHash, obsHash, StringComparison.Ordinal))
+        {
+            ResetPingPong();
+        }
+        _lastObservationHash = obsHash;
+    }
+
+    /// <summary>
+    /// Records a tool execution observation or result object.
+    /// </summary>
+    public void RecordObservation(object? observation)
+    {
+        if (observation == null) return;
+        RecordObservation(observation.ToString());
+    }
+
+    /// <summary>
+    /// Determines whether the prompt is an automated step continuation instruction rather than a new guiding user prompt.
+    /// </summary>
+    public static bool IsContinuationPrompt(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return true;
+        var trimmed = text.Trim();
+        return int.TryParse(trimmed, out _)
+            || trimmed.StartsWith("Proceed with step", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("Step ", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("Step", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("Turn ", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("Turn", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(trimmed, "continue", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(trimmed, "next", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Records a user prompt. If the prompt represents a new guiding instruction from the user (different from
+    /// the previous prompt), resets the ping-pong counter to allow fresh exploration.
+    /// </summary>
+    public void RecordUserPrompt(string? userPrompt)
+    {
+        if (string.IsNullOrWhiteSpace(userPrompt) || IsContinuationPrompt(userPrompt)) return;
+        var promptHash = ComputeHash(userPrompt.Trim());
+        if (_lastUserPromptHash != null && !string.Equals(_lastUserPromptHash, promptHash, StringComparison.Ordinal))
+        {
+            ResetPingPong();
+        }
+        _lastUserPromptHash = promptHash;
     }
 
     /// <summary>
@@ -143,6 +214,30 @@ public sealed class ToolLoopCircuitBreaker
     public LoopCheckResult EvaluateToolInvocation(string toolName, IDictionary<string, object?>? arguments, string? stateSignature = null)
     {
         return EvaluateToolInvocation(toolName, SerializeArguments(arguments), stateSignature);
+    }
+
+    /// <summary>
+    /// Records and evaluates a tool invocation with arguments supplied as a dictionary and an optional observation from the step.
+    /// </summary>
+    public LoopCheckResult EvaluateToolInvocation(string toolName, IDictionary<string, object?>? arguments, string? stateSignature, string? observation)
+    {
+        if (observation != null)
+        {
+            RecordObservation(observation);
+        }
+        return EvaluateToolInvocation(toolName, arguments, stateSignature);
+    }
+
+    /// <summary>
+    /// Records and evaluates a tool invocation with an optional observation from the step.
+    /// </summary>
+    public LoopCheckResult EvaluateToolInvocation(string toolName, string argumentsJson, string? stateSignature, string? observation)
+    {
+        if (observation != null)
+        {
+            RecordObservation(observation);
+        }
+        return EvaluateToolInvocation(toolName, argumentsJson, stateSignature);
     }
 
     /// <summary>

@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
+using Pmad.AI.Tools;
 
 namespace Pmad.AI.Healing;
 
@@ -37,6 +38,19 @@ public class ToolCallHealingOptions
 
     /// <summary>Optional logger.</summary>
     public ILogger? Logger { get; set; }
+
+    /// <summary>
+    /// Guardrail that requires candidate tool names to match one of the declared tools in <see cref="ChatOptions.Tools"/>
+    /// when tools are provided. Defaults to true.
+    /// Aware of <see cref="LenientToolDispatcher"/> alias resolution, namespace stripping, and translations.
+    /// </summary>
+    public bool EnforceAvailableToolsGuardrail { get; set; } = true;
+
+    /// <summary>
+    /// Optional <see cref="LenientToolDispatcher"/> used by <see cref="EnforceAvailableToolsGuardrail"/>
+    /// to resolve tool aliases, namespace prefixes, or virtual translation tools against declared tools.
+    /// </summary>
+    public LenientToolDispatcher? Dispatcher { get; set; }
 }
 
 /// <summary>
@@ -54,13 +68,37 @@ public class ToolCallHealingChatClient : DelegatingChatClient
         _options = options ?? new ToolCallHealingOptions();
     }
 
+    private ToolCallHealingOptions ResolveEffectiveOptions(ChatOptions? chatOptions)
+    {
+        if (_options.Dispatcher != null)
+        {
+            return _options;
+        }
+
+        var dispatcher = chatOptions.GetToolDispatcher() ?? (GetService(typeof(LenientToolDispatcher)) as LenientToolDispatcher);
+        if (dispatcher != null)
+        {
+            return new ToolCallHealingOptions
+            {
+                StreamingMode = _options.StreamingMode,
+                TagPrefixTriggers = _options.TagPrefixTriggers,
+                Logger = _options.Logger,
+                EnforceAvailableToolsGuardrail = _options.EnforceAvailableToolsGuardrail,
+                Dispatcher = dispatcher
+            };
+        }
+
+        return _options;
+    }
+
     public override async Task<ChatResponse> GetResponseAsync(
         IEnumerable<ChatMessage> chatMessages,
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        var effectiveOptions = ResolveEffectiveOptions(options);
         var response = await base.GetResponseAsync(chatMessages, options, cancellationToken);
-        return ToolCallHealingTransform.HealChatResponse(response, _options.Logger);
+        return ToolCallHealingTransform.HealChatResponse(response, effectiveOptions.Logger, effectiveOptions, options);
     }
 
     public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
@@ -68,7 +106,8 @@ public class ToolCallHealingChatClient : DelegatingChatClient
         ChatOptions? options = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        switch (_options.StreamingMode)
+        var effectiveOptions = ResolveEffectiveOptions(options);
+        switch (effectiveOptions.StreamingMode)
         {
             case StreamingHealingMode.Disabled:
                 await foreach (var update in base.GetStreamingResponseAsync(chatMessages, options, cancellationToken))
@@ -78,7 +117,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                 yield break;
 
             case StreamingHealingMode.FullBuffer:
-                await foreach (var update in StreamWithFullBufferAsync(chatMessages, options, cancellationToken))
+                await foreach (var update in StreamWithFullBufferAsync(chatMessages, options, effectiveOptions, cancellationToken))
                 {
                     yield return update;
                 }
@@ -86,7 +125,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
 
             case StreamingHealingMode.PrefixTriggered:
             default:
-                await foreach (var update in StreamWithPrefixTriggeredAsync(chatMessages, options, cancellationToken))
+                await foreach (var update in StreamWithPrefixTriggeredAsync(chatMessages, options, effectiveOptions, cancellationToken))
                 {
                     yield return update;
                 }
@@ -97,6 +136,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
     private async IAsyncEnumerable<ChatResponseUpdate> StreamWithFullBufferAsync(
         IEnumerable<ChatMessage> chatMessages,
         ChatOptions? options,
+        ToolCallHealingOptions optionsToUse,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         var textBuilder = new StringBuilder();
@@ -130,7 +170,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
         var extractedCalls = new List<FunctionCallContent>();
         if (!string.IsNullOrEmpty(fullText))
         {
-            ToolCallHealingTransform.TryExtractToolCalls(ref fullText, out extractedCalls, _options.Logger);
+            ToolCallHealingTransform.TryExtractToolCalls(ref fullText, out extractedCalls, optionsToUse.Logger, optionsToUse, options);
         }
 
         // Sanitize any existing FunctionCallContent items
@@ -143,7 +183,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                 if (arguments is { Count: 1 } && arguments.TryGetValue("input", out var inputVal) && inputVal is string strInput &&
                     (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith("```")))
                 {
-                    var parsed = ToolCallHealingTransform.ParseArgumentsJson(strInput, _options.Logger, fcc.Name);
+                    var parsed = ToolCallHealingTransform.ParseArgumentsJson(strInput, optionsToUse.Logger, fcc.Name);
                     if (parsed.Count > 0)
                     {
                         arguments = parsed;
@@ -190,11 +230,14 @@ public class ToolCallHealingChatClient : DelegatingChatClient
     private async IAsyncEnumerable<ChatResponseUpdate> StreamWithPrefixTriggeredAsync(
         IEnumerable<ChatMessage> chatMessages,
         ChatOptions? options,
+        ToolCallHealingOptions optionsToUse,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         var processor = new StreamPrefixProcessor(
-            _options.TagPrefixTriggers ?? ["<tool_call", "<function_call"],
-            _options.Logger);
+            optionsToUse.TagPrefixTriggers ?? ["<tool_call", "<function_call"],
+            optionsToUse.Logger,
+            optionsToUse,
+            options);
 
         var outputList = new List<ChatResponseUpdate>();
 
@@ -220,15 +263,19 @@ public class ToolCallHealingChatClient : DelegatingChatClient
     {
         private readonly string[] _triggers;
         private readonly ILogger? _logger;
+        private readonly ToolCallHealingOptions _options;
+        private readonly ChatOptions? _chatOptions;
         private string _heldPrefix = string.Empty;
         private bool _isBufferingTag;
         private string? _activeClosingTag;
         private readonly StringBuilder _tagBuffer = new();
 
-        public StreamPrefixProcessor(string[] triggers, ILogger? logger)
+        public StreamPrefixProcessor(string[] triggers, ILogger? logger, ToolCallHealingOptions options, ChatOptions? chatOptions)
         {
             _triggers = triggers;
             _logger = logger;
+            _options = options;
+            _chatOptions = chatOptions;
         }
 
         public void ProcessUpdate(ChatResponseUpdate update, List<ChatResponseUpdate> output)
@@ -272,7 +319,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                     _activeClosingTag = null;
 
                     var textRemaining = fullTag;
-                    if (ToolCallHealingTransform.TryExtractToolCalls(ref textRemaining, out var extracted, _logger) && extracted.Count > 0)
+                    if (ToolCallHealingTransform.TryExtractToolCalls(ref textRemaining, out var extracted, _logger, _options, _chatOptions) && extracted.Count > 0)
                     {
                         var promotedUpdate = new ChatResponseUpdate
                         {
@@ -373,7 +420,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                         _activeClosingTag = null;
 
                         var textRemaining = fullTag;
-                        if (ToolCallHealingTransform.TryExtractToolCalls(ref textRemaining, out var extracted, _logger) && extracted.Count > 0)
+                        if (ToolCallHealingTransform.TryExtractToolCalls(ref textRemaining, out var extracted, _logger, _options, _chatOptions) && extracted.Count > 0)
                         {
                             var promoted = new ChatResponseUpdate
                             {
@@ -432,7 +479,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
             {
                 var raw = _tagBuffer.ToString();
                 var textRemaining = raw;
-                if (ToolCallHealingTransform.TryExtractToolCalls(ref textRemaining, out var extracted, _logger) && extracted.Count > 0)
+                if (ToolCallHealingTransform.TryExtractToolCalls(ref textRemaining, out var extracted, _logger, _options, _chatOptions) && extracted.Count > 0)
                 {
                     var finalUpdate = new ChatResponseUpdate
                     {

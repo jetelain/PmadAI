@@ -1,7 +1,9 @@
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Moq;
 using Pmad.AI.Healing;
+using Pmad.AI.Tools;
 
 namespace Pmad.AI.Tests;
 
@@ -277,17 +279,16 @@ public class ToolCallHealingTests
             Microsoft.Extensions.AI.ChatRole.Assistant,
             "Let me check:\n<tool_call>{\"name\":\"calc\",\"arguments\":{\"expr\":\"2+2\"}}</tool_call>");
 
-        ToolCallHealingTransform.HealChatMessage(message);
+        var healed = ToolCallHealingTransform.HealChatMessage(message);
 
-        var calls = message.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().ToList();
+        Assert.Equal(2, healed.Count);
+        Assert.Equal("Let me check:", healed[0].Text);
+
+        var calls = healed[1].Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().ToList();
         Assert.Single(calls);
         Assert.Equal("calc", calls[0].Name);
         Assert.Equal("2+2", calls[0].Arguments?["expr"]);
         Assert.StartsWith("call_", calls[0].CallId);
-
-        var texts = message.Contents.OfType<Microsoft.Extensions.AI.TextContent>().ToList();
-        Assert.Single(texts);
-        Assert.Equal("Let me check:", texts[0].Text);
     }
 
     [Fact]
@@ -300,9 +301,10 @@ public class ToolCallHealingTests
                 arguments: new Dictionary<string, object?> { ["input"] = "```json\n{\"id\": 123,}\n```" })
         ]);
 
-        ToolCallHealingTransform.HealChatMessage(message);
+        var healed = ToolCallHealingTransform.HealChatMessage(message);
 
-        var call = message.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().Single();
+        Assert.Single(healed);
+        var call = healed[0].Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().Single();
         Assert.False(string.IsNullOrWhiteSpace(call.CallId));
         Assert.StartsWith("call_", call.CallId);
         Assert.Equal(123, call.Arguments?["id"]);
@@ -323,6 +325,236 @@ public class ToolCallHealingTests
         ToolCallHealingTransform.HealChatResponse(response);
 
         Assert.Equal(Microsoft.Extensions.AI.ChatFinishReason.ToolCalls, response.FinishReason);
-        Assert.Single(msg.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>());
+        Assert.Single(response.Messages.Single().Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>());
+    }
+
+    [Fact]
+    public void SplitChatMessage_WithProseAndToolCalls_SplitsInOrder()
+    {
+        var msg = new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.Assistant, [
+            new Microsoft.Extensions.AI.TextContent("Step 1: check files"),
+            new Microsoft.Extensions.AI.FunctionCallContent("c1", "list_dir", new Dictionary<string, object?> { ["path"] = "." }),
+            new Microsoft.Extensions.AI.TextContent("Waiting for results...")
+        ]);
+
+        var split = ToolCallHealingTransform.SplitChatMessage(msg);
+
+        Assert.Equal(3, split.Count);
+        Assert.Equal(Microsoft.Extensions.AI.ChatRole.Assistant, split[0].Role);
+        Assert.Equal("Step 1: check files", split[0].Text);
+        Assert.Empty(split[0].Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>());
+
+        Assert.Single(split[1].Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>());
+        Assert.Equal("list_dir", split[1].Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().First().Name);
+
+        Assert.Equal("Waiting for results...", split[2].Text);
+        Assert.Empty(split[2].Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>());
+    }
+
+    [Fact]
+    public void SplitChatMessage_WithOnlyProseOrOnlyToolCalls_DoesNotSplit()
+    {
+        var proseOnly = new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.Assistant, "Just talking.");
+        var splitProse = ToolCallHealingTransform.SplitChatMessage(proseOnly);
+        Assert.Single(splitProse);
+        Assert.Same(proseOnly, splitProse[0]);
+
+        var toolOnly = new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.Assistant, [
+            new Microsoft.Extensions.AI.FunctionCallContent("c1", "calc", new Dictionary<string, object?> { ["expr"] = "1+1" })
+        ]);
+        var splitTool = ToolCallHealingTransform.SplitChatMessage(toolOnly);
+        Assert.Single(splitTool);
+        Assert.Same(toolOnly, splitTool[0]);
+    }
+
+    [Fact]
+    public void HealChatMessage_WithBeforeAndAfterProse_ProducesThreeMessages()
+    {
+        var rawMsg = new Microsoft.Extensions.AI.ChatMessage(
+            Microsoft.Extensions.AI.ChatRole.Assistant,
+            "Calculating formula...\n<tool_call>{\"name\":\"calc\",\"arguments\":{\"expr\":\"42*2\"}}</tool_call>\nCalculation initiated.");
+
+        var split = ToolCallHealingTransform.HealChatMessage(rawMsg);
+
+        Assert.Equal(3, split.Count);
+        Assert.Equal("Calculating formula...", split[0].Text);
+        Assert.Equal("calc", split[1].Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().Single().Name);
+        Assert.Equal("Calculation initiated.", split[2].Text);
+    }
+
+    [Fact]
+    public void HealChatResponse_WithProseAndToolCalls_SplitsResponseMessagesLosslessly()
+    {
+        var msg1 = new Microsoft.Extensions.AI.ChatMessage(
+            Microsoft.Extensions.AI.ChatRole.Assistant,
+            "Let me check the status.\n<tool_call>{\"name\":\"status\",\"arguments\":{}}</tool_call>");
+
+        var response = new Microsoft.Extensions.AI.ChatResponse([msg1]);
+        ToolCallHealingTransform.HealChatResponse(response);
+
+        Assert.Equal(Microsoft.Extensions.AI.ChatFinishReason.ToolCalls, response.FinishReason);
+        Assert.Equal(2, response.Messages.Count);
+        Assert.Equal("Let me check the status.", response.Messages[0].Text);
+        Assert.Empty(response.Messages[0].Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>());
+
+        Assert.Single(response.Messages[1].Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>());
+        Assert.Equal("status", response.Messages[1].Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().Single().Name);
+    }
+
+    [Fact]
+    public void ShouldPromoteToolCall_WithDeclaredToolsAndAlias_ReturnsTrueWhenDispatcherAware()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["run_command"] = new ToolMapping(aliases: ["execute_command", "bash"])
+            }
+        });
+
+        var options = new ToolCallHealingOptions { Dispatcher = dispatcher };
+        var chatOptions = new ChatOptions
+        {
+            Tools = [AIFunctionFactory.Create(() => "ok", "run_command")]
+        };
+
+        // execute_command is not in chatOptions.Tools, but resolves via dispatcher alias to run_command
+        Assert.True(ToolCallHealingTransform.ShouldPromoteToolCall("execute_command", options, chatOptions));
+    }
+
+    [Fact]
+    public void ShouldPromoteToolCall_WithDeclaredToolsAndTranslation_ReturnsTrueWhenDispatcherAware()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Translations =
+            [
+                new ToolTranslation
+                {
+                    SourceTool = "grep_search",
+                    TargetTool = "bash",
+                    CommandTemplate = "grep -rn '{query}' ."
+                }
+            ]
+        });
+
+        var options = new ToolCallHealingOptions { Dispatcher = dispatcher };
+        var chatOptions = new ChatOptions
+        {
+            Tools = [AIFunctionFactory.Create(() => "ok", "bash")]
+        };
+
+        // grep_search is a virtual translation targeting declared tool bash
+        Assert.True(ToolCallHealingTransform.ShouldPromoteToolCall("grep_search", options, chatOptions));
+    }
+
+    [Fact]
+    public void ShouldPromoteToolCall_WithNamespacePrefix_ReturnsTrue()
+    {
+        var chatOptions = new ChatOptions
+        {
+            Tools = [AIFunctionFactory.Create(() => "ok", "read_file")]
+        };
+
+        // Even without an explicit dispatcher instance, namespace prefixes are stripped
+        Assert.True(ToolCallHealingTransform.ShouldPromoteToolCall("workspace__read_file", null, chatOptions));
+        Assert.True(ToolCallHealingTransform.ShouldPromoteToolCall("default:read_file", null, chatOptions));
+    }
+
+    [Fact]
+    public void ShouldPromoteToolCall_WithUndeclaredTool_ReturnsFalse()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["run_command"] = new ToolMapping(aliases: ["execute_command"])
+            }
+        });
+
+        var options = new ToolCallHealingOptions { Dispatcher = dispatcher };
+        var chatOptions = new ChatOptions
+        {
+            Tools = [AIFunctionFactory.Create(() => "ok", "run_command")]
+        };
+
+        // format_hard_drive is not declared, not an alias, and not a translation
+        Assert.False(ToolCallHealingTransform.ShouldPromoteToolCall("format_hard_drive", options, chatOptions));
+    }
+
+    [Fact]
+    public void ShouldPromoteToolCall_WithDispatcherRegisteredToolsAndNoChatOptionsTools_ValidatesAgainstDispatcher()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.RegisterTool(AIFunctionFactory.Create(() => "ok", "run_command"));
+
+        var options = new ToolCallHealingOptions { Dispatcher = dispatcher };
+
+        // No chatOptions.Tools, but dispatcher has registered tools
+        Assert.True(ToolCallHealingTransform.ShouldPromoteToolCall("run_command", options, null));
+        Assert.False(ToolCallHealingTransform.ShouldPromoteToolCall("unregistered_tool", options, null));
+    }
+
+    [Fact]
+    public void ShouldPromoteToolCall_WithDotPrefix_ReturnsTrue()
+    {
+        var chatOptions = new ChatOptions
+        {
+            Tools = [AIFunctionFactory.Create(() => "ok", "read_file")]
+        };
+
+        Assert.True(ToolCallHealingTransform.ShouldPromoteToolCall("functions.read_file", null, chatOptions));
+        Assert.True(ToolCallHealingTransform.ShouldPromoteToolCall("tools.read_file", null, chatOptions));
+    }
+
+    [Fact]
+    public void ShouldPromoteToolCall_WithDeclaredAlias_ReturnsTrueForCanonical()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["run_command"] = new ToolMapping(aliases: ["execute_command"])
+            }
+        });
+
+        var options = new ToolCallHealingOptions { Dispatcher = dispatcher };
+        var chatOptions = new ChatOptions
+        {
+            // Here the user declared the alias as the tool
+            Tools = [AIFunctionFactory.Create(() => "ok", "execute_command")]
+        };
+
+        // Model calls canonical tool name
+        Assert.True(ToolCallHealingTransform.ShouldPromoteToolCall("run_command", options, chatOptions));
+    }
+
+    [Fact]
+    public void HealResponseText_WithOptionsAndDispatcher_PromotesAliasedTool()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["search"] = new ToolMapping(aliases: ["grep_code"])
+            }
+        });
+
+        var options = new ToolCallHealingOptions { Dispatcher = dispatcher };
+        var chatOptions = new ChatOptions
+        {
+            Tools = [AIFunctionFactory.Create(() => "ok", "search")]
+        };
+
+        var json = "{\"choices\":[{\"message\":{\"content\":\"<tool_call>{\\\"name\\\":\\\"grep_code\\\",\\\"arguments\\\":{\\\"q\\\":\\\"test\\\"}}</tool_call>\"}}]}";
+        var healed = ToolCallHealingTransform.HealResponseText(json, null, options, chatOptions);
+
+        Assert.Contains("\"name\":\"grep_code\"", healed);
+        Assert.DoesNotContain("<tool_call>", healed);
     }
 }

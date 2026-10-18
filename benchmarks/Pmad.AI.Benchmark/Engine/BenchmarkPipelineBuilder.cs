@@ -39,6 +39,9 @@ public static class BenchmarkPipelineBuilder
                 new ThinkingTraceCompactionOptions
                 {
                     KeepVerbatimCount = 5,
+                    FallbackCharacterLimit = 2500,
+                    FallbackPrefixLength = 1800,
+                    FallbackSuffixLength = 700,
                     Telemetry = telemetry
                 }),
 
@@ -110,6 +113,9 @@ public static class BenchmarkPipelineBuilder
         var thinkOptions = new ThinkingTraceCompactionOptions
         {
             KeepVerbatimCount = 5,
+            FallbackCharacterLimit = 2500,
+            FallbackPrefixLength = 1800,
+            FallbackSuffixLength = 700,
             Summarizer = speculativeSummarizer,
             Telemetry = telemetry
         };
@@ -135,8 +141,13 @@ public static class BenchmarkPipelineBuilder
         ISpeculativeSummarizer? speculativeSummarizer,
         CompactionTelemetry telemetry)
     {
-        // 1. Tool call healing wraps raw client
-        IChatClient current = new ToolCallHealingChatClient(innerClient);
+        var dispatcher = CreateConfiguredDispatcher();
+
+        // 1. Tool call healing wraps raw client with dispatcher awareness
+        IChatClient current = new ToolCallHealingChatClient(innerClient, new ToolCallHealingOptions
+        {
+            Dispatcher = dispatcher
+        });
 
         // 2. Tool result compaction
         current = new ToolResultCompactionChatClient(current, new ToolResultCompactionOptions
@@ -153,6 +164,9 @@ public static class BenchmarkPipelineBuilder
         current = new ThinkingTraceCompactionChatClient(current, new ThinkingTraceCompactionOptions
         {
             KeepVerbatimCount = 5,
+            FallbackCharacterLimit = 2500,
+            FallbackPrefixLength = 1800,
+            FallbackSuffixLength = 700,
             Summarizer = speculativeSummarizer,
             Telemetry = telemetry
         });
@@ -165,8 +179,6 @@ public static class BenchmarkPipelineBuilder
             NgramMinOccurrences = 3
         });
         current = new ToolLoopCircuitBreakerChatClient(current, breaker);
-
-        var dispatcher = CreateConfiguredDispatcher();
         current = new LenientToolDispatchChatClient(current, dispatcher);
 
         return current;

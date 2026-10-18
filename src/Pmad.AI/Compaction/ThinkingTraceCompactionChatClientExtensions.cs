@@ -22,19 +22,23 @@ public static class ThinkingTraceCompactionChatClientExtensions
     }
 
     /// <summary>
-    /// Adds <see cref="ThinkingTraceCompactionChatClient"/> middleware with the specified summarizer and verbatim window.
+    /// Adds <see cref="ThinkingTraceCompactionChatClient"/> middleware with the specified summarizer, verbatim window, and prefix/suffix limits.
     /// </summary>
     public static ChatClientBuilder UseThinkingTraceCompaction(
         this ChatClientBuilder builder,
         ISpeculativeSummarizer? summarizer,
         int keepVerbatimCount = 10,
-        int fallbackCharacterLimit = 120)
+        int fallbackCharacterLimit = 1750,
+        int fallbackPrefixLength = 1500,
+        int fallbackSuffixLength = 250)
     {
         return builder.UseThinkingTraceCompaction(options =>
         {
             options.Summarizer = summarizer;
             options.KeepVerbatimCount = keepVerbatimCount;
             options.FallbackCharacterLimit = fallbackCharacterLimit;
+            options.FallbackPrefixLength = fallbackPrefixLength;
+            options.FallbackSuffixLength = fallbackSuffixLength;
         });
     }
 }

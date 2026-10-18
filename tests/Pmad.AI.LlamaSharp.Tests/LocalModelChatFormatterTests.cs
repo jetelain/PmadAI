@@ -698,5 +698,34 @@ public class LocalModelChatFormatterTests
         Assert.Equal("web_search", call.Name);
         Assert.Equal("test", call.Arguments?["query"]);
     }
+
+    [Fact]
+    public void ParseAssistantMessages_WithProseAndToolCalls_SplitsIntoSequentialMessages()
+    {
+        var raw = "I will search now.\nAction: web_search\nAction Input: {\"query\":\"csharp 10\"}\nDone.";
+        var messages = LocalModelChatFormatter.ParseAssistantMessages(raw);
+
+        Assert.Equal(3, messages.Count);
+        Assert.Equal("I will search now.", messages[0].Text);
+        Assert.Empty(messages[0].Contents.OfType<FunctionCallContent>());
+
+        var call = Assert.Single(messages[1].Contents.OfType<FunctionCallContent>());
+        Assert.Equal("web_search", call.Name);
+        Assert.Equal("csharp 10", call.Arguments?["query"]);
+
+        Assert.Equal("Done.", messages[2].Text);
+        Assert.Empty(messages[2].Contents.OfType<FunctionCallContent>());
+    }
+
+    [Fact]
+    public void ParseAssistantMessages_WithOnlyToolCalls_ReturnsSingleMessage()
+    {
+        var raw = "<tool_call>{\"name\":\"web_search\",\"arguments\":{\"query\":\"test\"}}</tool_call>";
+        var messages = LocalModelChatFormatter.ParseAssistantMessages(raw);
+
+        var msg = Assert.Single(messages);
+        var call = Assert.Single(msg.Contents.OfType<FunctionCallContent>());
+        Assert.Equal("web_search", call.Name);
+    }
 }
 

@@ -137,6 +137,27 @@ public static class Program
         }
         Console.WriteLine("✓ ToolResultCompactor verified");
 
+        var thinkCompactor = new ThinkingTraceCompactor(new ThinkingTraceCompactionOptions
+        {
+            FallbackPrefixLength = 10,
+            FallbackSuffixLength = 10,
+            FallbackCharacterLimit = 50,
+            KeepVerbatimCount = 1
+        });
+        var thinkMessages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "Hello"),
+            new(ChatRole.Assistant, [new TextReasoningContent(new string('T', 200)), new TextContent("Result")]),
+            new(ChatRole.User, "Follow-up"),
+            new(ChatRole.Assistant, [new TextReasoningContent("Recent"), new TextContent("Recent result")])
+        };
+        var compactedThink = thinkCompactor.Compact(thinkMessages, "session-think");
+        if (compactedThink.Count != 4)
+        {
+            throw new InvalidOperationException("ThinkingTraceCompactor changed message count");
+        }
+        Console.WriteLine("✓ ThinkingTraceCompactor verified");
+
         // 6. VerbatimTranscriptChatClient with mock inner client
         var mockInner = new MockEchoChatClient();
         var tempDir = Path.Combine(Path.GetTempPath(), "aot_smoke_transcript_" + Guid.NewGuid().ToString("N"));

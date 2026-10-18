@@ -25,7 +25,7 @@ public class CompactionTests
     }
 
     [Fact]
-    public async Task ThinkingTraceCompaction_PrunesOlderReasoning_FallbackStub()
+    public async Task ThinkingTraceCompaction_PrunesOlderReasoning_FallbackPrefixSuffix()
     {
         IEnumerable<ChatMessage>? forwardedMessages = null;
         var fake = new FakeChatClient((msgs, _, _) =>
@@ -38,6 +38,8 @@ public class CompactionTests
         {
             KeepVerbatimCount = 2,
             FallbackCharacterLimit = 50,
+            FallbackPrefixLength = 20,
+            FallbackSuffixLength = 15,
             MutateInPlace = false
         });
 
@@ -56,9 +58,11 @@ public class CompactionTests
         Assert.NotNull(forwardedMessages);
         var fList = forwardedMessages.ToList();
 
-        // Turn 1 (oldest reasoning turn) should be compacted
+        // Turn 1 (oldest reasoning turn) should be compacted with prefix-suffix truncation
         var t1Reasoning = fList[0].Contents.OfType<TextReasoningContent>().First();
-        Assert.Equal("[Reasoned: Turn 1 first line...]", t1Reasoning.Text);
+        Assert.StartsWith("Turn 1 first line\nSe", t1Reasoning.Text);
+        Assert.EndsWith("ailed reasoning", t1Reasoning.Text);
+        Assert.Contains("[Truncated 16 characters]", t1Reasoning.Text);
 
         // Turn 2 & 3 (inside verbatim window 2) should be verbatim
         var t2Reasoning = fList[2].Contents.OfType<TextReasoningContent>().First();
@@ -92,6 +96,9 @@ public class CompactionTests
         var client = new ThinkingTraceCompactionChatClient(fake, new ThinkingTraceCompactionOptions
         {
             KeepVerbatimCount = 1,
+            FallbackCharacterLimit = 10,
+            FallbackPrefixLength = 5,
+            FallbackSuffixLength = 5,
             Summarizer = mockSummarizer.Object
         });
 
@@ -150,6 +157,53 @@ public class CompactionTests
     public void ToolResultCompactor_Validation_ThrowsOnInvalidLimit()
     {
         Assert.Throws<ArgumentException>(() => new ToolResultCompactor(new ToolResultCompactionOptions
+        {
+            FallbackPrefixLength = 1500,
+            FallbackSuffixLength = 500,
+            FallbackCharacterLimit = 1800 // Less than 1500 + 500
+        }));
+    }
+
+    [Fact]
+    public void ThinkingTraceCompactor_TruncatesBulkyOutputsOutsideWindow()
+    {
+        var compactor = new ThinkingTraceCompactor(new ThinkingTraceCompactionOptions
+        {
+            KeepVerbatimCount = 1,
+            FallbackCharacterLimit = 200,
+            FallbackPrefixLength = 100,
+            FallbackSuffixLength = 50,
+            MutateInPlace = false
+        });
+
+        var bulkyText = new string('T', 500);
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.Assistant, [new TextReasoningContent(bulkyText), new TextContent("Old")]),
+            new(ChatRole.Assistant, [new TextReasoningContent(bulkyText), new TextContent("Recent")])
+        };
+
+        var compacted = compactor.Compact(messages);
+
+        // Recent reasoning remains verbatim
+        var recentReasoning = compacted[1].Contents.OfType<TextReasoningContent>().First().Text;
+        Assert.Equal(bulkyText, recentReasoning);
+
+        // Older reasoning is truncated
+        var oldReasoning = compacted[0].Contents.OfType<TextReasoningContent>().First().Text;
+        Assert.StartsWith(new string('T', 100), oldReasoning);
+        Assert.EndsWith(new string('T', 50), oldReasoning);
+        Assert.Contains("[Truncated 350 characters]", oldReasoning);
+
+        // Original list untouched
+        var origOld = messages[0].Contents.OfType<TextReasoningContent>().First().Text;
+        Assert.Equal(bulkyText, origOld);
+    }
+
+    [Fact]
+    public void ThinkingTraceCompactor_Validation_ThrowsOnInvalidLimit()
+    {
+        Assert.Throws<ArgumentException>(() => new ThinkingTraceCompactor(new ThinkingTraceCompactionOptions
         {
             FallbackPrefixLength = 1500,
             FallbackSuffixLength = 500,
@@ -260,6 +314,8 @@ public class CompactionTests
             Summarizer = summarizer,
             KeepVerbatimCount = 1,
             FallbackCharacterLimit = 30,
+            FallbackPrefixLength = 15,
+            FallbackSuffixLength = 10,
             MutateInPlace = mutateInPlace
         });
 
@@ -272,7 +328,7 @@ public class CompactionTests
 
         await client.GetResponseAsync(messages);
 
-        // Summarizer should receive the uncompacted text, not the "[Reasoned: ...]" stub
+        // Summarizer should receive the uncompacted text, not the truncated fallback
         var entry = summarizer.Enqueued.First(e => e.Text == bigReasoning);
         Assert.Equal(bigReasoning, entry.Text);
         Assert.DoesNotContain(summarizer.Enqueued, e => e.Text.StartsWith("[Reasoned:"));
@@ -303,5 +359,70 @@ public class CompactionTests
 
         var entry = Assert.Single(summarizer.Enqueued);
         Assert.Equal(bigText, entry.Text);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ThinkingTraceCompaction_RetainsReasoningVerbatim_WhenUnderFallbackCharacterLimit(bool mutateInPlace)
+    {
+        IEnumerable<ChatMessage>? forwardedMessages = null;
+        var fake = new FakeChatClient((msgs, _, _) =>
+        {
+            forwardedMessages = msgs.ToList();
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "Done")));
+        });
+
+        var client = new ThinkingTraceCompactionChatClient(fake, new ThinkingTraceCompactionOptions
+        {
+            KeepVerbatimCount = 1,
+            FallbackCharacterLimit = 200,
+            FallbackPrefixLength = 100,
+            FallbackSuffixLength = 50,
+            MutateInPlace = mutateInPlace
+        });
+
+        const string shortReasoning = "Concise reasoning below threshold.";
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.Assistant, [new TextReasoningContent(shortReasoning), new TextContent("Reply 1")]),
+            new(ChatRole.Assistant, [new TextReasoningContent("Recent thought"), new TextContent("Reply 2")])
+        };
+
+        await client.GetResponseAsync(messages);
+
+        var fList = forwardedMessages!.ToList();
+        var t1Reasoning = fList[0].Contents.OfType<TextReasoningContent>().First();
+        Assert.Equal(shortReasoning, t1Reasoning.Text);
+
+        if (!mutateInPlace)
+        {
+            Assert.Equal(shortReasoning, messages[0].Contents.OfType<TextReasoningContent>().First().Text);
+        }
+    }
+
+    [Fact]
+    public async Task ThinkingTraceCompaction_SkipsSpeculativeEnqueue_WhenUnderFallbackCharacterLimit()
+    {
+        var summarizer = new RecordingSummarizer();
+        var fake = new FakeChatClient((_, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"))));
+        var client = new ThinkingTraceCompactionChatClient(fake, new ThinkingTraceCompactionOptions
+        {
+            Summarizer = summarizer,
+            KeepVerbatimCount = 1,
+            FallbackCharacterLimit = 500,
+            FallbackPrefixLength = 300,
+            FallbackSuffixLength = 100
+        });
+
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.Assistant, [new TextReasoningContent("Short monologue that is well under 500 chars"), new TextContent("Reply 1")]),
+            new(ChatRole.Assistant, [new TextReasoningContent("Recent reasoning"), new TextContent("Reply 2")])
+        };
+
+        await client.GetResponseAsync(messages);
+
+        Assert.Empty(summarizer.Enqueued);
     }
 }

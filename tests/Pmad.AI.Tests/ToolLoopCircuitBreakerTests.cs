@@ -227,5 +227,53 @@ public class ToolLoopCircuitBreakerTests
         Assert.Contains("\"flag\":false", json);
         Assert.Contains("\"pi\":3.14159", json);
     }
+
+    [Fact]
+    public void EvaluateToolInvocation_DistinctObservation_ResetsPingPongCounter()
+    {
+        var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
+        {
+            PingPongThreshold = 2
+        });
+
+        // 1. Initial call and initial observation
+        var r1 = breaker.EvaluateToolInvocation("read_file", "{\"path\": \"src/main.cs\"}");
+        Assert.False(r1.IsLoopDetected);
+        breaker.RecordObservation("Observation 1: lines 1-50 of main.cs");
+
+        // 2. Tool returns a distinct observation (forward progress in multi-step task)
+        breaker.RecordObservation("Observation 2: lines 51-100 of main.cs (distinct content)");
+
+        // 3. Re-invoking the tool does NOT trip the breaker because ping-pong counter was reset
+        var r2 = breaker.EvaluateToolInvocation("read_file", "{\"path\": \"src/main.cs\"}");
+        Assert.False(r2.IsLoopDetected);
+
+        // 4. Repeated invocation on UNCHANGED observation DOES trip the breaker
+        breaker.RecordObservation("Observation 2: lines 51-100 of main.cs (distinct content)");
+        var r3 = breaker.EvaluateToolInvocation("read_file", "{\"path\": \"src/main.cs\"}");
+        Assert.True(r3.IsLoopDetected);
+        Assert.Equal(LoopType.ToolPingPong, r3.Type);
+    }
+
+    [Fact]
+    public void EvaluateToolInvocation_NewUserPrompt_ResetsPingPongCounter()
+    {
+        var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
+        {
+            PingPongThreshold = 2
+        });
+
+        // Initial call in turn 1
+        breaker.RecordUserPrompt("Find bugs in main.cs");
+        var r1 = breaker.EvaluateToolInvocation("search", "{\"query\": \"NullReferenceException\"}");
+        Assert.False(r1.IsLoopDetected);
+
+        // User provides a new guiding prompt in turn 2
+        breaker.RecordUserPrompt("Now check database connections instead.");
+
+        // Calling the same tool now does NOT trip because the user provided new guidance
+        var r2 = breaker.EvaluateToolInvocation("search", "{\"query\": \"NullReferenceException\"}");
+        Assert.False(r2.IsLoopDetected);
+    }
 }
 

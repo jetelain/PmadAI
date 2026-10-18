@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
@@ -98,7 +99,7 @@ public static class BfclAstEvaluator
             var actualVal = actual[matchedKey];
             if (!ValuesEqual(expectedVal, actualVal))
             {
-                error = $"Argument '{expectedKey}' value mismatch: expected '{expectedVal}' ({expectedVal?.GetType().Name}), got '{actualVal}' ({actualVal?.GetType().Name})";
+                error = $"Argument '{expectedKey}' value mismatch: expected '{FormatValueForDisplay(expectedVal)}' ({expectedVal?.GetType().Name}), got '{FormatValueForDisplay(actualVal)}' ({actualVal?.GetType().Name})";
                 return false;
             }
         }
@@ -107,41 +108,168 @@ public static class BfclAstEvaluator
         return true;
     }
 
+    /// <summary>
+    /// Recursively normalizes JsonElement, dictionaries, lists, and JSON-encoded strings
+    /// into standard .NET collections and primitives for consistent AST comparison.
+    /// </summary>
+    public static object? NormalizeValue(object? val)
+    {
+        if (val == null) return null;
+
+        if (val is JsonElement je)
+        {
+            return ConvertJsonElement(je);
+        }
+
+        if (val is IDictionary dict)
+        {
+            var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (DictionaryEntry de in dict)
+            {
+                var keyStr = de.Key?.ToString() ?? string.Empty;
+                result[keyStr] = NormalizeValue(de.Value);
+            }
+            return result;
+        }
+
+        if (val is IReadOnlyDictionary<string, object?> roDict)
+        {
+            var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (k, v) in roDict)
+            {
+                result[k] = NormalizeValue(v);
+            }
+            return result;
+        }
+
+        if (val is IEnumerable enumVal && val is not string)
+        {
+            var list = new List<object?>();
+            foreach (var item in enumVal)
+            {
+                list.Add(NormalizeValue(item));
+            }
+            return list;
+        }
+
+        if (val is string str && (str.StartsWith('{') || str.StartsWith('[')))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(str);
+                return ConvertJsonElement(doc.RootElement);
+            }
+            catch
+            {
+                // Not valid JSON, keep as raw string
+            }
+        }
+
+        return val;
+    }
+
+    private static object? ConvertJsonElement(JsonElement el) => el.ValueKind switch
+    {
+        JsonValueKind.String => el.GetString(),
+        JsonValueKind.Number => el.TryGetInt64(out var l) ? (object)l : el.GetDouble(),
+        JsonValueKind.True => true,
+        JsonValueKind.False => false,
+        JsonValueKind.Null => null,
+        JsonValueKind.Object => el.EnumerateObject().ToDictionary(p => p.Name, p => NormalizeValue(p.Value), StringComparer.OrdinalIgnoreCase),
+        JsonValueKind.Array => el.EnumerateArray().Select(ConvertJsonElement).ToList<object?>(),
+        _ => el.Clone()
+    };
+
     private static bool ValuesEqual(object? expected, object? actual)
     {
+        expected = NormalizeValue(expected);
+        actual = NormalizeValue(actual);
+
         if (expected == null && actual == null) return true;
         if (expected == null || actual == null) return false;
 
-        // If one is string representing JSON and other is JsonElement, parse string as JsonDocument
-        if (expected is string expS && (expS.StartsWith('{') || expS.StartsWith('[')))
+        // Dictionaries / nested objects
+        if (expected is IDictionary<string, object?> expDict)
         {
-            try
+            if (actual is not IDictionary<string, object?> actDict)
             {
-                using var expDoc = JsonDocument.Parse(expS);
-                return ValuesEqual(expDoc.RootElement, actual);
+                return false;
             }
-            catch { }
-        }
 
-        if (actual is string actS && (actS.StartsWith('{') || actS.StartsWith('[')))
-        {
-            try
+            if (expDict.Count != actDict.Count)
             {
-                using var actDoc = JsonDocument.Parse(actS);
-                return ValuesEqual(expected, actDoc.RootElement);
+                return false;
             }
-            catch { }
+
+            foreach (var (k, expVal) in expDict)
+            {
+                var matchedK = actDict.Keys.FirstOrDefault(ak => string.Equals(ak, k, StringComparison.OrdinalIgnoreCase));
+                if (matchedK == null)
+                {
+                    return false;
+                }
+
+                if (!ValuesEqual(expVal, actDict[matchedK]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
-        // Unpack JsonElement if needed
-        if (expected is JsonElement jeExp)
+        if (actual is IDictionary<string, object?>)
         {
-            return CompareJsonElement(jeExp, actual);
+            return false;
         }
 
-        if (actual is JsonElement jeAct)
+        // Arrays / Lists
+        if (expected is IList<object?> expList)
         {
-            return CompareJsonElement(jeAct, expected);
+            if (actual is IList<object?> actList)
+            {
+                if (expList.Count != actList.Count)
+                {
+                    return false;
+                }
+
+                for (int i = 0; i < expList.Count; i++)
+                {
+                    if (!ValuesEqual(expList[i], actList[i]))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            // If expected is a list of acceptable alternatives, check if actual matches any
+            foreach (var alt in expList)
+            {
+                if (ValuesEqual(alt, actual))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        if (actual is IList<object?>)
+        {
+            return false;
+        }
+
+        // Boolean comparison
+        if (expected is bool expBool)
+        {
+            return TryExtractBool(actual, out var actBool) && expBool == actBool;
+        }
+
+        if (actual is bool actBool2)
+        {
+            return TryExtractBool(expected, out var expBool2) && expBool2 == actBool2;
         }
 
         // Numeric comparison (handle int vs double vs string representation)
@@ -150,96 +278,42 @@ public static class BfclAstEvaluator
             return Math.Abs(expNum - actNum) < 0.001;
         }
 
-        // Boolean comparison
-        if (TryExtractBool(expected, out var expBool) && TryExtractBool(actual, out var actBool))
-        {
-            return expBool == actBool;
-        }
-
-        // Array / List comparison
-        if (expected is IEnumerable<object?> expList && expected is not string)
-        {
-            var expArray = expList.ToList();
-            if (actual is IEnumerable<object?> actList && actual is not string)
-            {
-                var actArray = actList.ToList();
-                if (expArray.Count != actArray.Count) return false;
-                for (int i = 0; i < expArray.Count; i++)
-                {
-                    if (!ValuesEqual(expArray[i], actArray[i])) return false;
-                }
-                return true;
-            }
-
-            // If expected is a list of acceptable alternatives, check if actual matches any
-            foreach (var alt in expArray)
-            {
-                if (ValuesEqual(alt, actual)) return true;
-            }
-        }
-
         // String comparison
         var strExpected = expected.ToString()?.Trim();
         var strActual = actual.ToString()?.Trim();
 
-        return string.Equals(strExpected, strActual, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool CompareJsonElement(JsonElement el, object? target)
-    {
-        if (target is JsonElement targetEl)
+        if (string.Equals(strExpected, strActual, StringComparison.OrdinalIgnoreCase))
         {
-            if (el.ValueKind != targetEl.ValueKind)
-            {
-                // Number vs string coercion check
-                if (TryExtractDouble(el, out var d1) && TryExtractDouble(targetEl, out var d2))
-                {
-                    return Math.Abs(d1 - d2) < 0.001;
-                }
-                return false;
-            }
-
-            switch (el.ValueKind)
-            {
-                case JsonValueKind.String:
-                    return string.Equals(el.GetString(), targetEl.GetString(), StringComparison.OrdinalIgnoreCase);
-                case JsonValueKind.Number:
-                    return Math.Abs(el.GetDouble() - targetEl.GetDouble()) < 0.001;
-                case JsonValueKind.True:
-                case JsonValueKind.False:
-                    return el.GetBoolean() == targetEl.GetBoolean();
-                case JsonValueKind.Null:
-                    return true;
-                case JsonValueKind.Array:
-                    if (el.GetArrayLength() != targetEl.GetArrayLength()) return false;
-                    var arr1 = el.EnumerateArray().ToList();
-                    var arr2 = targetEl.EnumerateArray().ToList();
-                    for (int i = 0; i < arr1.Count; i++)
-                    {
-                        if (!CompareJsonElement(arr1[i], arr2[i])) return false;
-                    }
-                    return true;
-                case JsonValueKind.Object:
-                    var obj1 = el.EnumerateObject().ToDictionary(p => p.Name, p => p.Value, StringComparer.OrdinalIgnoreCase);
-                    var obj2 = targetEl.EnumerateObject().ToDictionary(p => p.Name, p => p.Value, StringComparer.OrdinalIgnoreCase);
-                    if (obj1.Count != obj2.Count) return false;
-                    foreach (var (k, v1) in obj1)
-                    {
-                        if (!obj2.TryGetValue(k, out var v2) || !CompareJsonElement(v1, v2)) return false;
-                    }
-                    return true;
-            }
+            return true;
         }
 
-        return el.ValueKind switch
+        // Mathematical power operator equivalence (e.g. "x^2" vs "x**2")
+        if (strExpected != null && strActual != null &&
+            string.Equals(strExpected.Replace("**", "^"), strActual.Replace("**", "^"), StringComparison.OrdinalIgnoreCase))
         {
-            JsonValueKind.String => string.Equals(el.GetString()?.Trim(), target?.ToString()?.Trim(), StringComparison.OrdinalIgnoreCase),
-            JsonValueKind.Number => TryExtractDouble(target, out var d) && Math.Abs(el.GetDouble() - d) < 0.001,
-            JsonValueKind.True => TryExtractBool(target, out var b) && b,
-            JsonValueKind.False => TryExtractBool(target, out var b) && !b,
-            JsonValueKind.Null => target == null,
-            _ => string.Equals(el.GetRawText().Trim(), target?.ToString()?.Trim(), StringComparison.OrdinalIgnoreCase)
-        };
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string FormatValueForDisplay(object? val)
+    {
+        if (val == null) return "null";
+        if (val is JsonElement je) return je.GetRawText();
+        if (val is string s) return s;
+        if (val is IDictionary or IEnumerable)
+        {
+            try
+            {
+                return JsonSerializer.Serialize(val);
+            }
+            catch
+            {
+                return val.ToString() ?? "";
+            }
+        }
+        return val.ToString() ?? "";
     }
 
     private static bool TryExtractDouble(object? val, out double result)
@@ -372,6 +446,9 @@ public static class BfclAstEvaluator
 
     private static bool ValidateStrictValue(object? expected, object? actual, out string? error)
     {
+        expected = NormalizeValue(expected);
+        actual = NormalizeValue(actual);
+
         if (expected == null && actual == null)
         {
             error = null;
@@ -379,7 +456,7 @@ public static class BfclAstEvaluator
         }
         if (expected == null || actual == null)
         {
-            error = $"Expected '{expected}', got '{actual}'.";
+            error = $"Expected '{FormatValueForDisplay(expected)}', got '{FormatValueForDisplay(actual)}'.";
             return false;
         }
 
@@ -387,30 +464,24 @@ public static class BfclAstEvaluator
         if (expected is int or long or short or byte)
         {
             var expLong = Convert.ToInt64(expected);
-            if (actual is JsonElement jeInt && jeInt.ValueKind == JsonValueKind.Number)
+            if (actual is int or long or short or byte)
             {
-                if (jeInt.TryGetInt64(out var actLong))
+                var actLong = Convert.ToInt64(actual);
+                if (actLong != expLong)
                 {
-                    if (actLong != expLong)
-                    {
-                        error = $"Integer value mismatch: expected {expLong}, got {actLong}";
-                        return false;
-                    }
-                    error = null;
-                    return true;
+                    error = $"Integer value mismatch: expected {expLong}, got {actLong}";
+                    return false;
                 }
-                error = $"Expected integer {expLong}, got fractional or out-of-range number {jeInt.GetRawText()}";
-                return false;
+                error = null;
+                return true;
             }
-            if (actual is int actI && actI == expLong) { error = null; return true; }
-            if (actual is long actL && actL == expLong) { error = null; return true; }
             if (actual is double actD)
             {
                 if (Math.Abs(actD - expLong) < 0.0001 && actD % 1 == 0) { error = null; return true; }
                 error = $"Expected integer {expLong}, got float {actD}";
                 return false;
             }
-            error = $"Expected integer {expLong}, got {actual} ({actual.GetType().Name})";
+            error = $"Expected integer {expLong}, got {FormatValueForDisplay(actual)} ({actual.GetType().Name})";
             return false;
         }
 
@@ -427,30 +498,33 @@ public static class BfclAstEvaluator
                 error = $"Float value mismatch: expected {expD}, got {actD}";
                 return false;
             }
-            error = $"Expected float {expected}, got {actual}";
+            error = $"Expected float {expected}, got {FormatValueForDisplay(actual)}";
+            return false;
+        }
+
+        // Strict boolean check
+        if (expected is bool expBool)
+        {
+            if (actual is bool actBool)
+            {
+                if (expBool == actBool)
+                {
+                    error = null;
+                    return true;
+                }
+                error = $"Boolean value mismatch: expected {expBool}, got {actBool}";
+                return false;
+            }
+            error = $"Expected boolean {expBool}, got {FormatValueForDisplay(actual)} ({actual.GetType().Name})";
             return false;
         }
 
         // Strict nested dictionary / object check
-        if (expected is IReadOnlyDictionary<string, object?> expDict)
+        if (expected is IDictionary<string, object?> expDict)
         {
-            IDictionary<string, object?>? actDict = null;
-            if (actual is IDictionary<string, object?> d)
+            if (actual is not IDictionary<string, object?> actDict)
             {
-                actDict = d;
-            }
-            else if (actual is JsonElement je && je.ValueKind == JsonValueKind.Object)
-            {
-                actDict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                foreach (var prop in je.EnumerateObject())
-                {
-                    actDict[prop.Name] = prop.Value;
-                }
-            }
-
-            if (actDict == null)
-            {
-                error = $"Expected nested object, got {actual.GetType().Name}";
+                error = $"Expected nested object, got {FormatValueForDisplay(actual)} ({actual.GetType().Name})";
                 return false;
             }
 
@@ -472,9 +546,36 @@ public static class BfclAstEvaluator
             return true;
         }
 
+        // Strict array / list check
+        if (expected is IList<object?> expList)
+        {
+            if (actual is not IList<object?> actList)
+            {
+                error = $"Expected array/list, got {FormatValueForDisplay(actual)} ({actual.GetType().Name})";
+                return false;
+            }
+
+            if (expList.Count != actList.Count)
+            {
+                error = $"Array length mismatch: expected {expList.Count} elements, got {actList.Count}";
+                return false;
+            }
+
+            for (int i = 0; i < expList.Count; i++)
+            {
+                if (!ValidateStrictValue(expList[i], actList[i], out error))
+                {
+                    return false;
+                }
+            }
+
+            error = null;
+            return true;
+        }
+
         // String / enum check
         var expStr = expected.ToString()?.Trim();
-        var actStr = (actual is JsonElement jeStr && jeStr.ValueKind == JsonValueKind.String ? jeStr.GetString() : actual.ToString())?.Trim();
+        var actStr = actual.ToString()?.Trim();
 
         if (string.Equals(expStr, actStr, StringComparison.Ordinal))
         {

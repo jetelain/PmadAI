@@ -333,4 +333,45 @@ public class ToolLoopCircuitBreakerChatClientTests
         ChatClientBuilder builder = null!;
         Assert.Throws<ArgumentNullException>(() => builder.UseToolLoopCircuitBreaker());
     }
+
+    [Fact]
+    public async Task GetResponseAsync_AdaptiveResetOnTurnHistory_AllowsExploration()
+    {
+        var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions { PingPongThreshold = 2 });
+        var inner = new TestChatClient(getResponse: (_, _, _) => Task.FromResult(new ChatResponse([
+            new ChatMessage(ChatRole.Assistant, [
+                new FunctionCallContent("c1", "search", new Dictionary<string, object?> { ["q"] = "foo" })
+            ])
+        ])));
+        var client = new ToolLoopCircuitBreakerChatClient(inner, breaker);
+
+        // Turn 1: Initial call
+        var r1 = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "find foo")]);
+        Assert.Single(r1.Messages.First().Contents.OfType<FunctionCallContent>());
+
+        // Turn 2: Tool returned distinct observation "found foo at line 10"
+        var historyTurn2 = new List<ChatMessage>
+        {
+            new ChatMessage(ChatRole.User, "find foo"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c1", "search", new Dictionary<string, object?> { ["q"] = "foo" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", "found foo at line 10")])
+        };
+        var r2 = await client.GetResponseAsync(historyTurn2);
+        // Valid exploration: breaker did NOT trip because observation was distinct
+        Assert.Single(r2.Messages.First().Contents.OfType<FunctionCallContent>());
+
+        // Turn 3: Tool returned the SAME observation "found foo at line 10"
+        var historyTurn3 = new List<ChatMessage>
+        {
+            new ChatMessage(ChatRole.User, "find foo"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c1", "search", new Dictionary<string, object?> { ["q"] = "foo" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", "found foo at line 10")]),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c2", "search", new Dictionary<string, object?> { ["q"] = "foo" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c2", "found foo at line 10")])
+        };
+        var r3 = await client.GetResponseAsync(historyTurn3);
+        // Unchanged observation: breaker TRIPPED!
+        Assert.Empty(r3.Messages.First().Contents.OfType<FunctionCallContent>());
+        Assert.Contains("[Circuit Breaker Tripped]", r3.Messages.First().Text);
+    }
 }

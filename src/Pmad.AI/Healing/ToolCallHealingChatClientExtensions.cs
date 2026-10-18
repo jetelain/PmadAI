@@ -1,5 +1,6 @@
 using Microsoft.Extensions.AI;
 using Pmad.AI.Healing;
+using Pmad.AI.Tools;
 
 namespace Pmad.AI;
 
@@ -17,6 +18,22 @@ public static class ToolCallHealingChatClientExtensions
     {
         ArgumentNullException.ThrowIfNull(builder);
         var options = new ToolCallHealingOptions();
+        configure?.Invoke(options);
+        return builder.Use(innerClient => new ToolCallHealingChatClient(innerClient, options));
+    }
+
+    /// <summary>
+    /// Adds <see cref="ToolCallHealingChatClient"/> middleware configured with a <see cref="LenientToolDispatcher"/>
+    /// to ensure <see cref="ToolCallHealingOptions.EnforceAvailableToolsGuardrail"/> is aware of aliases, translations, and namespaces.
+    /// </summary>
+    public static ChatClientBuilder UseToolCallHealing(
+        this ChatClientBuilder builder,
+        LenientToolDispatcher dispatcher,
+        Action<ToolCallHealingOptions>? configure = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(dispatcher);
+        var options = new ToolCallHealingOptions { Dispatcher = dispatcher };
         configure?.Invoke(options);
         return builder.Use(innerClient => new ToolCallHealingChatClient(innerClient, options));
     }

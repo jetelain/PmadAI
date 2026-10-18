@@ -299,6 +299,50 @@ public class LenientToolDispatcherTests
         Assert.Equal("val", dispatched.Arguments["param"]);
     }
 
+    public enum SampleRunMode
+    {
+        Fast,
+        Accurate
+    }
+
+    [Fact]
+    public void NormalizeCall_CoercesParametersHeuristically()
+    {
+        var dispatcher = new LenientToolDispatcher();
+
+        // 1. String-to-number: "start_line": "80" -> 80
+        var d1 = dispatcher.NormalizeCall("read_file", "{\"start_line\": \"80\"}");
+        Assert.Equal(80, d1.Arguments["start_line"]);
+
+        // 2. Comma-delimited strings to arrays: "cities": "Paris, Tokyo" -> ["Paris", "Tokyo"]
+        var d2 = dispatcher.NormalizeCall("search_locations", "{\"cities\": \"Paris, Tokyo\"}");
+        Assert.IsAssignableFrom<IEnumerable<object>>(d2.Arguments["cities"]);
+        var cities = ((IEnumerable<object>)d2.Arguments["cities"]!).Select(x => x?.ToString() ?? string.Empty).ToArray();
+        Assert.Equal(new[] { "Paris", "Tokyo" }, cities);
+
+        // 3. Case-insensitive enum / boolean matching: "cached": "False" -> false
+        var d3 = dispatcher.NormalizeCall("fetch_data", "{\"cached\": \"False\"}");
+        Assert.Equal(false, d3.Arguments["cached"]);
+    }
+
+    [Fact]
+    public void NormalizeCall_WithRegisteredFunctionSchema_CoercesStrictTypes()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.RegisterTool(AIFunctionFactory.Create(
+            (int start_line, string[] cities, bool cached, SampleRunMode mode) => "done",
+            "process_batch"));
+
+        var json = "{\"start_line\": \"80\", \"cities\": \"Paris, Tokyo\", \"cached\": \"False\", \"mode\": \"fast\"}";
+        var dispatched = dispatcher.NormalizeCall("process_batch", json);
+
+        Assert.Equal("process_batch", dispatched.CanonicalToolName);
+        Assert.Equal(80, dispatched.Arguments["start_line"]);
+        Assert.Equal(new[] { "Paris", "Tokyo" }, (string[])dispatched.Arguments["cities"]!);
+        Assert.Equal(false, dispatched.Arguments["cached"]);
+        Assert.Equal("Fast", dispatched.Arguments["mode"]);
+    }
+
     private class FakePipelineChatClient : IChatClient
     {
         private readonly Func<IEnumerable<ChatMessage>, ChatOptions?, CancellationToken, Task<ChatResponse>> _getResponse;

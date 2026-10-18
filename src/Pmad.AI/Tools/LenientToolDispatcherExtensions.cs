@@ -20,4 +20,31 @@ public static class LenientToolDispatcherExtensions
         ArgumentNullException.ThrowIfNull(dispatcher);
         return builder.Use(innerClient => new LenientToolDispatchChatClient(innerClient, dispatcher));
     }
+
+    /// <summary>
+    /// Attaches a <see cref="LenientToolDispatcher"/> to <see cref="ChatOptions.AdditionalProperties"/>
+    /// for downstream middleware awareness.
+    /// </summary>
+    public static ChatOptions SetToolDispatcher(this ChatOptions options, LenientToolDispatcher dispatcher)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(dispatcher);
+        options.AdditionalProperties ??= new AdditionalPropertiesDictionary();
+        options.AdditionalProperties[nameof(LenientToolDispatcher)] = dispatcher;
+        return options;
+    }
+
+    /// <summary>
+    /// Retrieves any attached <see cref="LenientToolDispatcher"/> from <see cref="ChatOptions.AdditionalProperties"/>.
+    /// </summary>
+    public static LenientToolDispatcher? GetToolDispatcher(this ChatOptions? options)
+    {
+        if (options?.AdditionalProperties != null &&
+            options.AdditionalProperties.TryGetValue(nameof(LenientToolDispatcher), out var val) &&
+            val is LenientToolDispatcher dispatcher)
+        {
+            return dispatcher;
+        }
+        return null;
+    }
 }

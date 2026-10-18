@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -146,6 +147,12 @@ public class LenientToolDispatcherOptions
 
     /// <summary>Validator for translated shell commands. If null, a default validator is used.</summary>
     public ReadOnlyCommandValidator? CommandValidator { get; set; }
+
+    /// <summary>
+    /// Whether to enable lenient parameter coercion (string-to-number, comma-delimited string to array,
+    /// case-insensitive enum and boolean matching). Default: true.
+    /// </summary>
+    public bool EnableParameterCoercion { get; set; } = true;
 }
 
 /// <summary>
@@ -425,6 +432,11 @@ public class LenientToolDispatcher
             }
         }
 
+        if (_options.EnableParameterCoercion)
+        {
+            CoerceParameters(canonicalTool, canonicalArgs);
+        }
+
         return new DispatchedToolCall(canonicalTool, canonicalArgs, rawToolName, false);
     }
 
@@ -572,13 +584,169 @@ public class LenientToolDispatcher
         };
     }
 
-    private static string StripNamespace(string name)
+    /// <summary>
+    /// Gets whether any canonical tools are registered in the dispatcher.
+    /// </summary>
+    public bool HasRegisteredTools => _registeredTools.Count > 0;
+
+    /// <summary>
+    /// Resolves a raw candidate tool name to its canonical tool name, taking into account
+    /// namespace prefixes, tool translations, and tool aliases.
+    /// </summary>
+    public string ResolveCanonicalToolName(string rawToolName)
     {
+        if (string.IsNullOrWhiteSpace(rawToolName))
+        {
+            return rawToolName;
+        }
+
+        var toolName = rawToolName.Trim();
+        if (_options.StripNamespacePrefixes)
+        {
+            toolName = StripNamespace(toolName);
+        }
+
+        // 1. Check if tool is a translation rule
+        var translation = _configuration.Translations.FirstOrDefault(t =>
+            string.Equals(t.SourceTool, toolName, StringComparison.OrdinalIgnoreCase));
+
+        if (translation != null)
+        {
+            return translation.TargetTool;
+        }
+
+        // 2. Resolve canonical tool name (exact match always wins over aliases)
+        if (_registeredTools.ContainsKey(toolName))
+        {
+            return toolName;
+        }
+
+        if (_configuration.Tools.ContainsKey(toolName))
+        {
+            return toolName;
+        }
+
+        // Search aliases
+        foreach (var (canonicalKey, toolMap) in _configuration.Tools)
+        {
+            if (toolMap.Aliases.Contains(toolName))
+            {
+                return canonicalKey;
+            }
+        }
+
+        return toolName;
+    }
+
+    /// <summary>
+    /// Checks whether the given tool name is registered as a canonical tool or alias.
+    /// </summary>
+    public bool IsToolRegistered(string rawToolName)
+    {
+        if (string.IsNullOrWhiteSpace(rawToolName))
+        {
+            return false;
+        }
+
+        var canonical = ResolveCanonicalToolName(rawToolName);
+        var stripped = StripNamespace(rawToolName.Trim());
+
+        return _registeredTools.ContainsKey(rawToolName) ||
+               _registeredTools.ContainsKey(canonical) ||
+               _registeredTools.ContainsKey(stripped) ||
+               _configuration.Tools.ContainsKey(rawToolName) ||
+               _configuration.Tools.ContainsKey(canonical);
+    }
+
+    /// <summary>
+    /// Determines whether the specified candidate tool name matches one of the declared available tools,
+    /// taking into account namespace prefixes, tool aliases, and virtual tool translations.
+    /// </summary>
+    public bool IsToolAvailable(string rawToolName, IEnumerable<AITool>? availableTools)
+    {
+        if (string.IsNullOrWhiteSpace(rawToolName) || availableTools == null)
+        {
+            return false;
+        }
+
+        var canonical = ResolveCanonicalToolName(rawToolName);
+        var stripped = StripNamespace(rawToolName.Trim());
+
+        foreach (var tool in availableTools)
+        {
+            var name = tool.Name ?? (tool is AIFunction fn ? fn.Name : null);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            var declaredCanonical = ResolveCanonicalToolName(name);
+            var declaredStripped = StripNamespace(name.Trim());
+
+            // Direct match or canonical match
+            if (string.Equals(name, rawToolName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, canonical, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, stripped, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(declaredCanonical, canonical, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(declaredStripped, stripped, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            // If declared tool has aliases in dispatcher config, check if rawToolName, stripped, or canonical matches
+            if (_configuration.Tools.TryGetValue(name, out var mapping))
+            {
+                if (mapping.Aliases.Contains(rawToolName) || mapping.Aliases.Contains(stripped) || mapping.Aliases.Contains(canonical))
+                {
+                    return true;
+                }
+            }
+
+            if (_configuration.Tools.TryGetValue(declaredCanonical, out var canonicalMapping))
+            {
+                if (canonicalMapping.Aliases.Contains(rawToolName) || canonicalMapping.Aliases.Contains(stripped) || canonicalMapping.Aliases.Contains(canonical))
+                {
+                    return true;
+                }
+            }
+
+            // If declared tool is target of a translation whose SourceTool matches rawToolName, stripped, or canonical
+            if (_configuration.Translations.Any(t =>
+                (string.Equals(t.TargetTool, name, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(t.TargetTool, declaredCanonical, StringComparison.OrdinalIgnoreCase)) &&
+                (string.Equals(t.SourceTool, rawToolName, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(t.SourceTool, stripped, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(t.SourceTool, canonical, StringComparison.OrdinalIgnoreCase))))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Strips namespace prefixes like "workspace__", "default:", "functions.", or "tools.".
+    /// </summary>
+    public static string StripNamespace(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return name;
+
         var idx = name.LastIndexOf("__", StringComparison.Ordinal);
         if (idx >= 0) return name.Substring(idx + 2);
 
         idx = name.LastIndexOf(':');
         if (idx >= 0) return name.Substring(idx + 1);
+
+        if (name.StartsWith("functions.", StringComparison.OrdinalIgnoreCase))
+        {
+            return name.Substring(10);
+        }
+
+        if (name.StartsWith("tools.", StringComparison.OrdinalIgnoreCase))
+        {
+            return name.Substring(6);
+        }
 
         return name;
     }
@@ -595,6 +763,205 @@ public class LenientToolDispatcher
             return set;
         }
         return null;
+    }
+
+    private void CoerceParameters(string canonicalToolName, AIFunctionArguments arguments)
+    {
+        JsonElement schemaProperties = default;
+        bool hasSchema = false;
+
+        if (_registeredTools.TryGetValue(canonicalToolName, out var targetFn) &&
+            targetFn.JsonSchema.ValueKind == JsonValueKind.Object &&
+            targetFn.JsonSchema.TryGetProperty("properties", out var props) &&
+            props.ValueKind == JsonValueKind.Object)
+        {
+            schemaProperties = props;
+            hasSchema = true;
+        }
+
+        foreach (var key in arguments.Keys.ToList())
+        {
+            var value = arguments[key];
+            if (value == null) continue;
+
+            JsonElement paramSchema = default;
+            bool paramSchemaFound = false;
+
+            if (hasSchema)
+            {
+                if (schemaProperties.TryGetProperty(key, out paramSchema))
+                {
+                    paramSchemaFound = true;
+                }
+                else
+                {
+                    foreach (var prop in schemaProperties.EnumerateObject())
+                    {
+                        if (string.Equals(prop.Name, key, StringComparison.OrdinalIgnoreCase))
+                        {
+                            paramSchema = prop.Value;
+                            paramSchemaFound = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            arguments[key] = CoerceParameterValue(key, value, paramSchemaFound ? paramSchema : null);
+        }
+    }
+
+    private static object? CoerceParameterValue(string paramName, object value, JsonElement? schema)
+    {
+        if (value is not string strVal)
+        {
+            return value;
+        }
+
+        var trimmed = strVal.Trim();
+
+        // 1. Schema-based Enum matching (case-insensitive)
+        if (schema.HasValue && schema.Value.TryGetProperty("enum", out var enumProp) && enumProp.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var enumEl in enumProp.EnumerateArray())
+            {
+                if (enumEl.ValueKind == JsonValueKind.String)
+                {
+                    var enumStr = enumEl.GetString();
+                    if (string.Equals(enumStr, trimmed, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return enumStr;
+                    }
+                }
+                else if (enumEl.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    if (bool.TryParse(trimmed, out var parsedBool) && parsedBool == enumEl.GetBoolean())
+                    {
+                        return enumEl.GetBoolean();
+                    }
+                }
+                else if (enumEl.ValueKind == JsonValueKind.Number)
+                {
+                    if (double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedDbl))
+                    {
+                        if (Math.Abs(parsedDbl - enumEl.GetDouble()) < double.Epsilon)
+                        {
+                            return ToolCallHealingTransform.UnwrapJsonElement(enumEl);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Boolean coercion (schema or heuristic)
+        bool isBooleanTarget = schema.HasValue &&
+            schema.Value.TryGetProperty("type", out var typeProp) &&
+            typeProp.ValueEquals("boolean");
+
+        if (isBooleanTarget || (!schema.HasValue && IsBooleanParameterName(paramName)))
+        {
+            if (string.Equals(trimmed, "true", StringComparison.OrdinalIgnoreCase) || trimmed == "1")
+            {
+                return true;
+            }
+            if (string.Equals(trimmed, "false", StringComparison.OrdinalIgnoreCase) || trimmed == "0")
+            {
+                return false;
+            }
+        }
+
+        // 3. Number coercion (schema or heuristic)
+        bool isIntegerTarget = schema.HasValue &&
+            schema.Value.TryGetProperty("type", out var numType) &&
+            numType.ValueEquals("integer");
+
+        bool isNumberTarget = schema.HasValue &&
+            schema.Value.TryGetProperty("type", out var floatType) &&
+            floatType.ValueEquals("number");
+
+        if (isIntegerTarget || (!schema.HasValue && IsNumericParameterName(paramName)))
+        {
+            if (long.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var longVal))
+            {
+                if (longVal >= int.MinValue && longVal <= int.MaxValue)
+                {
+                    return (int)longVal;
+                }
+                return longVal;
+            }
+        }
+
+        if (isNumberTarget || (!schema.HasValue && IsNumericParameterName(paramName)))
+        {
+            if (double.TryParse(trimmed, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var dblVal))
+            {
+                return dblVal;
+            }
+        }
+
+        // 4. Array coercion (schema or heuristic)
+        bool isArrayTarget = schema.HasValue &&
+            schema.Value.TryGetProperty("type", out var arrType) &&
+            arrType.ValueEquals("array");
+
+        if (isArrayTarget || (!schema.HasValue && IsArrayParameterName(paramName) && trimmed.Contains(',')))
+        {
+            if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(trimmed);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                    {
+                        return doc.RootElement.EnumerateArray().Select(ToolCallHealingTransform.UnwrapJsonElement).ToArray();
+                    }
+                }
+                catch
+                {
+                    // Fall back to comma splitting
+                }
+            }
+
+            var parts = trimmed.Split(',').Select(p => p.Trim()).Where(p => !string.IsNullOrEmpty(p)).ToArray();
+
+            if (schema.HasValue && schema.Value.TryGetProperty("items", out var itemsSchema) && itemsSchema.TryGetProperty("type", out var itemType))
+            {
+                if (itemType.ValueEquals("integer"))
+                {
+                    return parts.Select(p => int.TryParse(p, CultureInfo.InvariantCulture, out var iv) ? (object)iv : p).ToArray();
+                }
+                if (itemType.ValueEquals("number"))
+                {
+                    return parts.Select(p => double.TryParse(p, CultureInfo.InvariantCulture, out var dv) ? (object)dv : p).ToArray();
+                }
+            }
+
+            return parts;
+        }
+
+        return value;
+    }
+
+    private static bool IsBooleanParameterName(string name)
+    {
+        var n = name.ToLowerInvariant();
+        return n is "cached" or "force" or "recursive" or "verbose" or "dry_run" or "enabled" or "disabled" or "strict" or "sync" or "async"
+            || n.StartsWith("is_") || n.StartsWith("has_") || n.StartsWith("allow_") || n.StartsWith("check_");
+    }
+
+    private static bool IsNumericParameterName(string name)
+    {
+        var n = name.ToLowerInvariant();
+        return n is "start_line" or "end_line" or "line" or "count" or "limit" or "port" or "offset" or "size" or "year" or "page" or "timeout" or "delay" or "attempts" or "step"
+            || n.EndsWith("_line") || n.EndsWith("_number") || n.EndsWith("_count") || n.EndsWith("_index")
+            || n.EndsWith("_port") || n.EndsWith("_offset") || n.EndsWith("_limit") || n.EndsWith("_size")
+            || n.EndsWith("_len") || n.EndsWith("_id") || n.EndsWith("_year") || n.EndsWith("_page");
+    }
+
+    private static bool IsArrayParameterName(string name)
+    {
+        var n = name.ToLowerInvariant();
+        return n.EndsWith("s") || n.Contains("list") || n.Contains("array");
     }
 }
 
@@ -617,6 +984,8 @@ public class LenientToolDispatchChatClient : DelegatingChatClient
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        options ??= new ChatOptions();
+        options.SetToolDispatcher(_dispatcher);
         var response = await base.GetResponseAsync(chatMessages, options, cancellationToken);
         if (response?.Messages != null)
         {
@@ -633,6 +1002,8 @@ public class LenientToolDispatchChatClient : DelegatingChatClient
         ChatOptions? options = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        options ??= new ChatOptions();
+        options.SetToolDispatcher(_dispatcher);
         await foreach (var update in base.GetStreamingResponseAsync(chatMessages, options, cancellationToken))
         {
             if (update.Contents != null)
@@ -660,6 +1031,15 @@ public class LenientToolDispatchChatClient : DelegatingChatClient
             }
             yield return update;
         }
+    }
+
+    public override object? GetService(Type serviceType, object? serviceKey = null)
+    {
+        if (serviceType == typeof(LenientToolDispatcher))
+        {
+            return _dispatcher;
+        }
+        return base.GetService(serviceType, serviceKey);
     }
 
     private void NormalizeMessageToolCalls(ChatMessage message)

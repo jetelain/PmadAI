@@ -386,7 +386,40 @@ public static partial class LocalModelChatFormatter
         }
 
         var assistantMsg = new ChatMessage(ChatRole.Assistant, contents);
-        return enableHealing ? ToolCallHealingTransform.HealChatMessage(assistantMsg) : assistantMsg;
+        if (enableHealing)
+        {
+            for (int i = 0; i < assistantMsg.Contents.Count; i++)
+            {
+                if (assistantMsg.Contents[i] is FunctionCallContent fcc)
+                {
+                    var callId = string.IsNullOrWhiteSpace(fcc.CallId) ? $"call_{Guid.NewGuid():N}"[..12] : fcc.CallId;
+                    var arguments = fcc.Arguments;
+                    if (arguments is { Count: 1 } && arguments.TryGetValue("input", out var inputVal) && inputVal is string strInput && (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith("```")))
+                    {
+                        var parsed = ToolCallHealingTransform.ParseArgumentsJson(strInput, null, fcc.Name);
+                        if (parsed.Count > 0)
+                        {
+                            arguments = parsed;
+                        }
+                    }
+                    if (callId != fcc.CallId || !ReferenceEquals(arguments, fcc.Arguments))
+                    {
+                        assistantMsg.Contents[i] = new FunctionCallContent(callId, fcc.Name, arguments);
+                    }
+                }
+            }
+        }
+        return assistantMsg;
+    }
+
+    /// <summary>
+    /// Parses raw assistant output into structured messages: reasoning traces, tool calls, and text.
+    /// If healing is enabled and prose is present alongside tool calls, splits into sequential <see cref="ChatMessage"/> instances.
+    /// </summary>
+    public static List<ChatMessage> ParseAssistantMessages(string rawText, ChatDialect? dialect = null, FunctionCallNormalizer? normalizer = null, bool enableHealing = true)
+    {
+        var msg = ParseAssistantResponse(rawText, dialect, normalizer, enableHealing: false);
+        return enableHealing ? ToolCallHealingTransform.HealChatMessage(msg) : [msg];
     }
 
     private static string StripStrayTokens(string text, ChatDialect? dialect)
