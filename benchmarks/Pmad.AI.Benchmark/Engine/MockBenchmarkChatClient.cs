@@ -187,6 +187,51 @@ public sealed class MockBenchmarkChatClient : IChatClient
         // 2. If user message:
         var userText = history.LastOrDefault(m => m.Role == ChatRole.User)?.Text ?? string.Empty;
 
+        // Compaction Trajectory Scenarios
+        if (options?.ConversationId?.StartsWith("compaction", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            var compactionTrajectories = new[]
+            {
+                Scenarios.Compaction.CompactionTrajectoryLoader.LoadLargeToolTrajectory(),
+                Scenarios.Compaction.CompactionTrajectoryLoader.LoadDeepContextTrajectory()
+            };
+
+            foreach (var traj in compactionTrajectories)
+            {
+                var matchedTurn = traj.Turns.FirstOrDefault(t =>
+                    !string.IsNullOrEmpty(t.UserPrompt) &&
+                    (string.Equals(t.UserPrompt.Trim(), userText.Trim(), StringComparison.OrdinalIgnoreCase) ||
+                     userText.Contains(t.UserPrompt, StringComparison.OrdinalIgnoreCase)));
+
+                if (matchedTurn != null)
+                {
+                    if (!string.IsNullOrEmpty(matchedTurn.ExpectedToolName) && toolsAvailable)
+                    {
+                        var args = new Dictionary<string, object?>
+                        {
+                            ["target"] = $"step_{matchedTurn.TurnIndex}",
+                            ["query"] = matchedTurn.UserPrompt
+                        };
+                        return (
+                            [new FunctionCallContent($"call_compaction_{matchedTurn.TurnIndex}", matchedTurn.ExpectedToolName, args)],
+                            ChatFinishReason.ToolCalls,
+                            PromptTokens: promptTokens,
+                            OutputTokens: 25
+                        );
+                    }
+
+                    return (
+                        [new TextContent(matchedTurn.ExpectedCompletionSubstring != null
+                            ? $"Completed task: root cause resolved and verified under {matchedTurn.ExpectedCompletionSubstring}"
+                            : "Diagnostics complete.")],
+                        ChatFinishReason.Stop,
+                        PromptTokens: promptTokens,
+                        OutputTokens: 20
+                    );
+                }
+            }
+        }
+
         // RULER Scenarios
         if (toolsAvailable && userText.Contains("fetch the system architecture and audit logs for cluster 'omega-9'", StringComparison.OrdinalIgnoreCase))
         {

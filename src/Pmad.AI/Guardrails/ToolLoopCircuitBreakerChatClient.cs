@@ -27,6 +27,11 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        if (options?.ConversationId != null)
+        {
+            _breaker.Options.SessionId = options.ConversationId;
+        }
+
         InspectChatMessages(chatMessages);
 
         var response = await base.GetResponseAsync(chatMessages, options, cancellationToken);
@@ -62,6 +67,11 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
         ChatOptions? options = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        if (options?.ConversationId != null)
+        {
+            _breaker.Options.SessionId = options.ConversationId;
+        }
+
         InspectChatMessages(chatMessages);
 
         var sb = new StringBuilder();
@@ -142,6 +152,7 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
     {
         if (serviceType == typeof(ToolLoopCircuitBreakerChatClient)) return this;
         if (serviceType == typeof(ToolLoopCircuitBreaker)) return _breaker;
+        if (serviceType == typeof(CircuitBreakerTelemetry) && _breaker.Options.Telemetry != null) return _breaker.Options.Telemetry;
         return base.GetService(serviceType, serviceKey);
     }
 }

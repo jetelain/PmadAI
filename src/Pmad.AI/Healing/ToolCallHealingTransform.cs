@@ -346,7 +346,7 @@ public static partial class ToolCallHealingTransform
     /// markdown fences (```json ... ``` or ``` ... ```), trimming whitespace, removing trailing
     /// commas, and repairing unescaped control characters in string values.
     /// </summary>
-    public static string SanitizeArgumentsJson(string raw, ILogger? logger = null, string? toolName = null)
+    public static string SanitizeArgumentsJson(string raw, ILogger? logger = null, string? toolName = null, ToolCallHealingOptions? options = null)
     {
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -379,6 +379,7 @@ public static partial class ToolCallHealingTransform
 
             s = s.Trim();
             logger?.LogInformation("Stripped markdown code fences from arguments of tool '{ToolName}'", toolName ?? "unknown");
+            options?.Telemetry?.Record(ToolCallHealingEventType.FenceStripped, toolName, options.SessionId);
         }
 
         // Remove trailing commas before } or ]
@@ -386,6 +387,7 @@ public static partial class ToolCallHealingTransform
         if (afterCommas != s)
         {
             logger?.LogDebug("Repaired trailing commas in arguments of tool '{ToolName}'", toolName ?? "unknown");
+            options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Trailing comma");
             s = afterCommas;
         }
 
@@ -400,6 +402,7 @@ public static partial class ToolCallHealingTransform
             if (escaped != s)
             {
                 logger?.LogInformation("Repaired unescaped control characters in arguments of tool '{ToolName}'", toolName ?? "unknown");
+                options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Control characters");
                 s = escaped;
             }
         }
@@ -467,18 +470,22 @@ public static partial class ToolCallHealingTransform
     /// by stripping leading and trailing markdown code fences, trimming whitespace, removing trailing
     /// commas, and repairing unescaped control characters in string values.
     /// </summary>
-    public static string SanitizeJson(string raw, ILogger? logger = null, string? toolName = null)
+    public static string SanitizeJson(string raw, ILogger? logger = null, string? toolName = null, ToolCallHealingOptions? options = null)
     {
-        return SanitizeArgumentsJson(raw, logger, toolName);
+        return SanitizeArgumentsJson(raw, logger, toolName, options);
     }
 
     /// <summary>
     /// Sanitizes and parses a JSON arguments string into a strongly-typed dictionary,
     /// safe for Native AOT without reflection.
     /// </summary>
-    public static IDictionary<string, object?> ParseArgumentsJson(string rawJson, ILogger? logger = null, string? toolName = null)
+    public static IDictionary<string, object?> ParseArgumentsJson(
+        string rawJson,
+        ILogger? logger = null,
+        string? toolName = null,
+        ToolCallHealingOptions? options = null)
     {
-        var sanitized = SanitizeArgumentsJson(rawJson, logger, toolName);
+        var sanitized = SanitizeArgumentsJson(rawJson, logger, toolName, options);
         var dict = new Dictionary<string, object?>(StringComparer.Ordinal);
         try
         {
@@ -546,10 +553,11 @@ public static partial class ToolCallHealingTransform
                         }
 
                         var generatedId = $"call_{Guid.NewGuid():N}"[..12];
-                        var parsedArgs = ParseArgumentsJson(toolArgs, logger, toolName);
+                        var parsedArgs = ParseArgumentsJson(toolArgs, logger, toolName, options);
                         toolCalls.Add(new FunctionCallContent(generatedId, toolName, parsedArgs));
                         promotedMatches.Add(match);
                         logger?.LogInformation("Extracted pseudo-tool-call from text for '{ToolName}' (id: {ToolCallId})", toolName, generatedId);
+                        options?.Telemetry?.Record(ToolCallHealingEventType.PseudoTagExtracted, toolName, options.SessionId);
                     }
                 }
                 catch (Exception ex)
@@ -586,7 +594,7 @@ public static partial class ToolCallHealingTransform
                     if (ShouldPromoteToolCall(toolName, options, chatOptions))
                     {
                         var generatedId = $"call_{Guid.NewGuid():N}"[..12];
-                        var parsedArgs = ParseArgumentsJson(toolArgs, logger, toolName);
+                        var parsedArgs = ParseArgumentsJson(toolArgs, logger, toolName, options);
                         toolCalls.Add(new FunctionCallContent(generatedId, toolName, parsedArgs));
 
                         proseBefore = content[..actionMatch.Index].Trim();
@@ -594,6 +602,7 @@ public static partial class ToolCallHealingTransform
 
                         content = content.Replace(actionMatch.Value, "").Trim();
                         logger?.LogInformation("Extracted ReAct pseudo-tool-call from text for '{ToolName}' (id: {ToolCallId})", toolName, generatedId);
+                        options?.Telemetry?.Record(ToolCallHealingEventType.ActionBlockExtracted, toolName, options.SessionId);
                         return true;
                     }
                     else
@@ -688,16 +697,23 @@ public static partial class ToolCallHealingTransform
         {
             if (message.Contents[i] is FunctionCallContent fcc)
             {
-                var callId = string.IsNullOrWhiteSpace(fcc.CallId) ? $"call_{Guid.NewGuid():N}"[..12] : fcc.CallId;
+                var isCallIdGenerated = string.IsNullOrWhiteSpace(fcc.CallId);
+                var callId = isCallIdGenerated ? $"call_{Guid.NewGuid():N}"[..12] : fcc.CallId;
+                if (isCallIdGenerated)
+                {
+                    options?.Telemetry?.Record(ToolCallHealingEventType.CallIdGenerated, fcc.Name, options.SessionId);
+                }
+
                 var arguments = fcc.Arguments;
 
                 // If arguments contains a single "input" property with a string that looks like JSON
                 if (arguments is { Count: 1 } && arguments.TryGetValue("input", out var inputVal) && inputVal is string strInput && (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith("```")))
                 {
-                    var parsed = ParseArgumentsJson(strInput, logger, fcc.Name);
+                    var parsed = ParseArgumentsJson(strInput, logger, fcc.Name, options);
                     if (parsed.Count > 0)
                     {
                         arguments = parsed;
+                        options?.Telemetry?.Record(ToolCallHealingEventType.ArgumentUnwrapped, fcc.Name, options.SessionId);
                     }
                 }
 

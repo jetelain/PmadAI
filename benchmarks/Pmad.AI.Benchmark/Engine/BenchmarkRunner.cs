@@ -3,6 +3,9 @@ using System.Text.Json;
 using Microsoft.Extensions.AI;
 using Pmad.AI.Benchmark.Scenarios;
 using Pmad.AI.Compaction;
+using Pmad.AI.Guardrails;
+using Pmad.AI.Healing;
+using Pmad.AI.Tools;
 using Pmad.AI.Transcripts;
 
 namespace Pmad.AI.Benchmark.Engine;
@@ -25,6 +28,8 @@ public sealed class BenchmarkRunner
     private readonly string? _optimizationConfigId;
     private readonly string? _optimizationConfigLabel;
     private readonly string? _transcriptPath;
+    private readonly float? _temperature;
+    private readonly long? _seed;
 
     public BenchmarkRunner(
         IChatClient client,
@@ -38,7 +43,9 @@ public sealed class BenchmarkRunner
         string? configurationLabel = null,
         string? optimizationConfigId = null,
         string? optimizationConfigLabel = null,
-        string? transcriptPath = null)
+        string? transcriptPath = null,
+        float? temperature = null,
+        long? seed = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _modelId = modelId ?? throw new ArgumentNullException(nameof(modelId));
@@ -52,6 +59,8 @@ public sealed class BenchmarkRunner
         _optimizationConfigId = optimizationConfigId;
         _optimizationConfigLabel = optimizationConfigLabel;
         _transcriptPath = transcriptPath;
+        _temperature = temperature;
+        _seed = seed;
     }
 
     /// <summary>
@@ -179,7 +188,14 @@ public sealed class BenchmarkRunner
         }
 
         var compactionTelemetry = _client.GetService<CompactionTelemetry>();
+        var healingTelemetry = _client.GetService<ToolCallHealingTelemetry>();
+        var breakerTelemetry = _client.GetService<CircuitBreakerTelemetry>();
+        var dispatchTelemetry = _client.GetService<LenientDispatchTelemetry>();
+
         summary.CompactionStats = compactionTelemetry?.CreateSnapshot();
+        summary.HealingStats = healingTelemetry?.CreateSnapshot();
+        summary.CircuitBreakerStats = breakerTelemetry?.CreateSnapshot();
+        summary.DispatchStats = dispatchTelemetry?.CreateSnapshot();
 
         var verbatimClient = _client.GetService<VerbatimTranscriptChatClient>();
         if (verbatimClient != null && !string.IsNullOrWhiteSpace(_transcriptPath))
@@ -244,7 +260,9 @@ public sealed class BenchmarkRunner
             var chatOptions = new ChatOptions
             {
                 ConversationId = scenario.Id,
-                Tools = (turn.Tools ?? scenario.Tools).ToList()
+                Tools = (turn.Tools ?? scenario.Tools).ToList(),
+                Temperature = _temperature,
+                Seed = _seed
             };
 
             Log($"  [Turn {turnIdx + 1}/{scenario.Turns.Count}] User: \"{turn.UserPrompt}\"");
@@ -465,7 +483,8 @@ public sealed class BenchmarkRunner
         scenarioStopwatch.Stop();
         scenarioResult.TotalDurationMs = scenarioStopwatch.Elapsed.TotalMilliseconds;
 
-        // Compute dual scoring metrics: TaskSuccess (Binary Pass@1) & StepAccuracy (turn-by-turn)
+        // Compute scoring metrics: TaskSuccess (Binary Pass@1) & StepAccuracy (turn-by-turn)
+        scenarioResult.Suite = scenario.Suite;
         scenarioResult.TurnsPassed = scenarioResult.TurnResults.Count(t => t.Status == BenchmarkStatus.Passed);
         scenarioResult.TotalTurns = scenario.Turns.Count;
         scenarioResult.StepAccuracy = scenarioResult.TotalTurns > 0
@@ -473,10 +492,8 @@ public sealed class BenchmarkRunner
             : 0.0;
 
         scenarioResult.TaskSuccess = scenario.EvaluateTaskSuccess(scenarioResult);
-
-        // Dual scoring: 70% Task Success (Pass@1) + 30% Step Accuracy
-        var taskSuccessScore = scenarioResult.TaskSuccess ? 100.0 : 0.0;
-        scenarioResult.Score = Math.Round((0.70 * taskSuccessScore) + (0.30 * scenarioResult.StepAccuracy), 1);
+        scenarioResult.Score = scenario.ComputeScore(scenarioResult);
+        scenarioResult.FailureTaxonomy = FailureTaxonomyClassifier.Classify(scenarioResult);
 
         if (scenarioResult.TaskSuccess && scenarioResult.StepAccuracy >= 100.0)
         {
@@ -491,7 +508,14 @@ public sealed class BenchmarkRunner
             scenarioResult.Status = BenchmarkStatus.Failed;
         }
 
+        var healing = _client.GetService<ToolCallHealingTelemetry>();
+        var breaker = _client.GetService<CircuitBreakerTelemetry>();
+        var dispatch = _client.GetService<LenientDispatchTelemetry>();
+
         scenarioResult.CompactionStats = compaction?.CreateSnapshot(scenario.Id);
+        scenarioResult.HealingStats = healing?.CreateSnapshot(scenario.Id);
+        scenarioResult.CircuitBreakerStats = breaker?.CreateSnapshot(scenario.Id);
+        scenarioResult.DispatchStats = dispatch?.CreateSnapshot(scenario.Id);
 
         var endMem = GetCurrentWorkingSetMb();
         if (endMem > scenarioResult.PeakMemoryMb)

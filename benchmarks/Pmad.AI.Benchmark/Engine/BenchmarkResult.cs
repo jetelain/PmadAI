@@ -1,5 +1,8 @@
 using Microsoft.Extensions.AI;
 using Pmad.AI.Compaction;
+using Pmad.AI.Guardrails;
+using Pmad.AI.Healing;
+using Pmad.AI.Tools;
 
 namespace Pmad.AI.Benchmark.Engine;
 
@@ -105,15 +108,36 @@ public sealed class BenchmarkScenarioResult
     public int TotalTokens => TotalPromptTokens + TotalOutputTokens;
     public double GenerationTokensPerSecond => TotalDurationMs > 0 ? (TotalOutputTokens / (TotalDurationMs / 1000.0)) : 0;
     public int TotalToolCalls { get; set; }
+    public double PromptTokensPerToolCall => TotalToolCalls > 0 ? Math.Round((double)TotalPromptTokens / TotalToolCalls, 1) : 0.0;
     public double ToolAccuracyPercentage { get; set; } = 100.0;
     public double PeakMemoryMb { get; set; }
     public double PeakVramMb { get; set; }
     public bool SemanticRecallPassed { get; set; } = true;
     public List<TurnResult> TurnResults { get; init; } = [];
     public string? ErrorMessage { get; set; }
+
+    /// <summary>
+    /// Benchmark suite category (e.g. "BFCL", "SWE-bench", "RULER").
+    /// </summary>
+    public string Suite { get; set; } = "General";
+
+    /// <summary>
+    /// Diagnostic failure reason if binary TaskSuccess was not achieved.
+    /// </summary>
+    public string? TaskFailureReason { get; set; }
+
+    /// <summary>
+    /// Diagnostic failure taxonomy classification (e.g. "Patch Rejected", "Tool Loop", "Missing Tool Call", "Wrong Tool", "Bad Arguments", "Over-Calling").
+    /// </summary>
+    public string? FailureTaxonomy { get; set; }
+
     public CompactionTelemetrySnapshot? CompactionStats { get; set; }
     public int CompactionPrunedChars => CompactionStats?.TotalPrunedChars ?? 0;
     public int CompactionPrunedTokens => CompactionStats?.EstimatedPrunedTokens ?? 0;
+
+    public ToolCallHealingTelemetrySnapshot? HealingStats { get; set; }
+    public CircuitBreakerTelemetrySnapshot? CircuitBreakerStats { get; set; }
+    public LenientDispatchTelemetrySnapshot? DispatchStats { get; set; }
 }
 
 /// <summary>
@@ -256,9 +280,181 @@ public sealed class ModelBenchmarkSummary
     /// </summary>
     public string? TranscriptPath { get; set; }
 
+    /// <summary>
+    /// Unweighted binary Task Success (Pass@1) rate percentage across all evaluated scenarios:
+    /// (Scenarios with TaskSuccess / ScenariosRun) * 100.0.
+    /// </summary>
+    public double UnweightedTaskSuccessRatePercentage =>
+        ScenarioResults.Count > 0 ? Math.Round(ScenarioResults.Count(s => s.TaskSuccess) * 100.0 / ScenarioResults.Count, 1) : 0.0;
+
     public CompactionTelemetrySnapshot? CompactionStats { get; set; }
     public int CompactionPrunedChars => CompactionStats?.TotalPrunedChars ?? 0;
     public int CompactionPrunedTokens => CompactionStats?.EstimatedPrunedTokens ?? 0;
 
+    public ToolCallHealingTelemetrySnapshot? HealingStats { get; set; }
+    public CircuitBreakerTelemetrySnapshot? CircuitBreakerStats { get; set; }
+    public LenientDispatchTelemetrySnapshot? DispatchStats { get; set; }
+
     public List<BenchmarkScenarioResult> ScenarioResults { get; init; } = [];
+
+    /// <summary>
+    /// Average prompt tokens per executed tool call across all scenarios for this model.
+    /// </summary>
+    public double PromptTokensPerToolCall => TotalToolCalls > 0 ? Math.Round((double)TotalPromptTokens / TotalToolCalls, 1) : 0.0;
+
+    /// <summary>
+    /// Average prompt tokens expended per successfully completed scenario (Task Success).
+    /// </summary>
+    public double PromptTokensPerSuccessfulScenario => ScenariosPassed > 0 ? Math.Round((double)TotalPromptTokens / ScenariosPassed, 1) : 0.0;
+
+    /// <summary>
+    /// Statistical summary if this model/configuration was evaluated across multiple repeated runs (N >= 2).
+    /// </summary>
+    public MultiRunStatisticalSummary? MultiRunStats { get; set; }
+
+    /// <summary>
+    /// Aggregates scenario results into per-suite summaries (e.g. BFCL, SWE-bench, RULER, Compaction).
+    /// </summary>
+    public IReadOnlyList<SuiteBenchmarkSummary> GetSuiteSummaries()
+    {
+        return ScenarioResults
+            .GroupBy(s => s.Suite)
+            .OrderBy(g => g.Key switch
+            {
+                "BFCL" => 1,
+                "SWE-bench" => 2,
+                "RULER" => 3,
+                "Compaction" => 4,
+                _ => 5
+            })
+            .Select(g =>
+            {
+                var totalWeight = g.Sum(s => s.Weight);
+                var passRate = totalWeight > 0
+                    ? Math.Round(g.Sum(s => s.Score * s.Weight) / totalWeight, 1)
+                    : (g.Any() ? Math.Round(g.Average(s => s.Score), 1) : 0.0);
+                var taskSuccess = totalWeight > 0
+                    ? Math.Round(g.Sum(s => (s.TaskSuccess ? 100.0 : 0.0) * s.Weight) / totalWeight, 1)
+                    : 0.0;
+                var stepAcc = totalWeight > 0
+                    ? Math.Round(g.Sum(s => s.StepAccuracy * s.Weight) / totalWeight, 1)
+                    : 0.0;
+                var totalTurns = g.Sum(s => s.TotalTurns);
+                var turnsPassed = g.Sum(s => s.TurnsPassed);
+
+                return new SuiteBenchmarkSummary
+                {
+                    Suite = g.Key,
+                    ScenariosCount = g.Count(),
+                    ScenariosPassed = g.Count(s => s.TaskSuccess),
+                    PassRatePercentage = passRate,
+                    TaskSuccessRatePercentage = taskSuccess,
+                    StepAccuracyPercentage = stepAcc,
+                    TotalTurns = totalTurns,
+                    TurnsPassed = turnsPassed
+                };
+            })
+            .ToList();
+    }
+}
+
+/// <summary>
+/// Aggregated performance summary for a specific benchmark suite category (e.g. BFCL, SWE-bench, RULER, Compaction).
+/// </summary>
+public sealed class SuiteBenchmarkSummary
+{
+    public required string Suite { get; init; }
+    public int ScenariosCount { get; init; }
+    public int ScenariosPassed { get; init; }
+    public double PassRatePercentage { get; init; }
+    public double TaskSuccessRatePercentage { get; init; }
+    public double StepAccuracyPercentage { get; init; }
+    public int TotalTurns { get; init; }
+    public int TurnsPassed { get; init; }
+    public double TurnAccuracyPercentage => TotalTurns > 0 ? Math.Round(TurnsPassed * 100.0 / TotalTurns, 1) : 0.0;
+}
+
+/// <summary>
+/// Statistical summary across multiple repeated benchmark runs (N >= 2) for a given configuration.
+/// Quantifies Mean ± StdDev for key metrics and computes paired deltas against the baseline configuration.
+/// </summary>
+public sealed class MultiRunStatisticalSummary
+{
+    public required string ModelName { get; init; }
+    public required string ConfigurationLabel { get; init; }
+    public string? OptimizationConfigId { get; init; }
+    public int RunsCount { get; init; }
+
+    public (double Mean, double StdDev) PassRate { get; init; }
+    public (double Mean, double StdDev) TaskSuccessRate { get; init; }
+    public (double Mean, double StdDev) StepAccuracy { get; init; }
+    public (double Mean, double StdDev) PromptTokens { get; init; }
+    public (double Mean, double StdDev) PromptTokensPerToolCall { get; init; }
+    public (double Mean, double StdDev) GenerationTokensPerSecond { get; init; }
+    public (double Mean, double StdDev) TotalTimeSeconds { get; init; }
+
+    // Paired difference vs baseline (if baseline is present)
+    public double? DeltaPassRateVsBaseline { get; set; }
+    public double? DeltaTaskSuccessVsBaseline { get; set; }
+    public double? DeltaPromptTokensPercentageVsBaseline { get; set; }
+    public double? DeltaTimePercentageVsBaseline { get; set; }
+
+    public static MultiRunStatisticalSummary Compute(IReadOnlyList<ModelBenchmarkSummary> runs, MultiRunStatisticalSummary? baselineSummary = null)
+    {
+        if (runs == null || runs.Count == 0) throw new ArgumentException("Runs cannot be empty.", nameof(runs));
+
+        var n = runs.Count;
+        var first = runs[0];
+
+        var passRates = runs.Select(r => r.PassRatePercentage).ToList();
+        var taskSuccessRates = runs.Select(r => r.TaskSuccessRatePercentage).ToList();
+        var stepAccuracies = runs.Select(r => r.StepAccuracyPercentage).ToList();
+        var promptTokens = runs.Select(r => (double)r.TotalPromptTokens).ToList();
+        var tokensPerCall = runs.Select(r => r.PromptTokensPerToolCall).ToList();
+        var genSpeeds = runs.Select(r => r.AverageGenerationTokensPerSecond).ToList();
+        var durations = runs.Select(r => r.TotalTimeMs / 1000.0).ToList();
+
+        var summary = new MultiRunStatisticalSummary
+        {
+            ModelName = first.ModelName,
+            ConfigurationLabel = first.OptimizationConfigLabel ?? first.ConfigurationLabel ?? "Default",
+            OptimizationConfigId = first.OptimizationConfigId,
+            RunsCount = n,
+            PassRate = CalculateMeanAndStdDev(passRates),
+            TaskSuccessRate = CalculateMeanAndStdDev(taskSuccessRates),
+            StepAccuracy = CalculateMeanAndStdDev(stepAccuracies),
+            PromptTokens = CalculateMeanAndStdDev(promptTokens),
+            PromptTokensPerToolCall = CalculateMeanAndStdDev(tokensPerCall),
+            GenerationTokensPerSecond = CalculateMeanAndStdDev(genSpeeds),
+            TotalTimeSeconds = CalculateMeanAndStdDev(durations)
+        };
+
+        if (baselineSummary != null)
+        {
+            summary.DeltaPassRateVsBaseline = Math.Round(summary.PassRate.Mean - baselineSummary.PassRate.Mean, 1);
+            summary.DeltaTaskSuccessVsBaseline = Math.Round(summary.TaskSuccessRate.Mean - baselineSummary.TaskSuccessRate.Mean, 1);
+            if (baselineSummary.PromptTokens.Mean > 0)
+            {
+                summary.DeltaPromptTokensPercentageVsBaseline = Math.Round(
+                    (baselineSummary.PromptTokens.Mean - summary.PromptTokens.Mean) * 100.0 / baselineSummary.PromptTokens.Mean, 1);
+            }
+            if (baselineSummary.TotalTimeSeconds.Mean > 0)
+            {
+                summary.DeltaTimePercentageVsBaseline = Math.Round(
+                    (baselineSummary.TotalTimeSeconds.Mean - summary.TotalTimeSeconds.Mean) * 100.0 / baselineSummary.TotalTimeSeconds.Mean, 1);
+            }
+        }
+
+        return summary;
+    }
+
+    public static (double Mean, double StdDev) CalculateMeanAndStdDev(IReadOnlyList<double> values)
+    {
+        if (values.Count == 0) return (0.0, 0.0);
+        if (values.Count == 1) return (Math.Round(values[0], 2), 0.0);
+        var mean = values.Average();
+        var sumSquares = values.Sum(v => Math.Pow(v - mean, 2));
+        var stdDev = Math.Sqrt(sumSquares / (values.Count - 1));
+        return (Math.Round(mean, 2), Math.Round(stdDev, 2));
+    }
 }

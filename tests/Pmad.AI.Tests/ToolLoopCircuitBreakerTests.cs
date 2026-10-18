@@ -256,11 +256,12 @@ public class ToolLoopCircuitBreakerTests
     }
 
     [Fact]
-    public void EvaluateToolInvocation_NewUserPrompt_ResetsPingPongCounter()
+    public void EvaluateToolInvocation_NewUserPrompt_WhenResetOnUserPromptEnabled_ResetsPingPongCounter()
     {
         var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
         {
-            PingPongThreshold = 2
+            PingPongThreshold = 2,
+            ResetOnUserPrompt = true
         });
 
         // Initial call in turn 1
@@ -271,9 +272,49 @@ public class ToolLoopCircuitBreakerTests
         // User provides a new guiding prompt in turn 2
         breaker.RecordUserPrompt("Now check database connections instead.");
 
-        // Calling the same tool now does NOT trip because the user provided new guidance
+        // Calling the same tool now does NOT trip because ResetOnUserPrompt is true
         var r2 = breaker.EvaluateToolInvocation("search", "{\"query\": \"NullReferenceException\"}");
         Assert.False(r2.IsLoopDetected);
+    }
+
+    [Fact]
+    public void EvaluateToolInvocation_Default_PreservesLoopCounterAcrossPromptVariations()
+    {
+        var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
+        {
+            PingPongThreshold = 2
+        });
+
+        // Turn 1
+        breaker.RecordUserPrompt("[SWE-bench: sympy-20590] Locate where __slots__ is defined.");
+        var r1 = breaker.EvaluateToolInvocation("search_code", "{\"query\": \"__slots__\"}");
+        Assert.False(r1.IsLoopDetected);
+
+        // Turn 2 with slightly different wording
+        breaker.RecordUserPrompt("Try searching for __slots__ again in sympy/core/symbol.py.");
+        var r2 = breaker.EvaluateToolInvocation("search_code", "{\"query\": \"__slots__\"}");
+
+        // Trips because default behavior does not wipe consecutive counter on unchanged state
+        Assert.True(r2.IsLoopDetected);
+        Assert.Equal(LoopType.ToolPingPong, r2.Type);
+    }
+
+    [Theory]
+    [InlineData("Proceed with step 2.", true)]
+    [InlineData("Step 3", true)]
+    [InlineData("Turn 4", true)]
+    [InlineData("continue", true)]
+    [InlineData("next", true)]
+    [InlineData("retry", true)]
+    [InlineData("again", true)]
+    [InlineData("Try searching for __slots__ again in sympy/core/symbol.py.", true)]
+    [InlineData("Please search for __slots__ one more time.", true)]
+    [InlineData("Search for __slots__ in sympy/core/symbol.py again.", true)]
+    [InlineData("Now check database connections instead.", false)]
+    [InlineData("Deploy to production cluster.", false)]
+    public void IsContinuationPrompt_IdentifiesContinuationAndRetryPrompts(string prompt, bool expected)
+    {
+        Assert.Equal(expected, ToolLoopCircuitBreaker.IsContinuationPrompt(prompt));
     }
 }
 

@@ -12,14 +12,14 @@ public static class ConsoleReportFormatter
     {
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine(new string('=', 134));
+        Console.WriteLine(new string('=', 140));
         Console.WriteLine($"   BENCHMARK SCENARIO BREAKDOWN: {summary.DisplayName.ToUpperInvariant()}");
-        Console.WriteLine(new string('=', 134));
+        Console.WriteLine(new string('=', 140));
         Console.ResetColor();
 
-        Console.WriteLine(string.Format("{0,-23} | {1,-6} | {2,-6} | {3,-8} | {4,-7} | {5,-6} | {6,-6} | {7,-8} | {8,-8} | {9,-9} | {10,-8} | {11,-8} | {12,-8}",
-            "Scenario", "Status", "Pass@1", "Step Acc", "Score", "Weight", "Tools", "Prompt", "Gen Tok", "Gen Tok/s", "RAM", "GPU VRAM", "Time(ms)"));
-        Console.WriteLine(new string('-', 134));
+        Console.WriteLine(string.Format("{0,-20} | {1,-9} | {2,-6} | {3,-6} | {4,-8} | {5,-7} | {6,-5} | {7,-14} | {8,-5} | {9,-9} | {10,-8} | {11,-8} | {12,-8}",
+            "Scenario", "Suite", "Status", "Pass@1", "Step Acc", "Score", "Wgt", "Taxonomy", "Tools", "Gen Tok/s", "RAM", "GPU VRAM", "Time(ms)"));
+        Console.WriteLine(new string('-', 140));
 
         foreach (var sc in summary.ScenarioResults)
         {
@@ -40,75 +40,127 @@ public static class ConsoleReportFormatter
             var stepAccStr = $"{sc.StepAccuracy:F1}%";
             var scoreStr = $"{sc.Score:F1}%";
             var weightStr = $"{sc.Weight:F1}";
+            var taxonomyStr = !string.IsNullOrEmpty(sc.FailureTaxonomy)
+                ? (sc.FailureTaxonomy.Length > 14 ? sc.FailureTaxonomy[..11] + "..." : sc.FailureTaxonomy)
+                : "-";
 
-            Console.WriteLine(string.Format("{0,-23} | {1,-6} | {2,-6} | {3,-8} | {4,-7} | {5,-6} | {6,-6} | {7,-8} | {8,-8} | {9,-9:F1} | {10,-8} | {11,-8} | {12,-8:F0}",
-                sc.ScenarioName.Length > 23 ? sc.ScenarioName[..20] + "..." : sc.ScenarioName,
+            Console.WriteLine(string.Format("{0,-20} | {1,-9} | {2,-6} | {3,-6} | {4,-8} | {5,-7} | {6,-5} | {7,-14} | {8,-5} | {9,-9:F1} | {10,-8} | {11,-8} | {12,-8:F0}",
+                sc.ScenarioName.Length > 20 ? sc.ScenarioName[..17] + "..." : sc.ScenarioName,
+                sc.Suite.Length > 9 ? sc.Suite[..9] : sc.Suite,
                 statusStr,
                 passAt1Str,
                 stepAccStr,
                 scoreStr,
                 weightStr,
+                taxonomyStr,
                 sc.TotalToolCalls,
-                sc.TotalPromptTokens,
-                sc.TotalOutputTokens,
                 sc.GenerationTokensPerSecond,
                 BenchmarkRunner.FormatMemory(sc.PeakMemoryMb),
                 vramStr,
                 sc.TotalDurationMs));
 
+            if (!sc.TaskSuccess)
+            {
+                Console.ForegroundColor = ConsoleColor.DarkYellow;
+                var reason = sc.TaskFailureReason ?? sc.ErrorMessage ?? "Task verification failed";
+                var tax = !string.IsNullOrEmpty(sc.FailureTaxonomy) ? $" [{sc.FailureTaxonomy}]" : "";
+                Console.WriteLine($"      ↳ Task Failure{tax}: {reason}");
+            }
+
             Console.ResetColor();
         }
 
-        Console.WriteLine(new string('-', 134));
+        Console.WriteLine(new string('-', 140));
     }
 
     public static void PrintModelsComparisonTable(IReadOnlyList<ModelBenchmarkSummary> allSummaries)
     {
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine(new string('=', 134));
+        Console.WriteLine(new string('=', 140));
         Console.WriteLine("   OVERALL MODELS TOOL CALLING & PERFORMANCE METRICS COMPARISON");
-        Console.WriteLine(new string('=', 134));
+        Console.WriteLine(new string('=', 140));
         Console.ResetColor();
 
-        Console.WriteLine(string.Format("{0,-20} | {1,-7} | {2,-9} | {3,-6} | {4,-7} | {5,-8} | {6,-9} | {7,-6} | {8,-8} | {9,-8} | {10,-8} | {11,-8} | {12,-9}",
-            "Model", "Backend", "Reasoning", "Passed", "Pass@1", "Step Acc", "Pass Rate", "Tools", "Gen Toks", "Avg Tok/s", "RAM", "GPU VRAM", "Total Time"));
-        Console.WriteLine(new string('-', 134));
+        Console.WriteLine(string.Format("{0,-18} | {1,-7} | {2,-9} | {3,-6} | {4,-8} | {5,-8} | {6,-8} | {7,-8} | {8,-5} | {9,-8} | {10,-8} | {11,-8} | {12,-9}",
+            "Model", "Backend", "Reasoning", "Passed", "Pass@1(W)", "Pass@1(U)", "Step Acc", "PassRate", "Tools", "Gen Toks", "AvgTok/s", "RAM", "Total Time"));
+        Console.WriteLine(new string('-', 140));
 
         foreach (var m in allSummaries)
         {
             var passedRatio = $"{m.ScenariosPassed}/{m.ScenariosRun}";
-            var passAt1RateStr = $"{m.TaskSuccessRatePercentage:F1}%";
+            var passAt1WeightedStr = $"{m.TaskSuccessRatePercentage:F1}%";
+            var passAt1UnweightedStr = $"{m.UnweightedTaskSuccessRatePercentage:F1}%";
             var stepAccRateStr = $"{m.StepAccuracyPercentage:F1}%";
             var passRateStr = $"{m.PassRatePercentage:F1}%";
             var totalTimeSec = $"{m.TotalTimeMs / 1000.0:F2}s";
             var backendStr = m.Backend ?? (m.GpuLayers > 0 ? "Vulkan" : "CPU");
             var reasStr = m.ReasoningEnabled.HasValue ? (m.ReasoningEnabled.Value ? "Enabled" : "Disabled") : "Default";
-            var vramStr = m.PeakVramMb > 0 ? BenchmarkRunner.FormatMemory(m.PeakVramMb) : "-";
 
             if (m.PassRatePercentage >= 100) Console.ForegroundColor = ConsoleColor.Green;
             else if (m.PassRatePercentage >= 50) Console.ForegroundColor = ConsoleColor.Yellow;
             else Console.ForegroundColor = ConsoleColor.Red;
 
-            Console.WriteLine(string.Format("{0,-20} | {1,-7} | {2,-9} | {3,-6} | {4,-7} | {5,-8} | {6,-9} | {7,-6} | {8,-8} | {9,-8:F1} | {10,-8} | {11,-8} | {12,-9}",
-                m.ModelName.Length > 20 ? m.ModelName[..17] + "..." : m.ModelName,
+            Console.WriteLine(string.Format("{0,-18} | {1,-7} | {2,-9} | {3,-6} | {4,-8} | {5,-8} | {6,-8} | {7,-8} | {8,-5} | {9,-8} | {10,-8:F1} | {11,-8} | {12,-9}",
+                m.ModelName.Length > 18 ? m.ModelName[..15] + "..." : m.ModelName,
                 backendStr,
                 reasStr,
                 passedRatio,
-                passAt1RateStr,
+                passAt1WeightedStr,
+                passAt1UnweightedStr,
                 stepAccRateStr,
                 passRateStr,
                 m.TotalToolCalls,
                 m.TotalOutputTokens,
                 m.AverageGenerationTokensPerSecond,
                 BenchmarkRunner.FormatMemory(m.PeakMemoryMb),
-                vramStr,
                 totalTimeSec));
 
             Console.ResetColor();
         }
 
-        Console.WriteLine(new string('-', 134));
+        Console.WriteLine(new string('-', 140));
+    }
+
+    /// <summary>
+    /// Prints a benchmark suite breakdown (BFCL / SWE-bench / RULER).
+    /// </summary>
+    public static void PrintSuiteComparisonTable(IReadOnlyList<ModelBenchmarkSummary> allSummaries)
+    {
+        var anySuites = allSummaries.Any(s => s.ScenarioResults.Any(r => !string.IsNullOrEmpty(r.Suite)));
+        if (!anySuites) return;
+
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine(new string('=', 140));
+        Console.WriteLine("   BENCHMARK SUITE BREAKDOWN (BFCL / SWE-BENCH / RULER)");
+        Console.WriteLine(new string('=', 140));
+        Console.ResetColor();
+
+        Console.WriteLine(string.Format("{0,-24} | {1,-12} | {2,-10} | {3,-10} | {4,-10} | {5,-14} | {6,-10} | {7,-10}",
+            "Model", "Suite", "Scenarios", "Pass@1", "Step Acc", "Turns Passed", "Turn Acc", "Pass Rate"));
+        Console.WriteLine(new string('-', 140));
+
+        foreach (var m in allSummaries)
+        {
+            foreach (var suite in m.GetSuiteSummaries())
+            {
+                var scenariosRatio = $"{suite.ScenariosPassed}/{suite.ScenariosCount}";
+                var turnsRatio = $"{suite.TurnsPassed}/{suite.TotalTurns}";
+
+                Console.WriteLine(string.Format("{0,-24} | {1,-12} | {2,-10} | {3,-10:F1}% | {4,-10:F1}% | {5,-14} | {6,-10:F1}% | {7,-10:F1}%",
+                    m.ModelName.Length > 24 ? m.ModelName[..21] + "..." : m.ModelName,
+                    suite.Suite,
+                    scenariosRatio,
+                    suite.TaskSuccessRatePercentage,
+                    suite.StepAccuracyPercentage,
+                    turnsRatio,
+                    suite.TurnAccuracyPercentage,
+                    suite.PassRatePercentage));
+            }
+        }
+
+        Console.WriteLine(new string('-', 140));
     }
 
     /// <summary>
@@ -253,6 +305,53 @@ public static class ConsoleReportFormatter
         }
 
         Console.WriteLine(new string('-', 134));
+        Console.WriteLine();
+    }
+
+    public static void PrintMultiRunStatisticalTable(IReadOnlyList<ModelBenchmarkSummary> allSummaries)
+    {
+        var summariesWithMultiRun = allSummaries.Where(s => s.MultiRunStats != null).ToList();
+        if (summariesWithMultiRun.Count == 0) return;
+
+        var runsCount = summariesWithMultiRun.First().MultiRunStats!.RunsCount;
+
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine(new string('=', 154));
+        Console.WriteLine($"   STATISTICAL MULTI-RUN EVALUATION (N = {runsCount}, Mean ± StdDev)");
+        Console.WriteLine(new string('=', 154));
+        Console.ResetColor();
+
+        Console.WriteLine(string.Format("{0,-24} | {1,-28} | {2,-16} | {3,-16} | {4,-14} | {5,-16} | {6,-10} | {7,-12}",
+            "Model", "Configuration", "Pass Rate %", "Pass@1 (Task) %", "Step Acc %", "Prompt Tokens", "Tok/Call", "Duration"));
+        Console.WriteLine(new string('-', 154));
+
+        foreach (var s in summariesWithMultiRun)
+        {
+            var stats = s.MultiRunStats!;
+            var configName = !string.IsNullOrWhiteSpace(s.OptimizationConfigLabel)
+                ? s.OptimizationConfigLabel
+                : (s.ConfigurationLabel ?? "Default");
+
+            var passRateStr = $"{stats.PassRate.Mean:F1} ± {stats.PassRate.StdDev:F1}%";
+            var taskSuccessStr = $"{stats.TaskSuccessRate.Mean:F1} ± {stats.TaskSuccessRate.StdDev:F1}%";
+            var stepAccStr = $"{stats.StepAccuracy.Mean:F1} ± {stats.StepAccuracy.StdDev:F1}%";
+            var promptTokensStr = $"{stats.PromptTokens.Mean:F0} ± {stats.PromptTokens.StdDev:F0}";
+            var tokPerCallStr = $"{stats.PromptTokensPerToolCall.Mean:F0} ± {stats.PromptTokensPerToolCall.StdDev:F0}";
+            var durationStr = $"{stats.TotalTimeSeconds.Mean:F1} ± {stats.TotalTimeSeconds.StdDev:F1}s";
+
+            Console.WriteLine(string.Format("{0,-24} | {1,-28} | {2,-16} | {3,-16} | {4,-14} | {5,-16} | {6,-10} | {7,-12}",
+                s.ModelName.Length > 24 ? s.ModelName[..21] + "..." : s.ModelName,
+                configName.Length > 28 ? configName[..25] + "..." : configName,
+                passRateStr,
+                taskSuccessStr,
+                stepAccStr,
+                promptTokensStr,
+                tokPerCallStr,
+                durationStr));
+        }
+
+        Console.WriteLine(new string('-', 154));
         Console.WriteLine();
     }
 }

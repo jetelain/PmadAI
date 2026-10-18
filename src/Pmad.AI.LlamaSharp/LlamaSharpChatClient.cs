@@ -362,6 +362,9 @@ public sealed class LlamaSharpChatClient : IChatClient
     /// </summary>
     public string? MtpPath => _options.MtpPath;
 
+    internal LLamaWeights Weights => _weights;
+    internal LLamaContext Context => _context;
+
     /// <inheritdoc />
     public ChatClientMetadata Metadata => _metadata;
 
@@ -442,7 +445,7 @@ public sealed class LlamaSharpChatClient : IChatClient
                 }
 
                 var promptText = _dialect.FormatPrompt(messages, options?.Tools, enableReasoning, reasoningEffort);
-                int inputTokens = _context.Tokenize(promptText).Length;
+                int inputTokens = SafeCountInputTokens(promptText);
 
                 LogOperation("Starting completion for model '{ModelPath}'. Prompt length: {PromptLength} chars, Tokens: {InputTokens}, Reasoning: {ReasoningEnabled}, Effort: {ReasoningEffort}",
                     _modelPath, promptText.Length, inputTokens, enableReasoning, reasoningEffort ?? "none");
@@ -459,8 +462,8 @@ public sealed class LlamaSharpChatClient : IChatClient
                     }
 
                     var executor = _clipModel != null
-                        ? new InteractiveExecutor(_context, _clipModel)
-                        : new InteractiveExecutor(_context);
+                        ? new SafeInteractiveExecutor(_context, _clipModel)
+                        : new SafeInteractiveExecutor(_context);
 
                     if (embeds.Count > 0)
                     {
@@ -522,6 +525,8 @@ public sealed class LlamaSharpChatClient : IChatClient
             finally
             {
                 _inferenceLock.Release();
+                GC.KeepAlive(_context);
+                GC.KeepAlive(_weights);
             }
         }, ct).ConfigureAwait(false);
     }
@@ -583,8 +588,8 @@ public sealed class LlamaSharpChatClient : IChatClient
                 }
 
                 var executor = _clipModel != null
-                    ? new InteractiveExecutor(_context, _clipModel)
-                    : new InteractiveExecutor(_context);
+                    ? new SafeInteractiveExecutor(_context, _clipModel)
+                    : new SafeInteractiveExecutor(_context);
 
                 if (embeds.Count > 0)
                 {
@@ -645,6 +650,8 @@ public sealed class LlamaSharpChatClient : IChatClient
         finally
         {
             _inferenceLock.Release();
+            GC.KeepAlive(_context);
+            GC.KeepAlive(_weights);
         }
     }
 
@@ -723,6 +730,37 @@ public sealed class LlamaSharpChatClient : IChatClient
         if (_logger.IsEnabled(level))
         {
             _logger.Log(level, message, args);
+        }
+    }
+
+    /// <summary>
+    /// Safely counts or estimates prompt tokens for logging and usage reporting without risking
+    /// unmanaged access violations (0xC0000005) or stack overflows from native llama_tokenize on large buffers.
+    /// </summary>
+    internal int SafeCountInputTokens(string promptText)
+    {
+        if (string.IsNullOrEmpty(promptText))
+        {
+            return 0;
+        }
+
+        // llama.cpp native BPE tokenizer (llama_tokenize) is prone to native access violations (0xC0000005)
+        // or std::regex stack overflows when invoked with large prompt buffers (e.g. multi-turn tool outputs > 8 KB).
+        // Access violations in native code cannot be caught by managed try/catch in modern .NET and crash the process.
+        // For large prompts, use zero-allocation, fast HeuristicTokenEstimator.
+        // For smaller prompts, exact native tokenization is safe and fast.
+        if (promptText.Length > 8192 || _disposed || _context.NativeHandle.IsClosed || _context.NativeHandle.IsInvalid)
+        {
+            return Pmad.AI.Tokens.HeuristicTokenEstimator.Default.Estimate(promptText);
+        }
+
+        try
+        {
+            return _context.Tokenize(promptText).Length;
+        }
+        catch
+        {
+            return Pmad.AI.Tokens.HeuristicTokenEstimator.Default.Estimate(promptText);
         }
     }
 

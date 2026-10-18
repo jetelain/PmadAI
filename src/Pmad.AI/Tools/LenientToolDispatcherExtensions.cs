@@ -11,13 +11,17 @@ public static class LenientToolDispatcherExtensions
     /// <summary>
     /// Adds <see cref="LenientToolDispatchChatClient"/> middleware to rewrite aliased or translated tool calls.
     /// Place between <see cref="Pmad.AI.Healing.ToolCallHealingChatClient"/> (inner) and <c>FunctionInvokingChatClient</c> (outer).
+    /// If <paramref name="dispatcher"/> is <c>null</c>, no middleware is registered.
     /// </summary>
     public static ChatClientBuilder UseLenientToolDispatch(
         this ChatClientBuilder builder,
-        LenientToolDispatcher dispatcher)
+        LenientToolDispatcher? dispatcher)
     {
         ArgumentNullException.ThrowIfNull(builder);
-        ArgumentNullException.ThrowIfNull(dispatcher);
+        if (dispatcher == null)
+        {
+            return builder;
+        }
         return builder.Use(innerClient => new LenientToolDispatchChatClient(innerClient, dispatcher));
     }
 

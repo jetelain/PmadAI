@@ -37,6 +37,7 @@ public class RulerScenario : BenchmarkScenario
     public override string Id => _id;
     public override string Name => _name;
     public override string Description => _description;
+    public override string Suite => "RULER";
 
     public override double ComplexityMultiplier => _targetTokens switch
     {

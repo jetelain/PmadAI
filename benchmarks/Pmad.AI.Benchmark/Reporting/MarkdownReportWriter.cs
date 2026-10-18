@@ -3,6 +3,9 @@ using System.Text;
 using System.Text.Json;
 using Pmad.AI.Benchmark.Engine;
 using Pmad.AI.Compaction;
+using Pmad.AI.Guardrails;
+using Pmad.AI.Healing;
+using Pmad.AI.Tools;
 
 namespace Pmad.AI.Benchmark.Reporting;
 
@@ -45,8 +48,8 @@ public static class MarkdownReportWriter
 
         sb.AppendLine("## Summary Comparison");
         sb.AppendLine();
-        sb.AppendLine("| Model | Backend | Reasoning | Scenarios Passed | Pass@1 Rate | Step Acc | Pass Rate | Tool Calls | Gen Tokens | Avg Speed (tok/s) | Sys RAM | GPU VRAM | Total Time |");
-        sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+        sb.AppendLine("| Model | Backend | Reasoning | Scenarios Passed | Pass@1 (Wtd) | Pass@1 (Unwtd) | Step Acc | Pass Rate | Tool Calls | Gen Tokens | Avg Speed (tok/s) | Sys RAM | GPU VRAM | Total Time |");
+        sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
 
         foreach (var m in summaries)
         {
@@ -56,7 +59,33 @@ public static class MarkdownReportWriter
             var modelDisplay = !string.IsNullOrWhiteSpace(m.TranscriptPath)
                 ? $"[`{m.DisplayName}`]({m.TranscriptPath})"
                 : $"`{m.DisplayName}`";
-            sb.AppendLine($"| {modelDisplay} | {backendStr} | {reasStr} | {m.ScenariosPassed}/{m.ScenariosRun} | {m.TaskSuccessRatePercentage:F1}% | {m.StepAccuracyPercentage:F1}% | {m.PassRatePercentage:F1}% | {m.TotalToolCalls} | {m.TotalOutputTokens} | {m.AverageGenerationTokensPerSecond:F1} | {BenchmarkRunner.FormatMemory(m.PeakMemoryMb)} | {vramStr} | {m.TotalTimeMs / 1000.0:F2}s |");
+            sb.AppendLine($"| {modelDisplay} | {backendStr} | {reasStr} | {m.ScenariosPassed}/{m.ScenariosRun} | {m.TaskSuccessRatePercentage:F1}% | {m.UnweightedTaskSuccessRatePercentage:F1}% | {m.StepAccuracyPercentage:F1}% | {m.PassRatePercentage:F1}% | {m.TotalToolCalls} | {m.TotalOutputTokens} | {m.AverageGenerationTokensPerSecond:F1} | {BenchmarkRunner.FormatMemory(m.PeakMemoryMb)} | {vramStr} | {m.TotalTimeMs / 1000.0:F2}s |");
+        }
+
+        // Suite Breakdown (B1)
+        var anySuiteBreakdown = summaries.Any(s => s.ScenarioResults.Any(r => !string.IsNullOrEmpty(r.Suite)));
+        if (anySuiteBreakdown)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Benchmark Suite Breakdown (BFCL / SWE-bench / RULER)");
+            sb.AppendLine();
+            sb.AppendLine("> Evaluates performance separated by benchmark domain: schema adherence and tool call syntax (BFCL), multi-turn agentic software engineering (SWE-bench), and needle-in-a-haystack retrieval (RULER).");
+            sb.AppendLine();
+            sb.AppendLine("| Model | Suite | Scenarios | Pass@1 (Task Success) | Step Acc | Turns Passed | Turn Acc | Weighted Pass Rate |");
+            sb.AppendLine("|---|---|---|---|---|---|---|---|");
+
+            foreach (var m in summaries)
+            {
+                var suites = m.GetSuiteSummaries();
+                foreach (var suite in suites)
+                {
+                    var modelDisplay = !string.IsNullOrWhiteSpace(m.TranscriptPath)
+                        ? $"[`{m.DisplayName}`]({m.TranscriptPath})"
+                        : $"`{m.DisplayName}`";
+
+                    sb.AppendLine($"| {modelDisplay} | **{suite.Suite}** | {suite.ScenariosPassed}/{suite.ScenariosCount} | {suite.TaskSuccessRatePercentage:F1}% | {suite.StepAccuracyPercentage:F1}% | {suite.TurnsPassed}/{suite.TotalTurns} | {suite.TurnAccuracyPercentage:F1}% | {suite.PassRatePercentage:F1}% |");
+                }
+            }
         }
 
         // Hardware acceleration comparison (CPU vs Vulkan)
@@ -201,27 +230,27 @@ public static class MarkdownReportWriter
                 }
             }
 
-            // Semantic Recall Scorecard
-            var hasCompaction = summaries.Any(s => s.ScenarioResults.Any(r => r.ScenarioId == "compaction"));
+            // Semantic Recall & Compaction Scorecard
+            var hasCompaction = summaries.Any(s => s.ScenarioResults.Any(r => r.Suite == "Compaction" || r.ScenarioId.Contains("compaction")));
             if (hasCompaction)
             {
                 sb.AppendLine();
-                sb.AppendLine("### Semantic Probe Recall Scorecard (15-Turn Coding Agent)");
+                sb.AppendLine("### Compaction & Semantic Probe Recall Scorecard");
                 sb.AppendLine();
-                sb.AppendLine("| Model | Configuration | 15-Turn Workflow | Turn 15 Semantic Probe | Peak Context Window | Total Scenario Tokens |");
-                sb.AppendLine("|---|---|---|---|---|---|");
+                sb.AppendLine("| Model | Configuration | Scenario | Workflow Status | Semantic Recall Probe | Peak Context Window | Total Scenario Tokens |");
+                sb.AppendLine("|---|---|---|---|---|---|---|");
 
                 foreach (var group in modelsWithBaseline)
                 {
                     foreach (var s in group)
                     {
-                        var compSc = s.ScenarioResults.FirstOrDefault(r => r.ScenarioId == "compaction");
-                        if (compSc != null)
+                        var compScenarios = s.ScenarioResults.Where(r => r.Suite == "Compaction" || r.ScenarioId.Contains("compaction")).ToList();
+                        foreach (var compSc in compScenarios)
                         {
                             var recallStatus = compSc.SemanticRecallPassed ? "✅ PASS" : "❌ FAIL";
                             var workflowStatus = compSc.Status == BenchmarkStatus.Passed ? "✅ PASS" : "❌ FAIL";
                             var configName = s.OptimizationConfigLabel ?? s.ConfigurationLabel ?? "Default";
-                            sb.AppendLine($"| `{s.ModelName}` | **{configName}** | {workflowStatus} | {recallStatus} | {compSc.PeakContextTokens} tok | {compSc.TotalTokens} |");
+                            sb.AppendLine($"| `{s.ModelName}` | **{configName}** | `{compSc.ScenarioName}` | {workflowStatus} | {recallStatus} | {compSc.PeakContextTokens} tok | {compSc.TotalTokens} |");
                         }
                     }
                 }
@@ -299,6 +328,81 @@ public static class MarkdownReportWriter
             }
         }
 
+        // Pmad.AI Utility Interventions & Telemetry Matrix (U7)
+        var summariesWithTelemetry = summaries
+            .Where(s => (s.HealingStats != null && s.HealingStats.TotalInterventions > 0) ||
+                        (s.CircuitBreakerStats != null && s.CircuitBreakerStats.TotalTrips > 0) ||
+                        (s.DispatchStats != null && s.DispatchStats.TotalHits > 0) ||
+                        s.ScenarioResults.Any(r => (r.HealingStats != null && r.HealingStats.TotalInterventions > 0) ||
+                                                   (r.CircuitBreakerStats != null && r.CircuitBreakerStats.TotalTrips > 0) ||
+                                                   (r.DispatchStats != null && r.DispatchStats.TotalHits > 0)))
+            .ToList();
+
+        if (summariesWithTelemetry.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Pmad.AI Utility Interventions & Telemetry Matrix");
+            sb.AppendLine();
+            sb.AppendLine("> Quantifies runtime interventions by Pmad.AI components: Tool Call Healing (malformed JSON, pseudo-tag extractions, fence strippings), Circuit Breaker (loop and ping-pong interceptions), and Lenient Dispatch (tool/parameter normalization).");
+            sb.AppendLine();
+            sb.AppendLine("| Model | Configuration | Healing Total | Pseudo-Tags | JSON Repairs | Breaker Total | Breaker Loops | Repetitions | Dispatch Total | Alias Hits | Param Hits | Casing/Norm |");
+            sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|---|");
+
+            foreach (var s in summariesWithTelemetry)
+            {
+                var h = s.HealingStats ?? AggregateHealingStats(s.ScenarioResults);
+                var b = s.CircuitBreakerStats ?? AggregateBreakerStats(s.ScenarioResults);
+                var d = s.DispatchStats ?? AggregateDispatchStats(s.ScenarioResults);
+
+                var configName = !string.IsNullOrWhiteSpace(s.OptimizationConfigLabel)
+                    ? s.OptimizationConfigLabel
+                    : (s.ConfigurationLabel ?? "Default");
+
+                var configDisplay = !string.IsNullOrWhiteSpace(s.TranscriptPath)
+                    ? $"[**{configName}**]({s.TranscriptPath})"
+                    : $"**{configName}**";
+
+                sb.AppendLine($"| `{s.ModelName}` | {configDisplay} | {h.TotalInterventions} | {h.PseudoTagsExtracted} | {h.JsonRepairs} | {b.TotalTrips} | {b.ToolPingPongTrips} | {b.StreamingRepetitionTrips} | {d.TotalHits} | {d.ToolAliasesResolved} | {d.ParameterAliasesResolved} | {d.CasingNormalized} |");
+            }
+        }
+
+        // Multi-Run Statistical Evaluation (B7)
+        var summariesWithMultiRun = summaries.Where(s => s.MultiRunStats != null).ToList();
+        if (summariesWithMultiRun.Count > 0)
+        {
+            var runsCount = summariesWithMultiRun.First().MultiRunStats!.RunsCount;
+            sb.AppendLine();
+            sb.AppendLine($"## Statistical Multi-Run Evaluation (N = {runsCount}, Mean ± StdDev)");
+            sb.AppendLine();
+            sb.AppendLine("> Reports sample mean and standard deviation across repeated runs with identical fixed seeds and temperature to quantify confidence intervals and isolate non-deterministic variance.");
+            sb.AppendLine();
+            sb.AppendLine("| Model | Configuration | Pass Rate % | Pass@1 (Task Success) % | Step Accuracy % | Prompt Tokens | Tok/Call | Gen Speed (tok/s) | Duration |");
+            sb.AppendLine("|---|---|---|---|---|---|---|---|---|");
+
+            foreach (var s in summariesWithMultiRun)
+            {
+                var stats = s.MultiRunStats!;
+                var configName = !string.IsNullOrWhiteSpace(s.OptimizationConfigLabel)
+                    ? s.OptimizationConfigLabel
+                    : (s.ConfigurationLabel ?? "Default");
+
+                var passRateDelta = stats.DeltaPassRateVsBaseline.HasValue && stats.DeltaPassRateVsBaseline.Value != 0
+                    ? $" ({(stats.DeltaPassRateVsBaseline.Value > 0 ? "+" : "")}{stats.DeltaPassRateVsBaseline.Value:F1}%)"
+                    : "";
+                var taskSuccessDelta = stats.DeltaTaskSuccessVsBaseline.HasValue && stats.DeltaTaskSuccessVsBaseline.Value != 0
+                    ? $" ({(stats.DeltaTaskSuccessVsBaseline.Value > 0 ? "+" : "")}{stats.DeltaTaskSuccessVsBaseline.Value:F1}%)"
+                    : "";
+                var tokenDelta = stats.DeltaPromptTokensPercentageVsBaseline.HasValue && stats.DeltaPromptTokensPercentageVsBaseline.Value != 0
+                    ? $" ({(stats.DeltaPromptTokensPercentageVsBaseline.Value >= 0 ? "-" : "+")}{Math.Abs(stats.DeltaPromptTokensPercentageVsBaseline.Value):F1}%)"
+                    : "";
+                var timeDelta = stats.DeltaTimePercentageVsBaseline.HasValue && stats.DeltaTimePercentageVsBaseline.Value != 0
+                    ? $" ({(stats.DeltaTimePercentageVsBaseline.Value >= 0 ? "-" : "+")}{Math.Abs(stats.DeltaTimePercentageVsBaseline.Value):F1}%)"
+                    : "";
+
+                sb.AppendLine($"| `{s.ModelName}` | **{configName}** | {stats.PassRate.Mean:F1} ± {stats.PassRate.StdDev:F1}%{passRateDelta} | {stats.TaskSuccessRate.Mean:F1} ± {stats.TaskSuccessRate.StdDev:F1}%{taskSuccessDelta} | {stats.StepAccuracy.Mean:F1} ± {stats.StepAccuracy.StdDev:F1}% | {stats.PromptTokens.Mean:F0} ± {stats.PromptTokens.StdDev:F0}{tokenDelta} | {stats.PromptTokensPerToolCall.Mean:F0} ± {stats.PromptTokensPerToolCall.StdDev:F0} | {stats.GenerationTokensPerSecond.Mean:F1} ± {stats.GenerationTokensPerSecond.StdDev:F1} | {stats.TotalTimeSeconds.Mean:F2} ± {stats.TotalTimeSeconds.StdDev:F2}s{timeDelta} |");
+            }
+        }
+
         sb.AppendLine();
         sb.AppendLine("## Detailed Scenario Breakdown");
         sb.AppendLine();
@@ -310,8 +414,8 @@ public static class MarkdownReportWriter
                 : "";
             sb.AppendLine($"### Model: `{m.DisplayName}`{transcriptLink}");
             sb.AppendLine();
-            sb.AppendLine("| Scenario | Status | Pass@1 | Step Acc. | Score | Weight | Tool Calls | Tool Acc. | Prompt Tokens | Gen Tokens | Gen Speed | RAM | GPU VRAM | Duration |");
-            sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+            sb.AppendLine("| Scenario | Suite | Status | Pass@1 | Step Acc. | Score | Weight | Failure Taxonomy | Tool Calls | Tool Acc. | Prompt Tokens | Tok/Call | Peak Context | Gen Tokens | Gen Speed | RAM | GPU VRAM | Duration |");
+            sb.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
 
             foreach (var sc in m.ScenarioResults)
             {
@@ -327,8 +431,11 @@ public static class MarkdownReportWriter
                 var scenarioLabel = !string.IsNullOrEmpty(sc.ExecutionDetails)
                     ? $"**{sc.ScenarioName}**<br/><sub>`[{sc.ExecutionDetails}]`</sub>"
                     : $"**{sc.ScenarioName}**";
+                var taxonomyStr = !string.IsNullOrEmpty(sc.FailureTaxonomy) ? $"`{sc.FailureTaxonomy}`" : "—";
+                var tokPerCallStr = sc.TotalToolCalls > 0 ? $"{sc.PromptTokensPerToolCall:F0}" : "—";
+                var peakContextStr = sc.PeakContextTokens > 0 ? $"{sc.PeakContextTokens} tok" : "—";
 
-                sb.AppendLine($"| {scenarioLabel} | {statusBadge} | {passAt1Badge} | {sc.StepAccuracy:F1}% | {sc.Score:F1}% | {sc.Weight:F1} | {sc.TotalToolCalls} | {sc.ToolAccuracyPercentage:F0}% | {sc.TotalPromptTokens} | {sc.TotalOutputTokens} | {sc.GenerationTokensPerSecond:F1} tok/s | {BenchmarkRunner.FormatMemory(sc.PeakMemoryMb)} | {vramStr} | {sc.TotalDurationMs:F0} ms |");
+                sb.AppendLine($"| {scenarioLabel} | {sc.Suite} | {statusBadge} | {passAt1Badge} | {sc.StepAccuracy:F1}% | {sc.Score:F1}% | {sc.Weight:F1} | {taxonomyStr} | {sc.TotalToolCalls} | {sc.ToolAccuracyPercentage:F0}% | {sc.TotalPromptTokens} | {tokPerCallStr} | {peakContextStr} | {sc.TotalOutputTokens} | {sc.GenerationTokensPerSecond:F1} tok/s | {BenchmarkRunner.FormatMemory(sc.PeakMemoryMb)} | {vramStr} | {sc.TotalDurationMs:F0} ms |");
             }
 
             sb.AppendLine();
@@ -342,13 +449,45 @@ public static class MarkdownReportWriter
                     sb.AppendLine();
                 }
 
-                if (sc.Status != BenchmarkStatus.Passed || !string.IsNullOrWhiteSpace(sc.ErrorMessage))
+                if (sc.HealingStats != null && sc.HealingStats.TotalInterventions > 0)
+                {
+                    var h = sc.HealingStats;
+                    sb.AppendLine($"> 🩹 **Healing Details for {sc.ScenarioName}:** {h.TotalInterventions} intervention(s) ({h.PseudoTagsExtracted} pseudo-tags, {h.JsonRepairs} JSON repairs, {h.FencesStripped} fence strippings, {h.ActionBlocksExtracted} action blocks).");
+                    sb.AppendLine();
+                }
+
+                if (sc.CircuitBreakerStats != null && sc.CircuitBreakerStats.TotalTrips > 0)
+                {
+                    var b = sc.CircuitBreakerStats;
+                    sb.AppendLine($"> ⚡ **Circuit Breaker Details for {sc.ScenarioName}:** {b.TotalTrips} trip(s), {b.ToolPingPongTrips} ping-pong loop trip(s), {b.StreamingRepetitionTrips} streaming repetition trip(s).");
+                    sb.AppendLine();
+                }
+
+                if (sc.DispatchStats != null && sc.DispatchStats.TotalHits > 0)
+                {
+                    var d = sc.DispatchStats;
+                    sb.AppendLine($"> 🔀 **Dispatch Normalization Details for {sc.ScenarioName}:** {d.TotalHits} event(s) ({d.ToolAliasesResolved} tool alias hits, {d.ParameterAliasesResolved} param alias hits, {d.CasingNormalized} casing normalizations).");
+                    sb.AppendLine();
+                }
+
+                if (sc.Status != BenchmarkStatus.Passed || !sc.TaskSuccess || !string.IsNullOrWhiteSpace(sc.ErrorMessage))
                 {
                     sb.AppendLine($"> [!WARNING]");
                     var detailHeader = sc.Status == BenchmarkStatus.Partial
                         ? $"**Partial Outcome Details for {sc.ScenarioName} (Score: {sc.Score:F1}%, {sc.TurnsPassed}/{sc.TotalTurns} turns passed):**"
                         : $"**Failure Details for {sc.ScenarioName}:**";
                     sb.AppendLine($"> {detailHeader} {sc.ErrorMessage}");
+
+                    if (!sc.TaskSuccess)
+                    {
+                        var failureReasonStr = sc.TaskFailureReason ?? "Applied patch did not pass verification or expected task goal was not achieved.";
+                        sb.AppendLine($"> - End-to-end task failed: {failureReasonStr}");
+                        if (!string.IsNullOrEmpty(sc.FailureTaxonomy))
+                        {
+                            sb.AppendLine($"> - Failure Taxonomy: `{sc.FailureTaxonomy}`");
+                        }
+                    }
+
                     foreach (var turn in sc.TurnResults.Where(t => t.Status == BenchmarkStatus.Failed))
                     {
                         sb.AppendLine($"> - Turn {turn.TurnIndex}: {turn.ValidationMessage}");
@@ -397,6 +536,45 @@ public static class MarkdownReportWriter
             ToolResultsTruncated: toolTrunc,
             ToolResultsSummarized: toolSumm,
             ToolResultsCompacted: toolComp
+        );
+    }
+
+    private static ToolCallHealingTelemetrySnapshot AggregateHealingStats(IEnumerable<BenchmarkScenarioResult> scenarioResults)
+    {
+        var list = scenarioResults.Where(s => s.HealingStats != null).Select(s => s.HealingStats!).ToList();
+        if (list.Count == 0) return new ToolCallHealingTelemetrySnapshot(0, 0, 0, 0, 0, 0, 0);
+        return new ToolCallHealingTelemetrySnapshot(
+            TotalInterventions: list.Sum(s => s.TotalInterventions),
+            PseudoTagsExtracted: list.Sum(s => s.PseudoTagsExtracted),
+            ActionBlocksExtracted: list.Sum(s => s.ActionBlocksExtracted),
+            JsonRepairs: list.Sum(s => s.JsonRepairs),
+            FencesStripped: list.Sum(s => s.FencesStripped),
+            CallIdsGenerated: list.Sum(s => s.CallIdsGenerated),
+            ArgumentsUnwrapped: list.Sum(s => s.ArgumentsUnwrapped)
+        );
+    }
+
+    private static CircuitBreakerTelemetrySnapshot AggregateBreakerStats(IEnumerable<BenchmarkScenarioResult> scenarioResults)
+    {
+        var list = scenarioResults.Where(s => s.CircuitBreakerStats != null).Select(s => s.CircuitBreakerStats!).ToList();
+        if (list.Count == 0) return new CircuitBreakerTelemetrySnapshot(0, 0, 0);
+        return new CircuitBreakerTelemetrySnapshot(
+            TotalTrips: list.Sum(s => s.TotalTrips),
+            StreamingRepetitionTrips: list.Sum(s => s.StreamingRepetitionTrips),
+            ToolPingPongTrips: list.Sum(s => s.ToolPingPongTrips)
+        );
+    }
+
+    private static LenientDispatchTelemetrySnapshot AggregateDispatchStats(IEnumerable<BenchmarkScenarioResult> scenarioResults)
+    {
+        var list = scenarioResults.Where(s => s.DispatchStats != null).Select(s => s.DispatchStats!).ToList();
+        if (list.Count == 0) return new LenientDispatchTelemetrySnapshot(0, 0, 0, 0, 0);
+        return new LenientDispatchTelemetrySnapshot(
+            TotalHits: list.Sum(s => s.TotalHits),
+            ToolAliasesResolved: list.Sum(s => s.ToolAliasesResolved),
+            ParameterAliasesResolved: list.Sum(s => s.ParameterAliasesResolved),
+            NamespacesStripped: list.Sum(s => s.NamespacesStripped),
+            CasingNormalized: list.Sum(s => s.CasingNormalized)
         );
     }
 

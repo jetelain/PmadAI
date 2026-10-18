@@ -29,6 +29,7 @@ public class BfclScenario : BenchmarkScenario
     public override string Id => _id;
     public override string Name => _name;
     public override string Description => _description;
+    public override string Suite => "BFCL";
 
     public override IReadOnlyList<AITool> Tools => _tools ??= LoadAllTools();
 

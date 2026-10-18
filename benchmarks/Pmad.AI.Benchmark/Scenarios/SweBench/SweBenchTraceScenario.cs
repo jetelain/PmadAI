@@ -23,6 +23,7 @@ public class SweBenchTraceScenario : BenchmarkScenario
     public override string Id { get; }
     public override string Name { get; }
     public override string Description { get; }
+    public override string Suite => "SWE-bench";
     public override IReadOnlyList<AITool> Tools { get; }
     public override IReadOnlyList<BenchmarkTurn> Turns => _turns;
 
@@ -67,8 +68,16 @@ public class SweBenchTraceScenario : BenchmarkScenario
     /// Task success for SWE-bench requires applying a valid patch and passing verification tests
     /// (or triggering the circuit breaker for repetitive loop archetypes).
     /// </summary>
-    public override bool EvaluateTaskSuccess(BenchmarkScenarioResult result) =>
-        _executor.IsTaskSuccessful;
+    public override bool EvaluateTaskSuccess(BenchmarkScenarioResult result)
+    {
+        var success = _executor.IsTaskSuccessful;
+        result.TaskSuccess = success;
+        if (!success)
+        {
+            result.TaskFailureReason = _executor.FailureReason;
+        }
+        return success;
+    }
 
     private static List<BenchmarkTurn> BuildTurns(SweBenchTrajectory trajectory, Func<ISweBenchExecutor> getExecutor)
     {

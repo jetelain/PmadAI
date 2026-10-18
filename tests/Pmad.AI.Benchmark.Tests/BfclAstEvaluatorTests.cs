@@ -218,4 +218,41 @@ public class BfclAstEvaluatorTests
         var result = BfclAstEvaluator.EvaluateStrict("deploy_workload", expectedArgs, null, ctx);
         Assert.True(result.IsSuccess, $"Strict validation failed: {result.Message}");
     }
+
+    [Theory]
+    [InlineData("Battle of Stalingrad|Stalingrad", "Stalingrad")]
+    [InlineData("Battle of Stalingrad", "The Battle of Stalingrad")]
+    [InlineData("wild tiger", "wild tigers")]
+    public void Evaluate_RelaxedStringVariants_AreRejected(string expected, string actual)
+    {
+        var groundTruth = new List<BfclExpectedCall>
+        {
+            new("inspect_target", new Dictionary<string, object?> { ["target"] = expected })
+        };
+
+        var entry = new BfclEntry("test_strict", BfclCategory.Simple, "query", [], groundTruth);
+        var ctx = CreateContext([new FunctionCallContent("c1", "inspect_target", new Dictionary<string, object?> { ["target"] = actual })]);
+
+        Assert.False(BfclAstEvaluator.Evaluate(entry, ctx).IsSuccess);
+    }
+
+    [Fact]
+    public void Evaluate_ParallelCategory_DuplicateCalls_Fail()
+    {
+        var groundTruth = new List<BfclExpectedCall>
+        {
+            new("get_weather", new Dictionary<string, object?> { ["location"] = "Boston" }),
+            new("get_weather", new Dictionary<string, object?> { ["location"] = "San Francisco" })
+        };
+
+        var entry = new BfclEntry("parallel_01", BfclCategory.Parallel, "weather query", [], groundTruth);
+        var calls = new List<FunctionCallContent>
+        {
+            new("c1", "get_weather", new Dictionary<string, object?> { ["location"] = "Boston" }),
+            new("c2", "get_weather", new Dictionary<string, object?> { ["location"] = "San Francisco" }),
+            new("c3", "get_weather", new Dictionary<string, object?> { ["location"] = "Boston" })
+        };
+
+        Assert.False(BfclAstEvaluator.Evaluate(entry, CreateContext(calls)).IsSuccess);
+    }
 }

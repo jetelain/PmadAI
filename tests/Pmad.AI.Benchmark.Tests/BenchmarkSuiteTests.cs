@@ -5,6 +5,10 @@ using Pmad.AI.Benchmark.Reporting;
 using Pmad.AI.Benchmark.Scenarios;
 using Pmad.AI.Benchmark.Scenarios.Bfcl;
 using Pmad.AI.Benchmark.Scenarios.Ruler;
+using Pmad.AI.Benchmark.Scenarios.SweBench;
+using Pmad.AI.Guardrails;
+using Pmad.AI.Healing;
+using Pmad.AI.Tools;
 using Pmad.AI.Transcripts;
 
 namespace Pmad.AI.Benchmark.Tests;
@@ -60,7 +64,7 @@ public class BenchmarkSuiteTests
     public void BenchmarkScenario_GetAllScenarios_ReturnsExpectedDefinitions()
     {
         var scenarios = BenchmarkScenario.GetAllScenarios();
-        Assert.Equal(18, scenarios.Count);
+        Assert.Equal(20, scenarios.Count);
 
         Assert.Contains(scenarios, s => s.Id == "bfcl-simple");
         Assert.Contains(scenarios, s => s.Id == "bfcl-multiple");
@@ -80,6 +84,8 @@ public class BenchmarkSuiteTests
         Assert.Contains(scenarios, s => s.Id == "ruler-32k");
         Assert.Contains(scenarios, s => s.Id == "ruler-64k");
         Assert.Contains(scenarios, s => s.Id == "ruler-128k");
+        Assert.Contains(scenarios, s => s.Id == "compaction-large-tool");
+        Assert.Contains(scenarios, s => s.Id == "compaction-deep-context");
 
         foreach (var sc in scenarios)
         {
@@ -102,10 +108,11 @@ public class BenchmarkSuiteTests
     [InlineData("deep", 3)]
     [InlineData("ruler", 5)]
     [InlineData("swebench", 7)]
-    [InlineData("all", 18)]
-    [InlineData("all-small", 15)]
-    [InlineData("small", 15)]
-    [InlineData("full", 18)]
+    [InlineData("compaction", 2)]
+    [InlineData("all", 20)]
+    [InlineData("all-small", 16)]
+    [InlineData("small", 16)]
+    [InlineData("full", 20)]
     [InlineData("bfcl,swebench", 13)]
     public void BenchmarkScenario_FilterScenarios_FiltersCorrectly(string filter, object expected)
     {
@@ -131,12 +138,12 @@ public class BenchmarkSuiteTests
 
         var summary = await runner.RunAllAsync(scenarios);
 
-        Assert.Equal(18, summary.ScenariosRun);
+        Assert.Equal(20, summary.ScenariosRun);
         var failures = string.Join("\n", summary.ScenarioResults
             .Where(r => r.Status != BenchmarkStatus.Passed)
             .Select(r => $"{r.ScenarioId}: {r.ErrorMessage ?? string.Join("; ", r.TurnResults.Where(t => t.Status != BenchmarkStatus.Passed).Select(t => $"Turn {t.TurnIndex}: {t.ValidationMessage}"))}"));
         Assert.True(summary.ScenariosFailed == 0, $"Failures:\n{failures}");
-        Assert.Equal(18, summary.ScenariosPassed);
+        Assert.Equal(20, summary.ScenariosPassed);
         Assert.Equal(100.0, summary.TaskSuccessRatePercentage);
         Assert.Equal(100.0, summary.StepAccuracyPercentage);
         Assert.Equal(100.0, summary.PassRatePercentage);
@@ -183,12 +190,13 @@ public class BenchmarkSuiteTests
     [Fact]
     public void BenchmarkScenario_AllIncludesEverythingAndCategorySubsets()
     {
-        Assert.Equal(18, BenchmarkScenario.FilterScenarios("all").Count);
-        Assert.Equal(15, BenchmarkScenario.FilterScenarios("all-small").Count);
+        Assert.Equal(20, BenchmarkScenario.FilterScenarios("all").Count);
+        Assert.Equal(16, BenchmarkScenario.FilterScenarios("all-small").Count);
         Assert.Equal(3, BenchmarkScenario.FilterScenarios("deep").Count);
         Assert.Equal(7, BenchmarkScenario.FilterScenarios("swebench").Count);
         Assert.Equal(6, BenchmarkScenario.FilterScenarios("bfcl").Count);
         Assert.Equal(5, BenchmarkScenario.FilterScenarios("ruler").Count);
+        Assert.Equal(2, BenchmarkScenario.FilterScenarios("compaction").Count);
     }
 
     [Fact]
@@ -828,6 +836,533 @@ public class BenchmarkSuiteTests
 
         var transcriptClient = client.GetService<VerbatimTranscriptChatClient>();
         Assert.NotNull(transcriptClient);
+    }
+
+    [Fact]
+    public void BfclScenario_ComputeScore_UsesDualScoringFormula()
+    {
+        var bfcl = Assert.Single(BenchmarkScenario.FilterScenarios("bfcl-simple"));
+        Assert.Equal("BFCL", bfcl.Suite);
+
+        var partialResult = new BenchmarkScenarioResult
+        {
+            ScenarioId = bfcl.Id,
+            ScenarioName = bfcl.Name,
+            ModelId = "test-model",
+            Suite = "BFCL",
+            TaskSuccess = false,
+            StepAccuracy = 80.0,
+            TurnsPassed = 4,
+            TotalTurns = 5
+        };
+
+        // BFCL keeps the standard 70% TaskSuccess + 30% StepAccuracy formula: 0.3 * 80.0 = 24.0
+        var score = bfcl.ComputeScore(partialResult);
+        Assert.Equal(24.0, score);
+    }
+
+    [Fact]
+    public void StandardScenario_ComputeScore_UsesDualScoringFormula()
+    {
+        var standard = Assert.Single(BenchmarkScenario.FilterScenarios("swebench-diff"));
+        Assert.Equal("SWE-bench", standard.Suite);
+
+        var partialResult = new BenchmarkScenarioResult
+        {
+            ScenarioId = standard.Id,
+            ScenarioName = standard.Name,
+            ModelId = "test-model",
+            Suite = "SWE-bench",
+            TaskSuccess = false,
+            StepAccuracy = 60.0,
+            TurnsPassed = 3,
+            TotalTurns = 5
+        };
+
+        // Dual scoring: 0.70 * 0 + 0.30 * 60.0 = 18.0%
+        var score = standard.ComputeScore(partialResult);
+        Assert.Equal(18.0, score);
+    }
+
+    [Fact]
+    public void FailureTaxonomyClassifier_ClassifiesExpectedCategories()
+    {
+        // 1. Tool Loop
+        var loopResult = new BenchmarkScenarioResult
+        {
+            ScenarioId = "s1",
+            ScenarioName = "Loop Scenario",
+            ModelId = "m1",
+            TaskSuccess = false,
+            ErrorMessage = "Circuit breaker intercepted repetitive execution.",
+            TurnResults = [new TurnResult { TurnIndex = 1, UserPrompt = "p", Status = BenchmarkStatus.Passed, AssistantFinalText = "[Circuit Breaker Tripped]" }]
+        };
+        Assert.Equal("Tool Loop", FailureTaxonomyClassifier.Classify(loopResult));
+
+        // 2. Patch Rejected
+        var patchResult = new BenchmarkScenarioResult
+        {
+            ScenarioId = "s2",
+            ScenarioName = "SWE Patch Scenario",
+            ModelId = "m1",
+            Suite = "SWE-bench",
+            TaskSuccess = false,
+            TaskFailureReason = "Patch did not pass verification: 2 failed tests.",
+            StepAccuracy = 100.0,
+            TurnsPassed = 3,
+            TotalTurns = 3
+        };
+        Assert.Equal("Patch Rejected", FailureTaxonomyClassifier.Classify(patchResult));
+
+        // 3. Missing Tool Call
+        var missingCallResult = new BenchmarkScenarioResult
+        {
+            ScenarioId = "s3",
+            ScenarioName = "Missing Call",
+            ModelId = "m1",
+            TaskSuccess = false,
+            TurnResults = [new TurnResult { TurnIndex = 1, UserPrompt = "p", Status = BenchmarkStatus.Failed, ValidationMessage = "Expected tool call 'get_weather' was not invoked by model." }]
+        };
+        Assert.Equal("Missing Tool Call", FailureTaxonomyClassifier.Classify(missingCallResult));
+
+        // 4. Over-Calling
+        var overCallingResult = new BenchmarkScenarioResult
+        {
+            ScenarioId = "s4",
+            ScenarioName = "Over Calling",
+            ModelId = "m1",
+            TaskSuccess = false,
+            TurnResults = [new TurnResult { TurnIndex = 1, UserPrompt = "p", Status = BenchmarkStatus.Failed, ValidationMessage = "Model invoked 3 tool call(s) when 0 were expected." }]
+        };
+        Assert.Equal("Over-Calling", FailureTaxonomyClassifier.Classify(overCallingResult));
+
+        // 5. Bad Arguments
+        var badArgsResult = new BenchmarkScenarioResult
+        {
+            ScenarioId = "s5",
+            ScenarioName = "Bad Args",
+            ModelId = "m1",
+            TaskSuccess = false,
+            TurnResults = [new TurnResult { TurnIndex = 1, UserPrompt = "p", Status = BenchmarkStatus.Failed, ValidationMessage = "Invalid argument 'city': must be string" }]
+        };
+        Assert.Equal("Bad Arguments", FailureTaxonomyClassifier.Classify(badArgsResult));
+
+        // 6. Turn Failure Takes Precedence Over Default SWE-bench Patch Reason
+        var sweTurnFailResult = new BenchmarkScenarioResult
+        {
+            ScenarioId = "swebench-diff",
+            ScenarioName = "SWE-bench Diff",
+            ModelId = "m1",
+            Suite = "SWE-bench",
+            TaskSuccess = false,
+            TaskFailureReason = "No patch was applied to the repository via apply_patch.",
+            TurnResults = [new TurnResult { TurnIndex = 1, UserPrompt = "p", Status = BenchmarkStatus.Failed, ValidationMessage = "Expected tool 'read_file' was not invoked (got 0 calls)." }]
+        };
+        Assert.Equal("Missing Tool Call", FailureTaxonomyClassifier.Classify(sweTurnFailResult));
+    }
+
+    [Fact]
+    public void ModelBenchmarkSummary_GetSuiteSummaries_AggregatesCorrectly()
+    {
+        var summary = new ModelBenchmarkSummary
+        {
+            ModelId = "qwen-4b",
+            ModelName = "Qwen 4B",
+            ScenarioResults =
+            [
+                new BenchmarkScenarioResult
+                {
+                    ScenarioId = "bfcl-1",
+                    ScenarioName = "BFCL Simple",
+                    ModelId = "qwen-4b",
+                    Suite = "BFCL",
+                    Weight = 10.0,
+                    TaskSuccess = true,
+                    Score = 100.0,
+                    StepAccuracy = 100.0,
+                    TotalTurns = 5,
+                    TurnsPassed = 5
+                },
+                new BenchmarkScenarioResult
+                {
+                    ScenarioId = "bfcl-2",
+                    ScenarioName = "BFCL Multiple",
+                    ModelId = "qwen-4b",
+                    Suite = "BFCL",
+                    Weight = 10.0,
+                    TaskSuccess = false,
+                    Score = 80.0,
+                    StepAccuracy = 80.0,
+                    TotalTurns = 5,
+                    TurnsPassed = 4
+                },
+                new BenchmarkScenarioResult
+                {
+                    ScenarioId = "swe-1",
+                    ScenarioName = "SWE Diff",
+                    ModelId = "qwen-4b",
+                    Suite = "SWE-bench",
+                    Weight = 40.0,
+                    TaskSuccess = false,
+                    Score = 30.0,
+                    StepAccuracy = 100.0,
+                    TotalTurns = 4,
+                    TurnsPassed = 4
+                }
+            ]
+        };
+
+        // Total scenarios: 3, passed: 1 (bfcl-1) => Unweighted Pass@1 = 33.3%
+        Assert.Equal(33.3, summary.UnweightedTaskSuccessRatePercentage);
+
+        var suites = summary.GetSuiteSummaries();
+        Assert.Equal(2, suites.Count);
+
+        var bfclSuite = Assert.Single(suites, s => s.Suite == "BFCL");
+        Assert.Equal(2, bfclSuite.ScenariosCount);
+        Assert.Equal(1, bfclSuite.ScenariosPassed);
+        Assert.Equal(50.0, bfclSuite.TaskSuccessRatePercentage);
+        Assert.Equal(90.0, bfclSuite.StepAccuracyPercentage);
+        Assert.Equal(10, bfclSuite.TotalTurns);
+        Assert.Equal(9, bfclSuite.TurnsPassed);
+        Assert.Equal(90.0, bfclSuite.TurnAccuracyPercentage);
+
+        var sweSuite = Assert.Single(suites, s => s.Suite == "SWE-bench");
+        Assert.Equal(1, sweSuite.ScenariosCount);
+        Assert.Equal(0, sweSuite.ScenariosPassed);
+        Assert.Equal(0.0, sweSuite.TaskSuccessRatePercentage);
+        Assert.Equal(100.0, sweSuite.StepAccuracyPercentage);
+    }
+
+    [Fact]
+    public void MarkdownReportWriter_RendersSuiteBreakdown_TelemetryMatrix_AndTaxonomy()
+    {
+        var summary = new ModelBenchmarkSummary
+        {
+            ModelId = "qwen3.5-4b",
+            ModelName = "Qwen 3.5 4B",
+            OptimizationConfigId = "opt-healing",
+            OptimizationConfigLabel = "Tool Call Healing",
+            HealingStats = new ToolCallHealingTelemetrySnapshot(
+                TotalInterventions: 8,
+                PseudoTagsExtracted: 3,
+                ActionBlocksExtracted: 1,
+                JsonRepairs: 2,
+                FencesStripped: 1,
+                CallIdsGenerated: 1,
+                ArgumentsUnwrapped: 0),
+            CircuitBreakerStats = new CircuitBreakerTelemetrySnapshot(
+                TotalTrips: 2,
+                StreamingRepetitionTrips: 1,
+                ToolPingPongTrips: 1),
+            DispatchStats = new LenientDispatchTelemetrySnapshot(
+                TotalHits: 4,
+                ToolAliasesResolved: 2,
+                ParameterAliasesResolved: 1,
+                NamespacesStripped: 0,
+                CasingNormalized: 1),
+            ScenarioResults =
+            [
+                new BenchmarkScenarioResult
+                {
+                    ScenarioId = "bfcl-simple",
+                    ScenarioName = "BFCL Simple",
+                    ModelId = "qwen3.5-4b",
+                    Suite = "BFCL",
+                    Weight = 10.0,
+                    TaskSuccess = true,
+                    StepAccuracy = 100.0,
+                    Score = 100.0,
+                    TotalTurns = 5,
+                    TurnsPassed = 5
+                },
+                new BenchmarkScenarioResult
+                {
+                    ScenarioId = "swebench-diff",
+                    ScenarioName = "SWE-bench Diff",
+                    ModelId = "qwen3.5-4b",
+                    Suite = "SWE-bench",
+                    Weight = 40.0,
+                    TaskSuccess = false,
+                    StepAccuracy = 100.0,
+                    Score = 30.0,
+                    TotalTurns = 4,
+                    TurnsPassed = 4,
+                    TaskFailureReason = "Verification tests failed: 1 error in test_routing.py",
+                    FailureTaxonomy = "Patch Rejected"
+                }
+            ]
+        };
+
+        var md = MarkdownReportWriter.GenerateMarkdown([summary]);
+
+        // Summary Comparison has Pass@1 (Wtd) and Pass@1 (Unwtd)
+        Assert.Contains("Pass@1 (Wtd)", md);
+        Assert.Contains("Pass@1 (Unwtd)", md);
+
+        // Suite Breakdown section
+        Assert.Contains("## Benchmark Suite Breakdown (BFCL / SWE-bench / RULER)", md);
+        Assert.Contains("**BFCL**", md);
+        Assert.Contains("**SWE-bench**", md);
+
+        // Telemetry Matrix section
+        Assert.Contains("## Pmad.AI Utility Interventions & Telemetry Matrix", md);
+        Assert.Contains("| `Qwen 3.5 4B` | **Tool Call Healing** | 8 | 3 | 2 | 2 | 1 | 1 | 4 | 2 | 1 | 1 |", md);
+
+        // Detailed scenario table contains Suite and Taxonomy
+        Assert.Contains("| Scenario | Suite | Status | Pass@1 |", md);
+        Assert.Contains("`Patch Rejected`", md);
+
+        // Failure callout renders End-to-end task failed and Failure Taxonomy
+        Assert.Contains("End-to-end task failed: Verification tests failed: 1 error in test_routing.py", md);
+        Assert.Contains("Failure Taxonomy: `Patch Rejected`", md);
+    }
+
+    [Theory]
+    [InlineData("opt-recommended-slm", "opt-recommended-slm")]
+    [InlineData("recommended-slm", "opt-recommended-slm")]
+    [InlineData("slm", "opt-recommended-slm")]
+    [InlineData("recommended", "opt-recommended-slm")]
+    [InlineData("opt-all-local-llm-without-slm", "opt-all-local-llm-without-slm")]
+    [InlineData("all-local-llm-without-slm", "opt-all-local-llm-without-slm")]
+    [InlineData("local-llm", "opt-all-local-llm-without-slm")]
+    [InlineData("no-slm", "opt-all-local-llm-without-slm")]
+    [InlineData("opt-all-local-llm-with-slm", "opt-all-local-llm-with-slm")]
+    [InlineData("all-local-llm-with-slm", "opt-all-local-llm-with-slm")]
+    [InlineData("local-llm-slm", "opt-all-local-llm-with-slm")]
+    [InlineData("with-slm", "opt-all-local-llm-with-slm")]
+    public void OptimizationConfig_Find_ResolvesPresetsAndAliases(string input, string expectedConfigId)
+    {
+        var config = OptimizationConfig.Find(input);
+        Assert.NotNull(config);
+        Assert.Equal(expectedConfigId, config.Id);
+    }
+
+    [Fact]
+    public void BenchmarkPipelineBuilder_BuildsPipelines_ForNewPresets()
+    {
+        var fake = new BadMockClient();
+        var telemetry = new Pmad.AI.Compaction.CompactionTelemetry();
+
+        // 1. Recommended SLM
+        var slmClient = BenchmarkPipelineBuilder.BuildPipeline(
+            fake,
+            OptimizationConfig.RecommendedSlm,
+            compactionTelemetry: telemetry);
+        Assert.NotNull(slmClient);
+        Assert.NotNull(slmClient.GetService<ToolLoopCircuitBreaker>());
+        Assert.NotNull(slmClient.GetService<ToolCallHealingTelemetry>());
+        Assert.NotNull(slmClient.GetService<LenientDispatchTelemetry>());
+        Assert.Same(telemetry, slmClient.GetService<Pmad.AI.Compaction.CompactionTelemetry>());
+
+        // 2. All Local LLM without SLM
+        var localNoSlmClient = BenchmarkPipelineBuilder.BuildPipeline(
+            fake,
+            OptimizationConfig.AllLocalLlmWithoutSlm,
+            compactionTelemetry: telemetry);
+        Assert.NotNull(localNoSlmClient);
+        Assert.NotNull(localNoSlmClient.GetService<ToolLoopCircuitBreaker>());
+        Assert.NotNull(localNoSlmClient.GetService<ToolCallHealingTelemetry>());
+        Assert.NotNull(localNoSlmClient.GetService<LenientDispatchTelemetry>());
+
+        // 3. All Local LLM with SLM
+        var localWithSlmClient = BenchmarkPipelineBuilder.BuildPipeline(
+            fake,
+            OptimizationConfig.AllLocalLlmWithSlm,
+            compactionTelemetry: telemetry);
+        Assert.NotNull(localWithSlmClient);
+        Assert.NotNull(localWithSlmClient.GetService<ToolLoopCircuitBreaker>());
+        Assert.NotNull(localWithSlmClient.GetService<ToolCallHealingTelemetry>());
+        Assert.NotNull(localWithSlmClient.GetService<LenientDispatchTelemetry>());
+    }
+
+    [Theory]
+    [InlineData("opt-healing-lenient", "opt-healing-lenient")]
+    [InlineData("healing-lenient", "opt-healing-lenient")]
+    [InlineData("healing+lenient", "opt-healing-lenient")]
+    [InlineData("opt-healing-tool-compaction", "opt-healing-tool-compaction")]
+    [InlineData("healing-tool", "opt-healing-tool-compaction")]
+    [InlineData("healing+tool", "opt-healing-tool-compaction")]
+    public void OptimizationConfig_Find_ResolvesAblationPairAliases(string input, string expectedConfigId)
+    {
+        var config = OptimizationConfig.Find(input);
+        Assert.NotNull(config);
+        Assert.Equal(expectedConfigId, config.Id);
+    }
+
+    [Fact]
+    public void BenchmarkPipelineBuilder_BuildsPipelines_ForAblationPairs()
+    {
+        var fake = new BadMockClient();
+        var telemetry = new Pmad.AI.Compaction.CompactionTelemetry();
+
+        // 1. Healing + Lenient
+        var healingLenient = BenchmarkPipelineBuilder.BuildPipeline(
+            fake,
+            OptimizationConfig.HealingLenient,
+            compactionTelemetry: telemetry);
+        Assert.NotNull(healingLenient);
+        Assert.NotNull(healingLenient.GetService<ToolCallHealingTelemetry>());
+        Assert.NotNull(healingLenient.GetService<LenientDispatchTelemetry>());
+
+        // 2. Healing + Tool Compaction
+        var healingToolCompaction = BenchmarkPipelineBuilder.BuildPipeline(
+            fake,
+            OptimizationConfig.HealingToolCompaction,
+            compactionTelemetry: telemetry);
+        Assert.NotNull(healingToolCompaction);
+        Assert.NotNull(healingToolCompaction.GetService<ToolCallHealingTelemetry>());
+        Assert.Same(telemetry, healingToolCompaction.GetService<Pmad.AI.Compaction.CompactionTelemetry>());
+    }
+
+    [Fact]
+    public void CompactionTrajectoryLoader_LoadsAndValidatesTrajectories()
+    {
+        var largeTool = Pmad.AI.Benchmark.Scenarios.Compaction.CompactionTrajectoryLoader.LoadLargeToolTrajectory();
+        Assert.NotNull(largeTool);
+        Assert.Equal("compaction-large-tool", largeTool.ScenarioId);
+        Assert.Equal(7, largeTool.Turns.Count);
+        Assert.True(largeTool.Turns[0].Observation!.Length > 15000, "Turn 1 build log should exceed 15 KB");
+        Assert.True(largeTool.Turns[1].Observation!.Length > 20000, "Turn 2 source code should exceed 20 KB");
+
+        var deepContext = Pmad.AI.Benchmark.Scenarios.Compaction.CompactionTrajectoryLoader.LoadDeepContextTrajectory();
+        Assert.NotNull(deepContext);
+        Assert.Equal("compaction-deep-context", deepContext.ScenarioId);
+        Assert.Equal(10, deepContext.Turns.Count);
+        Assert.Contains("OMEGA-8842-PROBE-SECURE", deepContext.Turns[1].Observation);
+        Assert.Equal("OMEGA-8842-PROBE-SECURE", deepContext.Turns[9].ExpectedCompletionSubstring);
+    }
+
+    [Fact]
+    public void BenchmarkScenario_FilterScenarios_IncludesCompaction()
+    {
+        var all = BenchmarkScenario.GetAllScenarios();
+        Assert.Contains(all, s => s.Id == "compaction-large-tool");
+        Assert.Contains(all, s => s.Id == "compaction-deep-context");
+
+        var small = BenchmarkScenario.GetAllSmallScenarios();
+        Assert.Contains(small, s => s.Id == "compaction-large-tool");
+
+        var compactionFiltered = BenchmarkScenario.FilterScenarios("compaction");
+        Assert.Equal(2, compactionFiltered.Count);
+        Assert.All(compactionFiltered, s => Assert.Equal("Compaction", s.Suite));
+    }
+
+    [Fact]
+    public void BenchmarkOptions_Parse_HandlesMultiRunSeedTemperatureAndScenario()
+    {
+        var args = new[] { "-r", "5", "--seed", "42", "--temperature", "0.0", "-s", "compaction" };
+        var options = BenchmarkOptions.Parse(args);
+
+        Assert.Equal(5, options.Runs);
+        Assert.Equal(42L, options.Seed);
+        Assert.Equal(0.0f, options.Temperature);
+        Assert.Equal("compaction", options.ScenarioFilter);
+    }
+
+    [Fact]
+    public void MultiRunStatisticalSummary_ComputesMeanStdDevAndBaselineDelta()
+    {
+        var baselineRuns = new List<ModelBenchmarkSummary>
+        {
+            new() { ModelId = "m1", ModelName = "Model 1", OptimizationConfigId = "baseline", TotalTimeMs = 10000, TotalPromptTokens = 50000, TotalToolCalls = 25, ScenarioResults = [new() { ScenarioId = "s1", ScenarioName = "S1", ModelId = "m1", TaskSuccess = true, StepAccuracy = 80.0, Score = 80.0, Weight = 1.0, TotalTurns = 5, TurnsPassed = 4 }] },
+            new() { ModelId = "m1", ModelName = "Model 1", OptimizationConfigId = "baseline", TotalTimeMs = 11000, TotalPromptTokens = 52000, TotalToolCalls = 26, ScenarioResults = [new() { ScenarioId = "s1", ScenarioName = "S1", ModelId = "m1", TaskSuccess = true, StepAccuracy = 85.0, Score = 85.0, Weight = 1.0, TotalTurns = 5, TurnsPassed = 4 }] },
+            new() { ModelId = "m1", ModelName = "Model 1", OptimizationConfigId = "baseline", TotalTimeMs = 9500, TotalPromptTokens = 48000, TotalToolCalls = 24, ScenarioResults = [new() { ScenarioId = "s1", ScenarioName = "S1", ModelId = "m1", TaskSuccess = true, StepAccuracy = 75.0, Score = 75.0, Weight = 1.0, TotalTurns = 5, TurnsPassed = 4 }] }
+        };
+
+        var baselineSummary = MultiRunStatisticalSummary.Compute(baselineRuns);
+        Assert.Equal(3, baselineSummary.RunsCount);
+        Assert.Equal(80.0, baselineSummary.PassRate.Mean);
+        Assert.Equal(5.0, baselineSummary.PassRate.StdDev);
+        Assert.Equal(50000.0, baselineSummary.PromptTokens.Mean);
+
+        var optRuns = new List<ModelBenchmarkSummary>
+        {
+            new() { ModelId = "m1", ModelName = "Model 1", OptimizationConfigId = "opt-healing", TotalTimeMs = 8000, TotalPromptTokens = 40000, TotalToolCalls = 20, ScenarioResults = [new() { ScenarioId = "s1", ScenarioName = "S1", ModelId = "m1", TaskSuccess = true, StepAccuracy = 95.0, Score = 95.0, Weight = 1.0, TotalTurns = 5, TurnsPassed = 5 }] },
+            new() { ModelId = "m1", ModelName = "Model 1", OptimizationConfigId = "opt-healing", TotalTimeMs = 8200, TotalPromptTokens = 41000, TotalToolCalls = 20, ScenarioResults = [new() { ScenarioId = "s1", ScenarioName = "S1", ModelId = "m1", TaskSuccess = true, StepAccuracy = 95.0, Score = 95.0, Weight = 1.0, TotalTurns = 5, TurnsPassed = 5 }] },
+            new() { ModelId = "m1", ModelName = "Model 1", OptimizationConfigId = "opt-healing", TotalTimeMs = 7800, TotalPromptTokens = 39000, TotalToolCalls = 20, ScenarioResults = [new() { ScenarioId = "s1", ScenarioName = "S1", ModelId = "m1", TaskSuccess = true, StepAccuracy = 95.0, Score = 95.0, Weight = 1.0, TotalTurns = 5, TurnsPassed = 5 }] }
+        };
+
+        var optSummary = MultiRunStatisticalSummary.Compute(optRuns, baselineSummary);
+        Assert.Equal(95.0, optSummary.PassRate.Mean);
+        Assert.Equal(0.0, optSummary.PassRate.StdDev);
+        Assert.Equal(15.0, optSummary.DeltaPassRateVsBaseline); // 95.0 - 80.0
+        Assert.Equal(20.0, optSummary.DeltaPromptTokensPercentageVsBaseline); // (50000 - 40000) / 50000 * 100
+        Assert.True(optSummary.DeltaTimePercentageVsBaseline > 0);
+    }
+
+    [Fact]
+    public void MarkdownReportWriter_RendersMultiRunStatisticalTableAndPeakContext()
+    {
+        var runs = new List<ModelBenchmarkSummary>
+        {
+            new()
+            {
+                ModelId = "qwen3.5-4b",
+                ModelName = "Qwen 3.5 4B",
+                OptimizationConfigId = "opt-recommended-slm",
+                OptimizationConfigLabel = "Recommended SLM Pipeline",
+                TotalPromptTokens = 30000,
+                TotalToolCalls = 10,
+                ScenarioResults =
+                [
+                    new BenchmarkScenarioResult
+                    {
+                        ScenarioId = "compaction-large-tool",
+                        ScenarioName = "Compaction Large Tool",
+                        ModelId = "qwen3.5-4b",
+                        Suite = "Compaction",
+                        TotalPromptTokens = 30000,
+                        TotalToolCalls = 10,
+                        PeakContextTokens = 12500,
+                        TaskSuccess = true,
+                        StepAccuracy = 100.0,
+                        Score = 100.0,
+                        Weight = 28.0,
+                        TotalTurns = 7,
+                        TurnsPassed = 7
+                    }
+                ]
+            },
+            new()
+            {
+                ModelId = "qwen3.5-4b",
+                ModelName = "Qwen 3.5 4B",
+                OptimizationConfigId = "opt-recommended-slm",
+                OptimizationConfigLabel = "Recommended SLM Pipeline",
+                TotalPromptTokens = 31000,
+                TotalToolCalls = 10,
+                ScenarioResults =
+                [
+                    new BenchmarkScenarioResult
+                    {
+                        ScenarioId = "compaction-large-tool",
+                        ScenarioName = "Compaction Large Tool",
+                        ModelId = "qwen3.5-4b",
+                        Suite = "Compaction",
+                        TotalPromptTokens = 31000,
+                        TotalToolCalls = 10,
+                        PeakContextTokens = 12800,
+                        TaskSuccess = true,
+                        StepAccuracy = 100.0,
+                        Score = 100.0,
+                        Weight = 28.0,
+                        TotalTurns = 7,
+                        TurnsPassed = 7
+                    }
+                ]
+            }
+        };
+
+        var stats = MultiRunStatisticalSummary.Compute(runs);
+        runs[0].MultiRunStats = stats;
+
+        var md = MarkdownReportWriter.GenerateMarkdown([runs[0]]);
+
+        Assert.Contains("## Statistical Multi-Run Evaluation (N = 2, Mean ± StdDev)", md);
+        Assert.Contains("Tok/Call", md);
+        Assert.Contains("Peak Context", md);
+        Assert.Contains("12500 tok", md);
     }
 }
 

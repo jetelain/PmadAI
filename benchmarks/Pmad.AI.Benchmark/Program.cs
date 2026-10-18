@@ -107,6 +107,8 @@ public static class Program
         var transcriptsDir = Path.Combine(baseReportDir, "transcripts");
         Directory.CreateDirectory(transcriptsDir);
 
+        var baselineMultiRunStatsByModel = new Dictionary<string, MultiRunStatisticalSummary>(StringComparer.OrdinalIgnoreCase);
+
         for (int i = 0; i < executionPlans.Count; i++)
         {
             var plan = executionPlans[i];
@@ -197,6 +199,37 @@ public static class Program
             // Optional speculative SLM summarizer for background compaction (Ollama lightweight HTTP client)
             await using var speculativeSummarizer = CreateSpeculativeSummarizer(plan.OptConfig, options);
 
+            // Helper to execute repeated runs when options.Runs > 1 and compute statistical summary
+            Func<BenchmarkRunner, Task<ModelBenchmarkSummary>> executePlanRuns = async (runner) =>
+            {
+                var runSummaries = new List<ModelBenchmarkSummary>(options.Runs);
+                for (int r = 0; r < options.Runs; r++)
+                {
+                    if (options.Runs > 1)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.WriteLine($"\n--- Run {r + 1}/{options.Runs} for {plan.TargetName} [{plan.ConfigurationLabel}] ---");
+                        Console.ResetColor();
+                    }
+
+                    var res = await runner.RunAllAsync(scenarios, onScenarioCheckpoint);
+                    runSummaries.Add(res);
+                }
+
+                var primary = runSummaries[0];
+                if (runSummaries.Count > 1)
+                {
+                    baselineMultiRunStatsByModel.TryGetValue(plan.TargetName, out var baseStats);
+                    var stats = MultiRunStatisticalSummary.Compute(runSummaries, baseStats);
+                    primary.MultiRunStats = stats;
+                    if (string.Equals(plan.OptConfig.Id, "baseline", StringComparison.OrdinalIgnoreCase))
+                    {
+                        baselineMultiRunStatsByModel[plan.TargetName] = stats;
+                    }
+                }
+                return primary;
+            };
+
             if (plan.Target is ModelTarget.Mock mockTarget)
             {
                 using var mockClient = new MockBenchmarkChatClient(
@@ -221,9 +254,11 @@ public static class Program
                     configurationLabel: plan.ConfigurationLabel,
                     optimizationConfigId: plan.OptConfig.Id,
                     optimizationConfigLabel: plan.OptConfig.Label,
-                    transcriptPath: planTranscriptRelativePath);
+                    transcriptPath: planTranscriptRelativePath,
+                    temperature: options.Temperature,
+                    seed: options.Seed);
 
-                summary = await runner.RunAllAsync(scenarios, onScenarioCheckpoint);
+                summary = await executePlanRuns(runner);
             }
             else if (plan.Target is ModelTarget.PresetTarget presetTarget)
             {
@@ -291,9 +326,11 @@ public static class Program
                     configurationLabel: plan.ConfigurationLabel,
                     optimizationConfigId: plan.OptConfig.Id,
                     optimizationConfigLabel: plan.OptConfig.Label,
-                    transcriptPath: planTranscriptRelativePath);
+                    transcriptPath: planTranscriptRelativePath,
+                    temperature: options.Temperature,
+                    seed: options.Seed);
 
-                summary = await runner.RunAllAsync(scenarios, onScenarioCheckpoint);
+                summary = await executePlanRuns(runner);
             }
             else if (plan.Target is ModelTarget.CustomPath customTarget)
             {
@@ -338,9 +375,11 @@ public static class Program
                     configurationLabel: plan.ConfigurationLabel,
                     optimizationConfigId: plan.OptConfig.Id,
                     optimizationConfigLabel: plan.OptConfig.Label,
-                    transcriptPath: planTranscriptRelativePath);
+                    transcriptPath: planTranscriptRelativePath,
+                    temperature: options.Temperature,
+                    seed: options.Seed);
 
-                summary = await runner.RunAllAsync(scenarios, onScenarioCheckpoint);
+                summary = await executePlanRuns(runner);
             }
             else if (plan.Target is ModelTarget.Ollama ollamaTarget)
             {
@@ -374,9 +413,11 @@ public static class Program
                         configurationLabel: plan.ConfigurationLabel,
                         optimizationConfigId: plan.OptConfig.Id,
                         optimizationConfigLabel: plan.OptConfig.Label,
-                        transcriptPath: planTranscriptRelativePath);
+                        transcriptPath: planTranscriptRelativePath,
+                        temperature: options.Temperature,
+                        seed: options.Seed);
 
-                    summary = await runner.RunAllAsync(scenarios, onScenarioCheckpoint);
+                    summary = await executePlanRuns(runner);
                 }
                 finally
                 {
@@ -437,8 +478,10 @@ public static class Program
         if (allSummaries.Count > 0)
         {
             ConsoleReportFormatter.PrintModelsComparisonTable(allSummaries);
+            ConsoleReportFormatter.PrintSuiteComparisonTable(allSummaries);
             ConsoleReportFormatter.PrintBackendComparisonTable(allSummaries);
             ConsoleReportFormatter.PrintReasoningComparisonTable(allSummaries);
+            ConsoleReportFormatter.PrintMultiRunStatisticalTable(allSummaries);
 
             if (!string.IsNullOrWhiteSpace(transcriptPath))
             {
@@ -706,7 +749,7 @@ public static class Program
 
     private static ISpeculativeSummarizer? CreateSpeculativeSummarizer(OptimizationConfig config, BenchmarkOptions options)
     {
-        if (config.Id is not ("opt-speculative-slm" or "all-optimizations"))
+        if (config.Id is not ("opt-speculative-slm" or "all-optimizations" or "opt-all-local-llm-with-slm"))
         {
             return null;
         }

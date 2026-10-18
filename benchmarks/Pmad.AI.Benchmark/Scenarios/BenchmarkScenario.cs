@@ -59,12 +59,34 @@ public abstract class BenchmarkScenario
     }
 
     /// <summary>
+    /// Benchmark suite category (e.g. "BFCL", "SWE-bench", "RULER").
+    /// </summary>
+    public virtual string Suite => "General";
+
+    /// <summary>
+    /// Computes the final scenario evaluation score (0.0 to 100.0) from the result metrics.
+    /// Evaluates using dual scoring: 70% Task Success + 30% Step Accuracy to preserve benchmark difficulty and prevent benchmark weakening.
+    /// </summary>
+    public virtual double ComputeScore(Engine.BenchmarkScenarioResult result)
+    {
+        var taskSuccessScore = result.TaskSuccess ? 100.0 : 0.0;
+        return Math.Round((0.70 * taskSuccessScore) + (0.30 * result.StepAccuracy), 1);
+    }
+
+    /// <summary>
     /// Evaluates whether the scenario achieved binary Task Success (Pass@1).
     /// By default, true if all turns passed validation. SWE-bench scenarios override this
     /// to require successful patch application and passing verification tests.
     /// </summary>
-    public virtual bool EvaluateTaskSuccess(Engine.BenchmarkScenarioResult result) =>
-        result.TurnsPassed == result.TotalTurns && result.TotalTurns > 0;
+    public virtual bool EvaluateTaskSuccess(Engine.BenchmarkScenarioResult result)
+    {
+        var passed = result.TurnsPassed == result.TotalTurns && result.TotalTurns > 0;
+        if (!passed && result.TaskFailureReason == null)
+        {
+            result.TaskFailureReason = $"{result.TotalTurns - result.TurnsPassed} of {result.TotalTurns} turns failed validation.";
+        }
+        return passed;
+    }
 
     /// <summary>
     /// Returns all 6 BFCL function calling scenarios (Simple, Multiple, Parallel, Irrelevance, Multi-Turn, Strict Schema).
@@ -108,28 +130,39 @@ public abstract class BenchmarkScenario
     ];
 
     /// <summary>
-    /// Returns all scenarios excluding the deep context scenarios (15 scenarios: 6 BFCL + 7 SWE-bench + RULER 8k/16k).
+    /// Returns the compaction-capable scenarios testing ToolResultCompactor and ThinkingTraceCompactor against large payloads.
+    /// </summary>
+    public static IReadOnlyList<BenchmarkScenario> GetCompactionScenarios() =>
+    [
+        new Compaction.CompactionLargeToolScenario(),
+        new Compaction.CompactionDeepContextScenario()
+    ];
+
+    /// <summary>
+    /// Returns all scenarios excluding the deep context scenarios (16 scenarios: 6 BFCL + 7 SWE-bench + RULER 8k/16k + Compaction Large Tool).
     /// </summary>
     public static IReadOnlyList<BenchmarkScenario> GetAllSmallScenarios(string? sandboxMode = null, string? dockerContainer = null) =>
     [
         .. GetBfclScenarios(),
         .. GetSweBenchScenarios(sandboxMode, dockerContainer),
         new Ruler8kScenario(),
-        new Ruler16kScenario()
+        new Ruler16kScenario(),
+        new Compaction.CompactionLargeToolScenario()
     ];
 
     /// <summary>
-    /// Returns all available benchmark scenarios (18 scenarios across BFCL, SWE-bench, and RULER).
+    /// Returns all available benchmark scenarios (20 scenarios across BFCL, SWE-bench, RULER, and Compaction).
     /// </summary>
     public static IReadOnlyList<BenchmarkScenario> GetAllScenarios(string? sandboxMode = null, string? dockerContainer = null) =>
     [
         .. GetBfclScenarios(),
         .. GetSweBenchScenarios(sandboxMode, dockerContainer),
-        .. GetRulerScenarios()
+        .. GetRulerScenarios(),
+        .. GetCompactionScenarios()
     ];
 
     /// <summary>
-    /// Filters scenarios according to the provided filter string ("all", "all-small", "bfcl", "swebench", "ruler", "deep", comma-separated, or matching Id/Name).
+    /// Filters scenarios according to the provided filter string ("all", "all-small", "bfcl", "swebench", "ruler", "compaction", "deep", comma-separated, or matching Id/Name).
     /// </summary>
     public static IReadOnlyList<BenchmarkScenario> FilterScenarios(string? filter, string? sandboxMode = null, string? dockerContainer = null)
     {
@@ -139,6 +172,7 @@ public abstract class BenchmarkScenario
         var swebench = GetSweBenchScenarios(sandboxMode, dockerContainer);
         var ruler = GetRulerScenarios();
         var deep = GetDeepContextScenarios();
+        var compaction = GetCompactionScenarios();
 
         if (string.IsNullOrWhiteSpace(filter) ||
             filter.Equals("all", StringComparison.OrdinalIgnoreCase) ||
@@ -187,6 +221,11 @@ public abstract class BenchmarkScenario
         if (filter.Equals("ruler", StringComparison.OrdinalIgnoreCase))
         {
             return ruler;
+        }
+
+        if (filter.Equals("compaction", StringComparison.OrdinalIgnoreCase))
+        {
+            return compaction;
         }
 
         if (filter.Equals("deep", StringComparison.OrdinalIgnoreCase) || filter.Equals("long", StringComparison.OrdinalIgnoreCase))

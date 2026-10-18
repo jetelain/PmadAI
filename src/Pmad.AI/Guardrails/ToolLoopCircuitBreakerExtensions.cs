@@ -18,4 +18,18 @@ public static class ToolLoopCircuitBreakerExtensions
         ArgumentNullException.ThrowIfNull(builder);
         return builder.Use(innerClient => new ToolLoopCircuitBreakerChatClient(innerClient, breaker));
     }
+
+    /// <summary>
+    /// Adds <see cref="ToolLoopCircuitBreakerChatClient"/> middleware configured with custom options.
+    /// </summary>
+    public static ChatClientBuilder UseToolLoopCircuitBreaker(
+        this ChatClientBuilder builder,
+        Action<ToolLoopCircuitBreakerOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(configure);
+        var options = new ToolLoopCircuitBreakerOptions();
+        configure(options);
+        return builder.Use(innerClient => new ToolLoopCircuitBreakerChatClient(innerClient, new ToolLoopCircuitBreaker(options)));
+    }
 }

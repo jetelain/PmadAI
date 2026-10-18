@@ -32,7 +32,10 @@ public static class BenchmarkPipelineBuilder
         {
             "baseline" => innerClient,
 
-            "opt-healing" => new ToolCallHealingChatClient(innerClient),
+            "opt-healing" => new ToolCallHealingChatClient(innerClient, new ToolCallHealingOptions
+            {
+                Telemetry = new ToolCallHealingTelemetry()
+            }),
 
             "opt-thinking-compaction" => new ThinkingTraceCompactionChatClient(
                 innerClient,
@@ -59,6 +62,16 @@ public static class BenchmarkPipelineBuilder
             "opt-speculative-slm" => BuildSpeculativeCompactionPipeline(innerClient, speculativeSummarizer, telemetry),
 
             "opt-lenient-dispatch" => BuildLenientDispatchPipeline(innerClient),
+
+            "opt-healing-lenient" => BuildHealingLenientPipeline(innerClient),
+
+            "opt-healing-tool-compaction" => BuildHealingToolCompactionPipeline(innerClient, telemetry),
+
+            "opt-recommended-slm" => BuildRecommendedSlmPipeline(innerClient, telemetry),
+
+            "opt-all-local-llm-without-slm" => BuildAllLocalLlmWithoutSlmPipeline(innerClient, telemetry),
+
+            "opt-all-local-llm-with-slm" => BuildAllLocalLlmWithSlmPipeline(innerClient, speculativeSummarizer, telemetry),
 
             "all-optimizations" => BuildAllOptimizationsPipeline(innerClient, speculativeSummarizer, telemetry),
 
@@ -124,16 +137,180 @@ public static class BenchmarkPipelineBuilder
 
     private static IChatClient BuildLenientDispatchPipeline(IChatClient innerClient)
     {
+        var breakerTelemetry = new CircuitBreakerTelemetry();
+        var dispatchTelemetry = new LenientDispatchTelemetry();
+
         var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
         {
             PingPongThreshold = 2,
             NgramMinLength = 4,
-            NgramMinOccurrences = 3
+            NgramMinOccurrences = 3,
+            Telemetry = breakerTelemetry
         });
         var withBreaker = new ToolLoopCircuitBreakerChatClient(innerClient, breaker);
 
         var dispatcher = CreateConfiguredDispatcher();
+        dispatcher.Telemetry = dispatchTelemetry;
         return new LenientToolDispatchChatClient(withBreaker, dispatcher);
+    }
+
+    private static IChatClient BuildRecommendedSlmPipeline(
+        IChatClient innerClient,
+        CompactionTelemetry telemetry)
+    {
+        var dispatcher = CreateConfiguredDispatcher();
+        var dispatchTelemetry = new LenientDispatchTelemetry();
+        dispatcher.Telemetry = dispatchTelemetry;
+
+        var healingTelemetry = new ToolCallHealingTelemetry();
+        var breakerTelemetry = new CircuitBreakerTelemetry();
+
+        var builder = new ChatClientBuilder(innerClient);
+        builder.UseRecommendedSlmPipeline(
+            dispatcher: dispatcher,
+            configureBreaker: opts =>
+            {
+                opts.Telemetry = breakerTelemetry;
+                opts.NgramMinLength = 4;
+                opts.NgramMinOccurrences = 3;
+            },
+            configureToolResult: opts =>
+            {
+                opts.Telemetry = telemetry;
+            },
+            configureHealing: opts =>
+            {
+                opts.Telemetry = healingTelemetry;
+            });
+
+        return builder.Build();
+    }
+
+    private static IChatClient BuildAllLocalLlmWithoutSlmPipeline(
+        IChatClient innerClient,
+        CompactionTelemetry telemetry)
+    {
+        var dispatcher = CreateConfiguredDispatcher();
+        var dispatchTelemetry = new LenientDispatchTelemetry();
+        dispatcher.Telemetry = dispatchTelemetry;
+
+        var healingTelemetry = new ToolCallHealingTelemetry();
+        var breakerTelemetry = new CircuitBreakerTelemetry();
+
+        var builder = new ChatClientBuilder(innerClient);
+        builder.UseRecommendedLocalLlmPipeline(
+            dispatcher: dispatcher,
+            summarizer: null,
+            configureBreaker: opts =>
+            {
+                opts.Telemetry = breakerTelemetry;
+                opts.NgramMinLength = 4;
+                opts.NgramMinOccurrences = 3;
+            },
+            configureThinking: opts =>
+            {
+                opts.Telemetry = telemetry;
+            },
+            configureToolResult: opts =>
+            {
+                opts.Telemetry = telemetry;
+            },
+            configureHealing: opts =>
+            {
+                opts.Telemetry = healingTelemetry;
+            });
+
+        return builder.Build();
+    }
+
+    private static IChatClient BuildAllLocalLlmWithSlmPipeline(
+        IChatClient innerClient,
+        ISpeculativeSummarizer? speculativeSummarizer,
+        CompactionTelemetry telemetry)
+    {
+        var dispatcher = CreateConfiguredDispatcher();
+        var dispatchTelemetry = new LenientDispatchTelemetry();
+        dispatcher.Telemetry = dispatchTelemetry;
+
+        var healingTelemetry = new ToolCallHealingTelemetry();
+        var breakerTelemetry = new CircuitBreakerTelemetry();
+
+        var builder = new ChatClientBuilder(innerClient);
+        builder.UseRecommendedLocalLlmPipeline(
+            dispatcher: dispatcher,
+            summarizer: speculativeSummarizer,
+            configureBreaker: opts =>
+            {
+                opts.Telemetry = breakerTelemetry;
+                opts.NgramMinLength = 4;
+                opts.NgramMinOccurrences = 3;
+            },
+            configureThinking: opts =>
+            {
+                opts.Telemetry = telemetry;
+            },
+            configureToolResult: opts =>
+            {
+                opts.Telemetry = telemetry;
+            },
+            configureHealing: opts =>
+            {
+                opts.Telemetry = healingTelemetry;
+            });
+
+        return builder.Build();
+    }
+
+    private static IChatClient BuildHealingLenientPipeline(IChatClient innerClient)
+    {
+        var dispatcher = CreateConfiguredDispatcher();
+        var dispatchTelemetry = new LenientDispatchTelemetry();
+        dispatcher.Telemetry = dispatchTelemetry;
+
+        var healingTelemetry = new ToolCallHealingTelemetry();
+        var breakerTelemetry = new CircuitBreakerTelemetry();
+
+        var builder = new ChatClientBuilder(innerClient);
+        builder
+            .UseLenientToolDispatch(dispatcher)
+            .UseToolLoopCircuitBreaker(opts =>
+            {
+                opts.PingPongThreshold = 2;
+                opts.NgramMinLength = 4;
+                opts.NgramMinOccurrences = 3;
+                opts.Telemetry = breakerTelemetry;
+            })
+            .UseToolCallHealing(dispatcher, opts =>
+            {
+                opts.Telemetry = healingTelemetry;
+            });
+
+        return builder.Build();
+    }
+
+    private static IChatClient BuildHealingToolCompactionPipeline(
+        IChatClient innerClient,
+        CompactionTelemetry telemetry)
+    {
+        var healingTelemetry = new ToolCallHealingTelemetry();
+
+        var builder = new ChatClientBuilder(innerClient);
+        builder
+            .UseToolResultCompaction(opts =>
+            {
+                opts.KeepVerbatimCount = 4;
+                opts.FallbackCharacterLimit = 2500;
+                opts.FallbackPrefixLength = 1800;
+                opts.FallbackSuffixLength = 700;
+                opts.Summarizer = null;
+                opts.Telemetry = telemetry;
+            })
+            .UseToolCallHealing(opts =>
+            {
+                opts.Telemetry = healingTelemetry;
+            });
+
+        return builder.Build();
     }
 
     private static IChatClient BuildAllOptimizationsPipeline(
@@ -142,11 +319,17 @@ public static class BenchmarkPipelineBuilder
         CompactionTelemetry telemetry)
     {
         var dispatcher = CreateConfiguredDispatcher();
+        var dispatchTelemetry = new LenientDispatchTelemetry();
+        dispatcher.Telemetry = dispatchTelemetry;
+
+        var healingTelemetry = new ToolCallHealingTelemetry();
+        var breakerTelemetry = new CircuitBreakerTelemetry();
 
         // 1. Tool call healing wraps raw client with dispatcher awareness
         IChatClient current = new ToolCallHealingChatClient(innerClient, new ToolCallHealingOptions
         {
-            Dispatcher = dispatcher
+            Dispatcher = dispatcher,
+            Telemetry = healingTelemetry
         });
 
         // 2. Tool result compaction
@@ -176,7 +359,8 @@ public static class BenchmarkPipelineBuilder
         {
             PingPongThreshold = 2,
             NgramMinLength = 4,
-            NgramMinOccurrences = 3
+            NgramMinOccurrences = 3,
+            Telemetry = breakerTelemetry
         });
         current = new ToolLoopCircuitBreakerChatClient(current, breaker);
         current = new LenientToolDispatchChatClient(current, dispatcher);

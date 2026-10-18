@@ -51,6 +51,16 @@ public class ToolCallHealingOptions
     /// to resolve tool aliases, namespace prefixes, or virtual translation tools against declared tools.
     /// </summary>
     public LenientToolDispatcher? Dispatcher { get; set; }
+
+    /// <summary>
+    /// Optional telemetry collector to record healing interventions.
+    /// </summary>
+    public ToolCallHealingTelemetry? Telemetry { get; set; }
+
+    /// <summary>
+    /// Optional session identifier propagated to telemetry events.
+    /// </summary>
+    public string? SessionId { get; set; }
 }
 
 /// <summary>
@@ -68,15 +78,22 @@ public class ToolCallHealingChatClient : DelegatingChatClient
         _options = options ?? new ToolCallHealingOptions();
     }
 
-    private ToolCallHealingOptions ResolveEffectiveOptions(ChatOptions? chatOptions)
+    public override object? GetService(Type serviceType, object? serviceKey = null)
     {
-        if (_options.Dispatcher != null)
+        if (serviceType == typeof(ToolCallHealingTelemetry) && _options.Telemetry != null)
         {
-            return _options;
+            return _options.Telemetry;
         }
 
-        var dispatcher = chatOptions.GetToolDispatcher() ?? (GetService(typeof(LenientToolDispatcher)) as LenientToolDispatcher);
-        if (dispatcher != null)
+        return base.GetService(serviceType, serviceKey);
+    }
+
+    private ToolCallHealingOptions ResolveEffectiveOptions(ChatOptions? chatOptions)
+    {
+        var sessionId = chatOptions?.ConversationId ?? _options.SessionId;
+        var dispatcher = _options.Dispatcher ?? chatOptions.GetToolDispatcher() ?? (GetService(typeof(LenientToolDispatcher)) as LenientToolDispatcher);
+
+        if (dispatcher != _options.Dispatcher || sessionId != _options.SessionId)
         {
             return new ToolCallHealingOptions
             {
@@ -84,7 +101,9 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                 TagPrefixTriggers = _options.TagPrefixTriggers,
                 Logger = _options.Logger,
                 EnforceAvailableToolsGuardrail = _options.EnforceAvailableToolsGuardrail,
-                Dispatcher = dispatcher
+                Dispatcher = dispatcher,
+                Telemetry = _options.Telemetry,
+                SessionId = sessionId
             };
         }
 

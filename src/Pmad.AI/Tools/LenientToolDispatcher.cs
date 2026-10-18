@@ -153,6 +153,16 @@ public class LenientToolDispatcherOptions
     /// case-insensitive enum and boolean matching). Default: true.
     /// </summary>
     public bool EnableParameterCoercion { get; set; } = true;
+
+    /// <summary>
+    /// Optional telemetry collector to record lenient dispatch remappings and alias hits.
+    /// </summary>
+    public LenientDispatchTelemetry? Telemetry { get; set; }
+
+    /// <summary>
+    /// Optional session identifier propagated to telemetry events.
+    /// </summary>
+    public string? SessionId { get; set; }
 }
 
 /// <summary>
@@ -176,6 +186,18 @@ public class LenientToolDispatcher
     private readonly Dictionary<string, AIFunction> _registeredTools = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly Regex TemplatePlaceholderRegex = new(@"\{([a-zA-Z0-9_]+)(?::([^}]*))?\}", RegexOptions.Compiled);
+
+    public LenientDispatchTelemetry? Telemetry
+    {
+        get => _options.Telemetry;
+        set => _options.Telemetry = value;
+    }
+
+    public string? SessionId
+    {
+        get => _options.SessionId;
+        set => _options.SessionId = value;
+    }
 
     public LenientToolDispatcher(LenientToolDispatcherOptions? options = null)
     {
@@ -348,7 +370,12 @@ public class LenientToolDispatcher
         var toolName = rawToolName.Trim();
         if (_options.StripNamespacePrefixes)
         {
-            toolName = StripNamespace(toolName);
+            var stripped = StripNamespace(toolName);
+            if (!string.Equals(stripped, toolName, StringComparison.Ordinal))
+            {
+                Telemetry?.Record(LenientDispatchEventType.NamespaceStripped, toolName, stripped, SessionId);
+                toolName = stripped;
+            }
         }
 
         // 1. Check if tool is a translation rule
@@ -357,6 +384,7 @@ public class LenientToolDispatcher
 
         if (translation != null)
         {
+            Telemetry?.Record(LenientDispatchEventType.ToolAliasResolved, toolName, translation.TargetTool, SessionId);
             return RenderTranslationCall(translation, rawArgs, rawToolName);
         }
 
@@ -364,27 +392,39 @@ public class LenientToolDispatcher
         string canonicalTool = toolName;
         ToolMapping? mapping = null;
 
-        if (_registeredTools.ContainsKey(toolName))
+        if (_registeredTools.TryGetValue(toolName, out var registeredTool))
         {
-            canonicalTool = toolName;
-            _configuration.Tools.TryGetValue(toolName, out mapping);
-        }
-        else if (_configuration.Tools.TryGetValue(toolName, out mapping))
-        {
-            canonicalTool = toolName;
+            canonicalTool = registeredTool.Name;
+            _configuration.Tools.TryGetValue(canonicalTool, out mapping);
         }
         else
         {
-            // Search aliases
-            foreach (var (canonicalKey, toolMap) in _configuration.Tools)
+            var configMatch = _configuration.Tools.FirstOrDefault(kv => string.Equals(kv.Key, toolName, StringComparison.OrdinalIgnoreCase));
+            if (configMatch.Key != null)
             {
-                if (toolMap.Aliases.Contains(toolName))
+                canonicalTool = configMatch.Key;
+                mapping = configMatch.Value;
+            }
+            else
+            {
+                // Search aliases
+                foreach (var (canonicalKey, toolMap) in _configuration.Tools)
                 {
-                    canonicalTool = canonicalKey;
-                    mapping = toolMap;
-                    break;
+                    if (toolMap.Aliases.Contains(toolName))
+                    {
+                        canonicalTool = canonicalKey;
+                        mapping = toolMap;
+                        Telemetry?.Record(LenientDispatchEventType.ToolAliasResolved, toolName, canonicalKey, SessionId);
+                        break;
+                    }
                 }
             }
+        }
+
+        if (string.Equals(toolName, canonicalTool, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(toolName, canonicalTool, StringComparison.Ordinal))
+        {
+            Telemetry?.Record(LenientDispatchEventType.CasingNormalized, toolName, canonicalTool, SessionId);
         }
 
         // 3. Resolve parameter aliases
@@ -403,13 +443,26 @@ public class LenientToolDispatcher
                     continue;
                 }
 
+                // Check case-insensitive match for canonical param
+                if (TryGetValueCaseInsensitive(rawArgs, canonicalParam, out var caseInsensitiveVal, out var matchedKey))
+                {
+                    canonicalArgs[canonicalParam] = caseInsensitiveVal;
+                    matchedRawKeys.Add(matchedKey!);
+                    if (!string.Equals(matchedKey, canonicalParam, StringComparison.Ordinal))
+                    {
+                        Telemetry?.Record(LenientDispatchEventType.CasingNormalized, matchedKey!, canonicalParam, SessionId);
+                    }
+                    continue;
+                }
+
                 // Check aliases
                 foreach (var alias in aliases)
                 {
-                    if (rawArgs.TryGetValue(alias, out var aliasVal))
+                    if (TryGetValueCaseInsensitive(rawArgs, alias, out var aliasVal, out var matchedAliasKey))
                     {
                         canonicalArgs[canonicalParam] = aliasVal;
-                        matchedRawKeys.Add(alias);
+                        matchedRawKeys.Add(matchedAliasKey!);
+                        Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, matchedAliasKey!, canonicalParam, SessionId);
                         break;
                     }
                 }
@@ -561,16 +614,27 @@ public class LenientToolDispatcher
 
     private static bool TryGetValueCaseInsensitive(IDictionary<string, object?> dict, string key, out object? value)
     {
-        if (dict.TryGetValue(key, out value)) return true;
+        return TryGetValueCaseInsensitive(dict, key, out value, out _);
+    }
+
+    private static bool TryGetValueCaseInsensitive(IDictionary<string, object?> dict, string key, out object? value, out string? matchedKey)
+    {
+        if (dict.TryGetValue(key, out value))
+        {
+            matchedKey = key;
+            return true;
+        }
         foreach (var (k, v) in dict)
         {
             if (string.Equals(k, key, StringComparison.OrdinalIgnoreCase))
             {
                 value = v;
+                matchedKey = k;
                 return true;
             }
         }
         value = null;
+        matchedKey = null;
         return false;
     }
 
@@ -616,14 +680,15 @@ public class LenientToolDispatcher
         }
 
         // 2. Resolve canonical tool name (exact match always wins over aliases)
-        if (_registeredTools.ContainsKey(toolName))
+        if (_registeredTools.TryGetValue(toolName, out var registeredTool))
         {
-            return toolName;
+            return registeredTool.Name;
         }
 
-        if (_configuration.Tools.ContainsKey(toolName))
+        var configMatch = _configuration.Tools.FirstOrDefault(kv => string.Equals(kv.Key, toolName, StringComparison.OrdinalIgnoreCase));
+        if (configMatch.Key != null)
         {
-            return toolName;
+            return configMatch.Key;
         }
 
         // Search aliases
@@ -787,6 +852,7 @@ public class LenientToolDispatcher
             JsonElement paramSchema = default;
             bool paramSchemaFound = false;
 
+            string effectiveKey = key;
             if (hasSchema)
             {
                 if (schemaProperties.TryGetProperty(key, out paramSchema))
@@ -801,13 +867,27 @@ public class LenientToolDispatcher
                         {
                             paramSchema = prop.Value;
                             paramSchemaFound = true;
+                            if (!string.Equals(prop.Name, key, StringComparison.Ordinal))
+                            {
+                                effectiveKey = prop.Name;
+                            }
                             break;
                         }
                     }
                 }
             }
 
-            arguments[key] = CoerceParameterValue(key, value, paramSchemaFound ? paramSchema : null);
+            var coercedVal = CoerceParameterValue(effectiveKey, value, paramSchemaFound ? paramSchema : null);
+            if (!string.Equals(effectiveKey, key, StringComparison.Ordinal))
+            {
+                arguments.Remove(key);
+                arguments[effectiveKey] = coercedVal;
+                Telemetry?.Record(LenientDispatchEventType.CasingNormalized, key, effectiveKey, SessionId);
+            }
+            else
+            {
+                arguments[key] = coercedVal;
+            }
         }
     }
 
@@ -986,6 +1066,10 @@ public class LenientToolDispatchChatClient : DelegatingChatClient
     {
         options ??= new ChatOptions();
         options.SetToolDispatcher(_dispatcher);
+        if (options.ConversationId != null)
+        {
+            _dispatcher.SessionId = options.ConversationId;
+        }
         var response = await base.GetResponseAsync(chatMessages, options, cancellationToken);
         if (response?.Messages != null)
         {
@@ -1004,6 +1088,10 @@ public class LenientToolDispatchChatClient : DelegatingChatClient
     {
         options ??= new ChatOptions();
         options.SetToolDispatcher(_dispatcher);
+        if (options.ConversationId != null)
+        {
+            _dispatcher.SessionId = options.ConversationId;
+        }
         await foreach (var update in base.GetStreamingResponseAsync(chatMessages, options, cancellationToken))
         {
             if (update.Contents != null)
@@ -1039,6 +1127,12 @@ public class LenientToolDispatchChatClient : DelegatingChatClient
         {
             return _dispatcher;
         }
+
+        if (serviceType == typeof(LenientDispatchTelemetry) && _dispatcher.Telemetry != null)
+        {
+            return _dispatcher.Telemetry;
+        }
+
         return base.GetService(serviceType, serviceKey);
     }
 

@@ -160,6 +160,21 @@ public sealed class BenchmarkOptions
     public string? DockerContainer { get; set; }
 
     /// <summary>
+    /// Number of repeated execution runs per configuration (default: 1; recommended N >= 5 for statistical rigor).
+    /// </summary>
+    public int Runs { get; set; } = 1;
+
+    /// <summary>
+    /// Random seed for deterministic inference where supported (optional).
+    /// </summary>
+    public long? Seed { get; set; }
+
+    /// <summary>
+    /// Model sampling temperature (optional, e.g. 0.0 for deterministic evaluation).
+    /// </summary>
+    public float? Temperature { get; set; }
+
+    /// <summary>
     /// Whether help was requested.
     /// </summary>
     public bool ShowHelp { get; set; }
@@ -321,6 +336,18 @@ public sealed class BenchmarkOptions
             {
                 options.SlmThreads = slmThreads;
             }
+            else if (arg is "-r" or "--runs" or "-n" && i + 1 < args.Length && int.TryParse(args[++i], out var runs))
+            {
+                options.Runs = Math.Max(1, runs);
+            }
+            else if (arg is "--seed" && i + 1 < args.Length && long.TryParse(args[++i], out var seed))
+            {
+                options.Seed = seed;
+            }
+            else if (arg is "--temperature" or "--temp" && i + 1 < args.Length && float.TryParse(args[++i], System.Globalization.CultureInfo.InvariantCulture, out var temp))
+            {
+                options.Temperature = temp;
+            }
             else if (arg is "-v" or "--verbose")
             {
                 options.Verbose = true;
@@ -357,16 +384,25 @@ Target Models & Providers:
   --ollama-url <url>       Ollama endpoint URL (default: http://localhost:11434).
   -d, --download           Download GGUF models automatically if missing from local cache.
   --mock, --dry-run        Run with mock simulated chat client (showcases tool calling & metrics immediately).
-  -s, --scenario <name>    Filter scenario: 'all' (all 18 scenarios across BFCL, SWE-bench & RULER),
-                           'all-small' (15 scenarios: BFCL + SWE-bench + RULER 8k/16k, excluding deep),
+  -s, --scenario <name>    Filter scenario: 'all' (all 20 scenarios across BFCL, SWE-bench, RULER & Compaction),
+                           'all-small' (16 scenarios: BFCL + SWE-bench + RULER 8k/16k + Compaction Large Tool),
                            'bfcl' (6 scenarios: Simple, Multiple, Parallel, Irrelevance, Multi-Turn, Strict),
                            'swebench' (7 trace replays), 'ruler' (5 context depths),
+                           'compaction' (2 compaction-focused scenarios: large-tool & deep-context),
                            'deep' (32k/64k/128k), or comma-separated.
 
-Optimization Matrix:
-  --opt-matrix             Run full 7-configuration optimization matrix (Baseline, single utilities, and all combined).
-  --config <id>            Execute specific configuration: 'baseline', 'opt-healing', 'opt-thinking-compaction',
-                           'opt-tool-compaction', 'opt-speculative-slm', 'opt-lenient-dispatch', 'all-optimizations'.
+Statistical Rigor & Multi-Run:
+  -r, --runs, -n <count>   Number of repeated runs per configuration (default: 1; N >= 5 for statistical rigor).
+  --seed <number>          Deterministic random seed for inference.
+  --temperature <val>      Model sampling temperature (e.g. 0.0 for deterministic evaluation).
+
+Optimization Matrix & Presets:
+  --opt-matrix             Run full optimization matrix (Baseline, presets, single utilities, and ablation pairs).
+  --config <id>            Execute specific configuration:
+                           Presets: 'opt-recommended-slm', 'opt-all-local-llm-without-slm', 'opt-all-local-llm-with-slm'
+                           Pairs:   'opt-healing-lenient', 'opt-healing-tool-compaction'
+                           Single:  'baseline', 'opt-healing', 'opt-thinking-compaction', 'opt-tool-compaction',
+                                    'opt-speculative-slm', 'opt-lenient-dispatch', 'all-optimizations'.
 
 Hardware & Backend:
   -b, --backend <name>     Backend to use: 'cpu', 'vulkan', or 'all' (default: vulkan if GPU layers > 0, else cpu).

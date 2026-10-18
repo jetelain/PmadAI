@@ -41,10 +41,11 @@ Targeting `.NET 10.0` with `<IsAotCompatible>true</IsAotCompatible>`, `Pmad.AI` 
   - Coalesces streaming chunks in real time.
   - Optional `FlushAfterEachTurn` to protect against process crashes.
 
-- **Conversation History Compaction (`ThinkingTraceCompactionChatClient` & `ToolResultCompactor`)**:
-  - `ThinkingTraceCompactionChatClient`: collapses verbose reasoning traces outside the active turn window (`KeepVerbatimCount`), replacing them with precomputed summaries or first-line stubs.
-  - `ToolResultCompactor` & `ToolResultCompactionChatClient`: prunes bulky tool outputs (compiler logs, test runs, file reads) with configurable prefix/suffix retention.
-  - Configurable `MutateInPlace` flag: `false` (default) preserves immaculate caller history via shallow copies; `true` modifies lists in-place with zero allocations.
+- **Conversation History Compaction (`ThinkingTraceCompactor` & `ToolResultCompactor`)**:
+  - Unified compaction architecture sharing `ICompactionOptions`: deterministic threshold (`FallbackCharacterLimit`), prefix preservation (`FallbackPrefixLength`), suffix preservation (`FallbackSuffixLength`), and optional background speculative summarizer (`ISpeculativeSummarizer`).
+  - `ThinkingTraceCompactor` & `ThinkingTraceCompactionChatClient`: collapses verbose reasoning traces (`TextReasoningContent`) outside the active turn window (`KeepVerbatimCount`) exceeding `FallbackCharacterLimit` (default: 1,750), replacing them with precomputed summaries or deterministic prefix-suffix truncated monologues while preserving short traces verbatim to maximize KV-cache reuse.
+  - `ToolResultCompactor` & `ToolResultCompactionChatClient`: prunes bulky tool outputs (compiler logs, test runs, file reads) outside the active window using configurable prefix/suffix retention.
+  - Configurable `MutateInPlace` flag: `false` (default) preserves caller history via shallow copies; `true` modifies lists in-place with zero allocations.
   - Integrates with `ISpeculativeSummarizer` for background precomputed summaries.
 
 - **Declarative Tool Dispatching (`LenientToolDispatcher`)**:
@@ -80,7 +81,7 @@ dotnet add package Pmad.AI
 | **`Pmad.AI.Tools`** | Tool dispatching, aliasing, translations, and attributes | `LenientToolDispatcher`, `ToolMapping`, `ToolTranslation`, `[ToolAlias]`, `[ToolParameterAlias]`, `[ToolTranslation]` |
 | **`Pmad.AI.Healing`** | Payload healing and protocol repair for local/open-weights models | `ToolCallHealingTransform`, `ToolCallHealingChatClient`, `StreamingHealingMode` |
 | **`Pmad.AI.Guardrails`** | Execution loop breaker and shell security validation | `ToolLoopCircuitBreaker`, `ToolLoopCircuitBreakerChatClient`, `ReadOnlyCommandValidator`, `ShellDialect` |
-| **`Pmad.AI.Compaction`** | Context window history compaction and speculative summarization | `ToolResultCompactor`, `ThinkingTraceCompactionChatClient`, `ISpeculativeSummarizer`, `OllamaSpeculativeSummarizer`, `OllamaApiClient` |
+| **`Pmad.AI.Compaction`** | Context window history compaction and speculative summarization | `ICompactionOptions`, `ToolResultCompactor`, `ThinkingTraceCompactor`, `ThinkingTraceCompactionChatClient`, `ISpeculativeSummarizer`, `OllamaSpeculativeSummarizer`, `OllamaApiClient` |
 | **`Pmad.AI.Transcripts`** | Audit-grade Markdown transcript logging | `VerbatimTranscriptChatClient`, `VerbatimTranscriptOptions` |
 | **`Pmad.AI.Tokens`** | Fast zero-allocation token estimation | `HeuristicTokenEstimator` |
 
@@ -88,9 +89,47 @@ dotnet add package Pmad.AI
 
 ## Usage Examples
 
-### 1. Resilient Agent Pipeline with ChatClientBuilder
+### 1. Battle-Tested Pipeline Presets: SLM vs. Local LLM
 
-Combine healing, history compaction, transcript recording, and lenient tool dispatch into a single pipeline:
+`Pmad.AI` exposes first-class pipeline presets configured specifically for model weight tiers:
+
+#### Recommended SLM Pipeline (for Small Language Models $\le 8\text{B}$)
+Keeps execution deterministic, prefix-friendly for local KV caches, and focused on error recovery without speculative natural-language interference or thinking trace pruning:
+
+```csharp
+using Microsoft.Extensions.AI;
+using Pmad.AI;
+
+var client = new ChatClientBuilder(innerChatClient)
+    .UseRecommendedSlmPipeline(dispatcher)
+    .Build();
+```
+
+Pipeline order: Lenient Tool Dispatch $\to$ Circuit Breaker ($\text{PingPongThreshold} = 2$) $\to$ Deterministic Tool Result Compaction ($\text{Verbatim} = 4$, no SLM summarizer) $\to$ Tool Call Healing (innermost).
+
+#### Recommended Local LLM Pipeline (for Capable Local Models $\ge 14\text{B}$)
+Enables full optimizations including thinking trace compaction and optional background speculative summarization:
+
+```csharp
+using Microsoft.Extensions.AI;
+using Pmad.AI;
+
+// Pure deterministic compaction:
+var client = new ChatClientBuilder(innerChatClient)
+    .UseRecommendedLocalLlmPipeline(dispatcher)
+    .Build();
+
+// Or with an asynchronous background speculative summarizer:
+var clientWithSlm = new ChatClientBuilder(innerChatClient)
+    .UseRecommendedLocalLlmPipeline(dispatcher, summarizer: ollamaSummarizer)
+    .Build();
+```
+
+---
+
+### 2. Custom Agent Pipeline Assembly
+
+Combine healing, history compaction, transcript recording, and lenient tool dispatch into a single custom pipeline:
 
 ```csharp
 using Microsoft.Extensions.AI;
@@ -111,7 +150,7 @@ var client = new ChatClientBuilder(innerChatClient)
     .UseThinkingTraceCompaction(options =>
     {
         options.KeepVerbatimCount = 5;
-        options.FallbackCharacterLimit = 120;
+        options.FallbackCharacterLimit = 1750;
         options.MutateInPlace = false;
     })
     // 4. Bulky tool result compaction (keeps last 10 turns verbatim)

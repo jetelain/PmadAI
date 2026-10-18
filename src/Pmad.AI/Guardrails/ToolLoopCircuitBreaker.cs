@@ -49,6 +49,28 @@ public class ToolLoopCircuitBreakerOptions
     /// that trip the ping-pong breaker. Default: 2 (the 2nd identical call is flagged).
     /// </summary>
     public int PingPongThreshold { get; set; } = 2;
+
+    /// <summary>
+    /// When true, resetting ping-pong tracking occurs when a distinct user prompt is observed.
+    /// Default: false (repeating the exact same tool call on unchanged observation state across turns
+    /// is treated as a loop regardless of user prompt wording variations).
+    /// </summary>
+    public bool ResetOnUserPrompt { get; set; } = false;
+
+    /// <summary>
+    /// Optional telemetry collector to record circuit breaker trip events.
+    /// </summary>
+    public CircuitBreakerTelemetry? Telemetry { get; set; }
+
+    /// <summary>
+    /// Optional session identifier propagated to telemetry events.
+    /// </summary>
+    public string? SessionId { get; set; }
+
+    /// <summary>
+    /// Optional callback invoked whenever a loop is detected.
+    /// </summary>
+    public Action<LoopCheckResult>? OnLoopDetected { get; set; }
 }
 
 /// <summary>
@@ -65,6 +87,8 @@ public sealed class ToolLoopCircuitBreaker
     private int _consecutiveIdenticalCount;
     private string? _lastObservationHash;
     private string? _lastUserPromptHash;
+
+    public ToolLoopCircuitBreakerOptions Options => _options;
 
     public ToolLoopCircuitBreaker(ToolLoopCircuitBreakerOptions? options = null)
     {
@@ -136,7 +160,7 @@ public sealed class ToolLoopCircuitBreaker
     }
 
     /// <summary>
-    /// Determines whether the prompt is an automated step continuation instruction rather than a new guiding user prompt.
+    /// Determines whether the prompt is an automated step continuation or retry instruction rather than a new guiding user prompt.
     /// </summary>
     public static bool IsContinuationPrompt(string? text)
     {
@@ -149,18 +173,28 @@ public sealed class ToolLoopCircuitBreaker
             || trimmed.StartsWith("Turn ", StringComparison.OrdinalIgnoreCase)
             || trimmed.StartsWith("Turn", StringComparison.OrdinalIgnoreCase)
             || string.Equals(trimmed, "continue", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(trimmed, "next", StringComparison.OrdinalIgnoreCase);
+            || string.Equals(trimmed, "next", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(trimmed, "again", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(trimmed, "retry", StringComparison.OrdinalIgnoreCase)
+            || trimmed.Contains("again", StringComparison.OrdinalIgnoreCase)
+            || trimmed.Contains("one more time", StringComparison.OrdinalIgnoreCase)
+            || trimmed.Contains("retry", StringComparison.OrdinalIgnoreCase)
+            || trimmed.Contains("try again", StringComparison.OrdinalIgnoreCase)
+            || trimmed.Contains("repeat", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
-    /// Records a user prompt. If the prompt represents a new guiding instruction from the user (different from
-    /// the previous prompt), resets the ping-pong counter to allow fresh exploration.
+    /// Records a user prompt. When <see cref="ToolLoopCircuitBreakerOptions.ResetOnUserPrompt"/> is enabled and the prompt represents
+    /// a new guiding instruction from the user (different from the previous prompt and not a continuation/retry instruction),
+    /// resets the ping-pong counter to allow fresh exploration.
+    /// By default (<see cref="ToolLoopCircuitBreakerOptions.ResetOnUserPrompt"/> = false), ping-pong resets are state-driven
+    /// (triggering only when tool signatures or observation hashes change).
     /// </summary>
     public void RecordUserPrompt(string? userPrompt)
     {
         if (string.IsNullOrWhiteSpace(userPrompt) || IsContinuationPrompt(userPrompt)) return;
         var promptHash = ComputeHash(userPrompt.Trim());
-        if (_lastUserPromptHash != null && !string.Equals(_lastUserPromptHash, promptHash, StringComparison.Ordinal))
+        if (_options.ResetOnUserPrompt && _lastUserPromptHash != null && !string.Equals(_lastUserPromptHash, promptHash, StringComparison.Ordinal))
         {
             ResetPingPong();
         }
@@ -197,10 +231,10 @@ public sealed class ToolLoopCircuitBreaker
                 if (count >= minOccurrences)
                 {
                     var sample = pattern.Length > 32 ? string.Concat(pattern[..32].ToString(), "...") : pattern.ToString();
-                    return new LoopCheckResult(
+                    return RecordTrip(new LoopCheckResult(
                         true,
                         LoopType.StreamingRepetition,
-                        $"Streaming repetition loop detected: sequence of length {len} repeated {count} times ('{sample}').");
+                        $"Streaming repetition loop detected: sequence of length {len} repeated {count} times ('{sample}')."));
                 }
             }
         }
@@ -264,7 +298,7 @@ public sealed class ToolLoopCircuitBreaker
             if (_consecutiveIdenticalCount >= _options.PingPongThreshold)
             {
                 var diag = $"Duplicate tool invocation detected: '{toolName}' was called {_consecutiveIdenticalCount} consecutive times with identical arguments on unchanged state (threshold: {_options.PingPongThreshold}). Cease repetitive tool invocation.";
-                return new LoopCheckResult(true, LoopType.ToolPingPong, diag, toolName);
+                return RecordTrip(new LoopCheckResult(true, LoopType.ToolPingPong, diag, toolName));
             }
         }
         else
@@ -302,11 +336,24 @@ public sealed class ToolLoopCircuitBreaker
             if (cycleMatches)
             {
                 var diag = $"Tool ping-pong loop detected: cycle of {L} tool invocations repeated with identical arguments on unchanged state. Cease repetitive tool invocation.";
-                return new LoopCheckResult(true, LoopType.ToolPingPong, diag, toolName);
+                return RecordTrip(new LoopCheckResult(true, LoopType.ToolPingPong, diag, toolName));
             }
         }
 
         return new LoopCheckResult(false, LoopType.None, string.Empty, toolName);
+    }
+
+    private LoopCheckResult RecordTrip(LoopCheckResult result)
+    {
+        if (result.IsLoopDetected)
+        {
+            var eventType = result.Type == LoopType.StreamingRepetition
+                ? CircuitBreakerEventType.StreamingRepetition
+                : CircuitBreakerEventType.ToolPingPong;
+            _options.Telemetry?.Record(eventType, result.ToolName, result.DiagnosticMessage, _options.SessionId);
+            _options.OnLoopDetected?.Invoke(result);
+        }
+        return result;
     }
 
 
