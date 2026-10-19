@@ -184,6 +184,10 @@ public class LenientToolDispatcher
     private readonly LenientToolDispatcherOptions _options;
     private ToolDispatcherConfiguration _configuration = new();
     private readonly Dictionary<string, AIFunction> _registeredTools = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _canonicalToolNames = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _aliasToCanonical = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ToolTranslation> _translationsBySource = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Dictionary<string, (string CanonicalName, JsonElement Schema)>> _toolSchemaProperties = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly Regex TemplatePlaceholderRegex = new(@"\{([a-zA-Z0-9_]+)(?::([^}]*))?\}", RegexOptions.Compiled);
 
@@ -211,6 +215,43 @@ public class LenientToolDispatcher
     {
         ArgumentNullException.ThrowIfNull(configuration);
         _configuration = configuration;
+        RebuildLookupTables();
+    }
+
+    private void RebuildLookupTables()
+    {
+        _canonicalToolNames.Clear();
+        _aliasToCanonical.Clear();
+        _translationsBySource.Clear();
+
+        if (_configuration.Translations != null)
+        {
+            foreach (var t in _configuration.Translations)
+            {
+                if (!string.IsNullOrWhiteSpace(t.SourceTool))
+                {
+                    _translationsBySource[t.SourceTool] = t;
+                }
+            }
+        }
+
+        if (_configuration.Tools != null)
+        {
+            foreach (var (canonical, mapping) in _configuration.Tools)
+            {
+                _canonicalToolNames[canonical] = canonical;
+                if (mapping.Aliases != null)
+                {
+                    foreach (var alias in mapping.Aliases)
+                    {
+                        if (!string.IsNullOrWhiteSpace(alias))
+                        {
+                            _aliasToCanonical[alias] = canonical;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -220,6 +261,22 @@ public class LenientToolDispatcher
     {
         ArgumentNullException.ThrowIfNull(tool);
         _registeredTools[tool.Name] = tool;
+        CacheToolSchema(tool);
+    }
+
+    private void CacheToolSchema(AIFunction tool)
+    {
+        if (tool.JsonSchema.ValueKind == JsonValueKind.Object &&
+            tool.JsonSchema.TryGetProperty("properties", out var props) &&
+            props.ValueKind == JsonValueKind.Object)
+        {
+            var propDict = new Dictionary<string, (string, JsonElement)>(StringComparer.OrdinalIgnoreCase);
+            foreach (var prop in props.EnumerateObject())
+            {
+                propDict[prop.Name] = (prop.Name, prop.Value);
+            }
+            _toolSchemaProperties[tool.Name] = propDict;
+        }
     }
 
     /// <summary>
@@ -378,11 +435,8 @@ public class LenientToolDispatcher
             }
         }
 
-        // 1. Check if tool is a translation rule
-        var translation = _configuration.Translations.FirstOrDefault(t =>
-            string.Equals(t.SourceTool, toolName, StringComparison.OrdinalIgnoreCase));
-
-        if (translation != null)
+        // 1. Check if tool is a translation rule via O(1) lookup
+        if (_translationsBySource.TryGetValue(toolName, out var translation))
         {
             Telemetry?.Record(LenientDispatchEventType.ToolAliasResolved, toolName, translation.TargetTool, SessionId);
             return RenderTranslationCall(translation, rawArgs, rawToolName);
@@ -397,28 +451,16 @@ public class LenientToolDispatcher
             canonicalTool = registeredTool.Name;
             _configuration.Tools.TryGetValue(canonicalTool, out mapping);
         }
-        else
+        else if (_canonicalToolNames.TryGetValue(toolName, out var configuredCanonical))
         {
-            var configMatch = _configuration.Tools.FirstOrDefault(kv => string.Equals(kv.Key, toolName, StringComparison.OrdinalIgnoreCase));
-            if (configMatch.Key != null)
-            {
-                canonicalTool = configMatch.Key;
-                mapping = configMatch.Value;
-            }
-            else
-            {
-                // Search aliases
-                foreach (var (canonicalKey, toolMap) in _configuration.Tools)
-                {
-                    if (toolMap.Aliases.Contains(toolName))
-                    {
-                        canonicalTool = canonicalKey;
-                        mapping = toolMap;
-                        Telemetry?.Record(LenientDispatchEventType.ToolAliasResolved, toolName, canonicalKey, SessionId);
-                        break;
-                    }
-                }
-            }
+            canonicalTool = configuredCanonical;
+            _configuration.Tools.TryGetValue(canonicalTool, out mapping);
+        }
+        else if (_aliasToCanonical.TryGetValue(toolName, out var canonicalAlias))
+        {
+            canonicalTool = canonicalAlias;
+            _configuration.Tools.TryGetValue(canonicalTool, out mapping);
+            Telemetry?.Record(LenientDispatchEventType.ToolAliasResolved, toolName, canonicalTool, SessionId);
         }
 
         if (string.Equals(toolName, canonicalTool, StringComparison.OrdinalIgnoreCase) &&
@@ -670,11 +712,8 @@ public class LenientToolDispatcher
             toolName = StripNamespace(toolName);
         }
 
-        // 1. Check if tool is a translation rule
-        var translation = _configuration.Translations.FirstOrDefault(t =>
-            string.Equals(t.SourceTool, toolName, StringComparison.OrdinalIgnoreCase));
-
-        if (translation != null)
+        // 1. Check if tool is a translation rule via O(1) lookup
+        if (_translationsBySource.TryGetValue(toolName, out var translation))
         {
             return translation.TargetTool;
         }
@@ -685,19 +724,15 @@ public class LenientToolDispatcher
             return registeredTool.Name;
         }
 
-        var configMatch = _configuration.Tools.FirstOrDefault(kv => string.Equals(kv.Key, toolName, StringComparison.OrdinalIgnoreCase));
-        if (configMatch.Key != null)
+        if (_canonicalToolNames.TryGetValue(toolName, out var configuredCanonical))
         {
-            return configMatch.Key;
+            return configuredCanonical;
         }
 
-        // Search aliases
-        foreach (var (canonicalKey, toolMap) in _configuration.Tools)
+        // Search aliases via O(1) lookup
+        if (_aliasToCanonical.TryGetValue(toolName, out var canonicalKey))
         {
-            if (toolMap.Aliases.Contains(toolName))
-            {
-                return canonicalKey;
-            }
+            return canonicalKey;
         }
 
         return toolName;
@@ -813,6 +848,12 @@ public class LenientToolDispatcher
             return name.Substring(6);
         }
 
+        idx = name.LastIndexOf('.');
+        if (idx >= 0 && idx < name.Length - 1)
+        {
+            return name.Substring(idx + 1);
+        }
+
         return name;
     }
 
@@ -832,49 +873,29 @@ public class LenientToolDispatcher
 
     private void CoerceParameters(string canonicalToolName, AIFunctionArguments arguments)
     {
-        JsonElement schemaProperties = default;
-        bool hasSchema = false;
+        int count = arguments.Count;
+        if (count == 0) return;
 
-        if (_registeredTools.TryGetValue(canonicalToolName, out var targetFn) &&
-            targetFn.JsonSchema.ValueKind == JsonValueKind.Object &&
-            targetFn.JsonSchema.TryGetProperty("properties", out var props) &&
-            props.ValueKind == JsonValueKind.Object)
-        {
-            schemaProperties = props;
-            hasSchema = true;
-        }
+        _toolSchemaProperties.TryGetValue(canonicalToolName, out var propDict);
 
-        foreach (var key in arguments.Keys.ToList())
+        var keyArray = new string[count];
+        arguments.Keys.CopyTo(keyArray, 0);
+
+        for (int i = 0; i < count; i++)
         {
+            var key = keyArray[i];
             var value = arguments[key];
             if (value == null) continue;
 
             JsonElement paramSchema = default;
             bool paramSchemaFound = false;
-
             string effectiveKey = key;
-            if (hasSchema)
+
+            if (propDict != null && propDict.TryGetValue(key, out var schemaEntry))
             {
-                if (schemaProperties.TryGetProperty(key, out paramSchema))
-                {
-                    paramSchemaFound = true;
-                }
-                else
-                {
-                    foreach (var prop in schemaProperties.EnumerateObject())
-                    {
-                        if (string.Equals(prop.Name, key, StringComparison.OrdinalIgnoreCase))
-                        {
-                            paramSchema = prop.Value;
-                            paramSchemaFound = true;
-                            if (!string.Equals(prop.Name, key, StringComparison.Ordinal))
-                            {
-                                effectiveKey = prop.Name;
-                            }
-                            break;
-                        }
-                    }
-                }
+                paramSchema = schemaEntry.Schema;
+                paramSchemaFound = true;
+                effectiveKey = schemaEntry.CanonicalName;
             }
 
             var coercedVal = CoerceParameterValue(effectiveKey, value, paramSchemaFound ? paramSchema : null);

@@ -43,17 +43,22 @@ internal static class AotJsonUtilities
         writer.WriteEndObject(); // root
     }
 
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<AIFunction, string> _functionDefinitionCache = new();
+
     /// <summary>
-    /// Serializes a function definition to a UTF-8 JSON string.
+    /// Serializes a function definition to a UTF-8 JSON string, caching the result per AIFunction instance.
     /// </summary>
     public static string SerializeFunctionDefinition(AIFunction fn)
     {
-        var bufferWriter = new ArrayBufferWriter<byte>(512);
-        using (var writer = new Utf8JsonWriter(bufferWriter, _compactOptions))
+        return _functionDefinitionCache.GetValue(fn, static f =>
         {
-            WriteFunctionDefinition(writer, fn);
-        }
-        return Encoding.UTF8.GetString(bufferWriter.WrittenSpan);
+            var bufferWriter = new ArrayBufferWriter<byte>(512);
+            using (var writer = new Utf8JsonWriter(bufferWriter, _compactOptions))
+            {
+                WriteFunctionDefinition(writer, f);
+            }
+            return Encoding.UTF8.GetString(bufferWriter.WrittenSpan);
+        });
     }
 
     /// <summary>

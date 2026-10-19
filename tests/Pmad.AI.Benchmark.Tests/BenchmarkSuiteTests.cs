@@ -1364,5 +1364,56 @@ public class BenchmarkSuiteTests
         Assert.Contains("Peak Context", md);
         Assert.Contains("12500 tok", md);
     }
+
+    [Fact]
+    public async Task BenchmarkRunner_WhenResumingWithPartialResults_SkipsAlreadyCompletedScenarios()
+    {
+        var mockClient = new MockBenchmarkChatClient("mock-qwen");
+        var runner = new BenchmarkRunner(mockClient, "mock-qwen");
+
+        var scenarios = new List<BenchmarkScenario>
+        {
+            new BfclSimpleScenario(),
+            new BfclMultipleScenario()
+        };
+
+        var previouslyDone = new List<BenchmarkScenarioResult>
+        {
+            new()
+            {
+                ScenarioId = "bfcl-simple",
+                ScenarioName = "BFCL - Simple Function Calling",
+                ModelId = "mock-qwen",
+                Status = BenchmarkStatus.Passed,
+                TaskSuccess = true,
+                StepAccuracy = 100.0,
+                Score = 100.0,
+                Weight = 10.0,
+                TotalTurns = 20,
+                TurnsPassed = 20,
+                TotalDurationMs = 12345.6
+            }
+        };
+
+        var checkpointCallbacks = new List<string>();
+        var summary = await runner.RunAllAsync(
+            scenarios,
+            onScenarioCompleted: (res, currentSummary) =>
+            {
+                checkpointCallbacks.Add(res.ScenarioId);
+                return Task.CompletedTask;
+            },
+            resumeScenarioResults: previouslyDone);
+
+        Assert.Equal(2, summary.ScenariosRun);
+        Assert.Equal(2, summary.ScenarioResults.Count);
+        Assert.Equal("bfcl-simple", summary.ScenarioResults[0].ScenarioId);
+        Assert.Equal(12345.6, summary.ScenarioResults[0].TotalDurationMs);
+        Assert.Equal("bfcl-multiple", summary.ScenarioResults[1].ScenarioId);
+
+        // Checkpoint callback should only have been triggered for newly executed scenario
+        Assert.Single(checkpointCallbacks);
+        Assert.Equal("bfcl-multiple", checkpointCallbacks[0]);
+    }
 }
 

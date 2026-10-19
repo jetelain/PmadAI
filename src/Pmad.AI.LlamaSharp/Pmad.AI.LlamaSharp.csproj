@@ -34,5 +34,6 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Pmad.AI.LlamaSharp.Tests" />
     <InternalsVisibleTo Include="Pmad.AI.Benchmark" />
+    <InternalsVisibleTo Include="Pmad.AI.MicroBenchmarks" />
   </ItemGroup>
 </Project>

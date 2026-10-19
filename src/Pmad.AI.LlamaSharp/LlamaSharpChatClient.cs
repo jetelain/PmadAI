@@ -754,11 +754,11 @@ public sealed class LlamaSharpChatClient : IChatClient
         }
 
         // llama.cpp native BPE tokenizer (llama_tokenize) is prone to native access violations (0xC0000005)
-        // or std::regex stack overflows when invoked with large prompt buffers (e.g. multi-turn tool outputs > 8 KB).
+        // or std::regex stack overflows when invoked with large prompt buffers.
         // Access violations in native code cannot be caught by managed try/catch in modern .NET and crash the process.
         // For large prompts, use zero-allocation, fast HeuristicTokenEstimator with safety margin headroom.
         // For smaller prompts, exact native tokenization is safe and fast.
-        if (promptText.Length > 8192 || _disposed || _context.NativeHandle.IsClosed || _context.NativeHandle.IsInvalid)
+        if (promptText.Length > SafeInteractiveExecutor.MaxSafeChunkChars || _disposed || _context.NativeHandle.IsClosed || _context.NativeHandle.IsInvalid)
         {
             return ApplyEstimatedTokenSafetyMargin(_tokenEstimator.Estimate(promptText));
         }

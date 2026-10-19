@@ -50,17 +50,24 @@
 
 [CmdletBinding()]
 param (
+    [string]$Model = "",
+    [int]$Gpu = 0,
+    [string]$Backend = "",
+    [switch]$OptMatrix = $false,
+    [string]$Config = "",
     [string]$Scenario = "all",
     [string]$Optimization = "all",
     [string[]]$OllamaModels = @("Qwen3.8-27B:latest", "jetelain/Qwen3.8-27B:iq3"),
-    [switch]$AllTargets = $true,
+    [switch]$AllTargets = $false,
     [switch]$Mock = $false,
     [switch]$Download = $true,
     [switch]$Resume = $true,
-    [int]$MaxRetries = 3,
+    [int]$MaxRetries = 50,
     [string]$ReportPath = "docs/benchmark-public-report.md",
     [string]$TranscriptPath = "docs/benchmark-public-transcript.md",
-    [string]$JsonPath = "docs/benchmark-public-results.json"
+    [string]$JsonPath = "docs/benchmark-public-results.json",
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$PassthroughArgs
 )
 
 Set-StrictMode -Version Latest
@@ -203,6 +210,30 @@ try {
         # Build CLI arguments
         $cliArgs = @()
 
+        if (-not [string]::IsNullOrWhiteSpace($Model)) {
+            $cliArgs += "--model"
+            $cliArgs += $Model
+        }
+
+        if ($Gpu -gt 0) {
+            $cliArgs += "--gpu"
+            $cliArgs += $Gpu
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($Backend)) {
+            $cliArgs += "--backend"
+            $cliArgs += $Backend
+        }
+
+        if ($OptMatrix) {
+            $cliArgs += "--opt-matrix"
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($Config)) {
+            $cliArgs += "--config"
+            $cliArgs += $Config
+        }
+
         if ($Mock) {
             $cliArgs += "--mock"
         }
@@ -229,7 +260,7 @@ try {
             $cliArgs += $Optimization
         }
 
-        if ($OllamaModels.Length -gt 0) {
+        if ($OllamaModels.Length -gt 0 -and [string]::IsNullOrWhiteSpace($Model)) {
             $cliArgs += "--ollama-models"
             $cliArgs += ($OllamaModels -join ",")
         }
@@ -247,6 +278,10 @@ try {
         if (-not [string]::IsNullOrWhiteSpace($JsonPath)) {
             $cliArgs += "-j"
             $cliArgs += $JsonPath
+        }
+
+        if ($PassthroughArgs -and $PassthroughArgs.Length -gt 0) {
+            $cliArgs += $PassthroughArgs
         }
 
         Write-Host "`n[Watchdog: Run Attempt $attempt/$($MaxRetries + 1)] Invoking benchmark binary directly..." -ForegroundColor Cyan

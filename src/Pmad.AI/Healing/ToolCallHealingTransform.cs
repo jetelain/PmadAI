@@ -382,13 +382,16 @@ public static partial class ToolCallHealingTransform
             options?.Telemetry?.Record(ToolCallHealingEventType.FenceStripped, toolName, options.SessionId);
         }
 
-        // Remove trailing commas before } or ]
-        var afterCommas = TrailingCommasRegex().Replace(s, "$1");
-        if (afterCommas != s)
+        // Remove trailing commas before } or ] only if commas and closing brackets exist
+        if (s.IndexOf(',') >= 0 && (s.IndexOf('}') >= 0 || s.IndexOf(']') >= 0))
         {
-            logger?.LogDebug("Repaired trailing commas in arguments of tool '{ToolName}'", toolName ?? "unknown");
-            options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Trailing comma");
-            s = afterCommas;
+            var afterCommas = TrailingCommasRegex().Replace(s, "$1");
+            if (afterCommas != s)
+            {
+                logger?.LogDebug("Repaired trailing commas in arguments of tool '{ToolName}'", toolName ?? "unknown");
+                options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Trailing comma");
+                s = afterCommas;
+            }
         }
 
         // Validate JSON and attempt to escape unescaped control chars if parsing fails
@@ -485,6 +488,35 @@ public static partial class ToolCallHealingTransform
         string? toolName = null,
         ToolCallHealingOptions? options = null)
     {
+        if (string.IsNullOrWhiteSpace(rawJson))
+        {
+            return new Dictionary<string, object?>(StringComparer.Ordinal);
+        }
+
+        var trimmed = rawJson.Trim();
+
+        // Fast path: if clean JSON without markdown code fences, attempt direct single-pass parse first
+        if (!trimmed.StartsWith("```", StringComparison.Ordinal))
+        {
+            try
+            {
+                using var quickDoc = JsonDocument.Parse(trimmed);
+                if (quickDoc.RootElement.ValueKind == JsonValueKind.Object)
+                {
+                    var quickDict = new Dictionary<string, object?>(StringComparer.Ordinal);
+                    foreach (var prop in quickDoc.RootElement.EnumerateObject())
+                    {
+                        quickDict[prop.Name] = UnwrapJsonElement(prop.Value);
+                    }
+                    return quickDict;
+                }
+            }
+            catch (JsonException)
+            {
+                // Fall through to full sanitization on parse failure
+            }
+        }
+
         var sanitized = SanitizeArgumentsJson(rawJson, logger, toolName, options);
         var dict = new Dictionary<string, object?>(StringComparer.Ordinal);
         try

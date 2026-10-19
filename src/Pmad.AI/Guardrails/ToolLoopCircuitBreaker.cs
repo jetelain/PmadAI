@@ -383,12 +383,51 @@ public sealed class ToolLoopCircuitBreaker
         {
             case JsonValueKind.Object:
                 sb.Append('{');
-                var props = element.EnumerateObject().OrderBy(p => p.Name, StringComparer.Ordinal).ToList();
-                for (int i = 0; i < props.Count; i++)
+                int propCount = 0;
+                foreach (var _ in element.EnumerateObject()) propCount++;
+
+                if (propCount <= 32)
                 {
-                    if (i > 0) sb.Append(',');
-                    sb.Append('"').Append(props[i].Name).Append("\":");
-                    WriteCanonicalElement(props[i].Value, sb);
+                    var propArray = System.Buffers.ArrayPool<JsonProperty>.Shared.Rent(propCount);
+                    try
+                    {
+                        int pIdx = 0;
+                        foreach (var prop in element.EnumerateObject())
+                        {
+                            propArray[pIdx++] = prop;
+                        }
+                        for (int i = 1; i < propCount; i++)
+                        {
+                            var keyProp = propArray[i];
+                            int j = i - 1;
+                            while (j >= 0 && string.CompareOrdinal(propArray[j].Name, keyProp.Name) > 0)
+                            {
+                                propArray[j + 1] = propArray[j];
+                                j--;
+                            }
+                            propArray[j + 1] = keyProp;
+                        }
+                        for (int i = 0; i < propCount; i++)
+                        {
+                            if (i > 0) sb.Append(',');
+                            sb.Append('"').Append(propArray[i].Name).Append("\":");
+                            WriteCanonicalElement(propArray[i].Value, sb);
+                        }
+                    }
+                    finally
+                    {
+                        System.Buffers.ArrayPool<JsonProperty>.Shared.Return(propArray);
+                    }
+                }
+                else
+                {
+                    var props = element.EnumerateObject().OrderBy(p => p.Name, StringComparer.Ordinal).ToList();
+                    for (int i = 0; i < props.Count; i++)
+                    {
+                        if (i > 0) sb.Append(',');
+                        sb.Append('"').Append(props[i].Name).Append("\":");
+                        WriteCanonicalElement(props[i].Value, sb);
+                    }
                 }
                 sb.Append('}');
                 break;
@@ -424,8 +463,22 @@ public sealed class ToolLoopCircuitBreaker
 
     private static string ComputeHash(string input)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(input));
-        return Convert.ToHexString(bytes);
+        int maxBytes = Encoding.UTF8.GetMaxByteCount(input.Length);
+        if (maxBytes <= 512)
+        {
+            Span<byte> utf8Bytes = stackalloc byte[maxBytes];
+            int written = Encoding.UTF8.GetBytes(input, utf8Bytes);
+            Span<byte> hash = stackalloc byte[32];
+            SHA256.HashData(utf8Bytes[..written], hash);
+            return Convert.ToHexString(hash);
+        }
+        else
+        {
+            var bytes = Encoding.UTF8.GetBytes(input);
+            Span<byte> hash = stackalloc byte[32];
+            SHA256.HashData(bytes, hash);
+            return Convert.ToHexString(hash);
+        }
     }
 
     /// <summary>

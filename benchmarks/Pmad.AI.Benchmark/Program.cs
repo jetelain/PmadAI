@@ -138,6 +138,7 @@ public static class Program
             };
 
             // Check if this execution plan was already completed in the checkpoint
+            ModelBenchmarkSummary? partialSummaryToResume = null;
             if (options.Resume && completedSummaries.Count > 0)
             {
                 var alreadyDone = completedSummaries.FirstOrDefault(s =>
@@ -153,12 +154,25 @@ public static class Program
 
                 if (alreadyDone != null)
                 {
-                    Console.ForegroundColor = ConsoleColor.DarkGray;
-                    Console.WriteLine($"\n[{i + 1}/{executionPlans.Count}] SKIPPING (Already in Checkpoint): {plan.TargetName} [{plan.ConfigurationLabel}]");
+                    // Check if all requested scenarios were completed
+                    var allScenariosDone = scenarios.Count > 0 &&
+                        scenarios.All(sc => alreadyDone.ScenarioResults.Any(r => string.Equals(r.ScenarioId, sc.Id, StringComparison.OrdinalIgnoreCase)));
+
+                    if (allScenariosDone)
+                    {
+                        Console.ForegroundColor = ConsoleColor.DarkGray;
+                        Console.WriteLine($"\n[{i + 1}/{executionPlans.Count}] SKIPPING (Already fully completed in Checkpoint): {plan.TargetName} [{plan.ConfigurationLabel}]");
+                        Console.ResetColor();
+                        alreadyDone.TranscriptPath = planTranscriptRelativePath;
+                        allSummaries.Add(alreadyDone);
+                        continue;
+                    }
+
+                    // Plan was interrupted: resume remaining scenarios
+                    partialSummaryToResume = alreadyDone;
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine($"\n[{i + 1}/{executionPlans.Count}] RESUMING PLAN: {plan.TargetName} [{plan.ConfigurationLabel}] ({alreadyDone.ScenarioResults.Count}/{scenarios.Count} scenarios previously completed)");
                     Console.ResetColor();
-                    alreadyDone.TranscriptPath = planTranscriptRelativePath;
-                    allSummaries.Add(alreadyDone);
-                    continue;
                 }
             }
 
@@ -219,7 +233,7 @@ public static class Program
                         Console.ResetColor();
                     }
 
-                    var res = await runner.RunAllAsync(scenarios, onScenarioCheckpoint);
+                    var res = await runner.RunAllAsync(scenarios, onScenarioCheckpoint, resumeScenarioResults: r == 0 ? partialSummaryToResume?.ScenarioResults : null);
                     runSummaries.Add(res);
                 }
 

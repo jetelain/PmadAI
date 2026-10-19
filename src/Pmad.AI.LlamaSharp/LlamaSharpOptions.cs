@@ -77,7 +77,7 @@ public sealed class LlamaSharpOptions
 
     /// <summary>
     /// Safety margin percentage applied when prompt tokens are estimated heuristically
-    /// by <see cref="LlamaSharpChatClient.SafeCountInputTokens"/> (for large prompts > 8 KB or tokenizer fallbacks).
+    /// by <see cref="LlamaSharpChatClient.SafeCountInputTokens"/> (for large prompts > 7 KB or tokenizer fallbacks).
     /// Defaults to 0.05 (+5% headroom). Set to 0.0 to disable the margin.
     /// </summary>
     public double EstimatedTokenSafetyMargin { get; set; } = 0.05;

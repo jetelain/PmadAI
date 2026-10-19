@@ -72,6 +72,7 @@ public sealed class BenchmarkRunner
     public async Task<ModelBenchmarkSummary> RunAllAsync(
         IReadOnlyList<BenchmarkScenario> scenarios,
         Func<BenchmarkScenarioResult, ModelBenchmarkSummary, Task>? onScenarioCompleted = null,
+        IReadOnlyList<BenchmarkScenarioResult>? resumeScenarioResults = null,
         CancellationToken cancellationToken = default)
     {
         var isGpu = _gpuLayers > 0 || string.Equals(_backend, "Vulkan", StringComparison.OrdinalIgnoreCase);
@@ -96,28 +97,41 @@ public sealed class BenchmarkRunner
 
         foreach (var scenario in scenarios)
         {
+            var alreadyDoneScenario = resumeScenarioResults?.FirstOrDefault(r =>
+                string.Equals(r.ScenarioId, scenario.Id, StringComparison.OrdinalIgnoreCase));
+
             BenchmarkScenarioResult result;
-            try
+            if (alreadyDoneScenario != null)
             {
-                result = await RunScenarioAsync(scenario, cancellationToken);
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.WriteLine($"\n>>> Skipping Scenario (Already Completed): [{scenario.Id}] \"{scenario.Name}\" ({alreadyDoneScenario.Score:F0}% score)");
+                Console.ResetColor();
+                result = alreadyDoneScenario;
             }
-            catch (Exception ex)
+            else
             {
-                _client.GetService<VerbatimTranscriptChatClient>()?.AddNote($"> [!CAUTION]\n> **SCENARIO ERROR:** {ex.Message}", scenario.Id);
-                result = new BenchmarkScenarioResult
+                try
                 {
-                    ScenarioId = scenario.Id,
-                    ScenarioName = scenario.Name,
-                    ModelId = _modelId,
-                    Status = BenchmarkStatus.Failed,
-                    TaskSuccess = false,
-                    StepAccuracy = 0.0,
-                    Score = 0.0,
-                    Weight = scenario.Weight,
-                    TotalTurns = scenario.Turns.Count,
-                    TurnsPassed = 0,
-                    ErrorMessage = $"Scenario unhandled exception: {ex.Message}"
-                };
+                    result = await RunScenarioAsync(scenario, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _client.GetService<VerbatimTranscriptChatClient>()?.AddNote($"> [!CAUTION]\n> **SCENARIO ERROR:** {ex.Message}", scenario.Id);
+                    result = new BenchmarkScenarioResult
+                    {
+                        ScenarioId = scenario.Id,
+                        ScenarioName = scenario.Name,
+                        ModelId = _modelId,
+                        Status = BenchmarkStatus.Failed,
+                        TaskSuccess = false,
+                        StepAccuracy = 0.0,
+                        Score = 0.0,
+                        Weight = scenario.Weight,
+                        TotalTurns = scenario.Turns.Count,
+                        TurnsPassed = 0,
+                        ErrorMessage = $"Scenario unhandled exception: {ex.Message}"
+                    };
+                }
             }
 
             summary.ScenarioResults.Add(result);
@@ -157,7 +171,7 @@ public sealed class BenchmarkRunner
                 summary.PeakVramMb = result.PeakVramMb;
             }
 
-            if (onScenarioCompleted != null)
+            if (onScenarioCompleted != null && alreadyDoneScenario == null)
             {
                 try
                 {

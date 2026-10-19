@@ -178,7 +178,18 @@ public abstract class ChatDialect
         var sb = new StringBuilder();
         var msgList = messages as IList<ChatMessage> ?? messages.ToList();
 
-        var functions = tools?.OfType<AIFunction>().ToList();
+        List<AIFunction>? functions = null;
+        if (tools != null)
+        {
+            for (int tIdx = 0; tIdx < tools.Count; tIdx++)
+            {
+                if (tools[tIdx] is AIFunction afn)
+                {
+                    functions ??= new List<AIFunction>(tools.Count);
+                    functions.Add(afn);
+                }
+            }
+        }
         var hasTools = functions != null && functions.Count > 0;
         string toolsDefinitionBlock = hasTools ? BuildToolsDefinitionBlock(functions!) : string.Empty;
 
@@ -237,7 +248,18 @@ public abstract class ChatDialect
             else if (m.Role == ChatRole.Assistant)
             {
                 var text = GetMessageText(m);
-                var toolCalls = m.Contents?.OfType<FunctionCallContent>().ToList();
+                List<FunctionCallContent>? toolCalls = null;
+                if (m.Contents != null)
+                {
+                    for (int cIdx = 0; cIdx < m.Contents.Count; cIdx++)
+                    {
+                        if (m.Contents[cIdx] is FunctionCallContent fcc)
+                        {
+                            toolCalls ??= new List<FunctionCallContent>(2);
+                            toolCalls.Add(fcc);
+                        }
+                    }
+                }
                 var reasoning = GetMessageReasoning(m);
                 RenderAssistantMessage(sb, text, toolCalls, reasoning);
             }
@@ -358,15 +380,42 @@ public abstract class ChatDialect
     /// </summary>
     protected static string GetToolContent(ChatMessage message)
     {
-        var results = message.Contents?.OfType<FunctionResultContent>().ToList();
-        if (results is { Count: > 0 })
+        if (message.Contents != null && message.Contents.Count > 0)
         {
-            if (results.Count == 1)
+            FunctionResultContent? singleResult = null;
+            List<FunctionResultContent>? multiResults = null;
+
+            for (int cIdx = 0; cIdx < message.Contents.Count; cIdx++)
             {
-                return FormatFunctionResult(results[0].Result);
+                if (message.Contents[cIdx] is FunctionResultContent frc)
+                {
+                    if (singleResult == null)
+                    {
+                        singleResult = frc;
+                    }
+                    else
+                    {
+                        multiResults ??= [singleResult];
+                        multiResults.Add(frc);
+                    }
+                }
             }
 
-            return string.Join("\n", results.Select(r => FormatFunctionResult(r.Result)));
+            if (multiResults != null)
+            {
+                var sbResults = new StringBuilder();
+                for (int rIdx = 0; rIdx < multiResults.Count; rIdx++)
+                {
+                    if (rIdx > 0) sbResults.Append('\n');
+                    sbResults.Append(FormatFunctionResult(multiResults[rIdx].Result));
+                }
+                return sbResults.ToString();
+            }
+
+            if (singleResult != null)
+            {
+                return FormatFunctionResult(singleResult.Result);
+            }
         }
 
         return GetMessageText(message) ?? string.Empty;

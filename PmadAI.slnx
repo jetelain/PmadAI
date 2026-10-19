@@ -6,6 +6,7 @@
   </Folder>
   <Folder Name="/benchmarks/">
     <Project Path="benchmarks/Pmad.AI.Benchmark/Pmad.AI.Benchmark.csproj" />
+    <Project Path="benchmarks/Pmad.AI.MicroBenchmarks/Pmad.AI.MicroBenchmarks.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Pmad.AI.Benchmark.Tests/Pmad.AI.Benchmark.Tests.csproj" />

@@ -13,10 +13,10 @@ namespace Pmad.AI.LlamaSharp;
 /// A resilient specialization of <see cref="InteractiveExecutor"/> that chunks large prompt inputs
 /// during pre-tokenization to prevent unmanaged stack overflows (0xC0000005) in llama.cpp's BPE regex engine.
 /// </summary>
-internal sealed class SafeInteractiveExecutor : InteractiveExecutor
+public sealed class SafeInteractiveExecutor : InteractiveExecutor
 {
     private bool _isFirstPromptRun = true;
-    private const int MaxSafeChunkChars = 8192;
+    public const int MaxSafeChunkChars = 7000;
 
     public SafeInteractiveExecutor(LLamaContext context, ILogger? logger = null)
         : base(context, logger)
@@ -36,7 +36,7 @@ internal sealed class SafeInteractiveExecutor : InteractiveExecutor
             return base.PreprocessInputs(text, args, cancellationToken);
         }
 
-        // Handle large text by chunking along newline boundaries to prevent native stack overflow
+        // Handle large text by chunking along newline or whitespace boundaries to prevent native stack overflow
         if (_isFirstPromptRun)
         {
             _embed_inps = SafeTokenize(text, addBos: true);
@@ -58,10 +58,10 @@ internal sealed class SafeInteractiveExecutor : InteractiveExecutor
     }
 
     /// <summary>
-    /// Safely tokenizes large strings in chunks along newline boundaries so that no single call
-    /// to native llama_tokenize exceeds the safe buffer limit.
+    /// Safely tokenizes large strings in chunks along newline or whitespace boundaries so that no single call
+    /// to native llama_tokenize exceeds the safe buffer limit or exhausts the native regex stack.
     /// </summary>
-    private List<LLamaToken> SafeTokenize(string text, bool addBos)
+    public List<LLamaToken> SafeTokenize(string text, bool addBos, int maxChunkChars = MaxSafeChunkChars)
     {
         var result = new List<LLamaToken>();
         if (string.IsNullOrEmpty(text))
@@ -74,13 +74,33 @@ internal sealed class SafeInteractiveExecutor : InteractiveExecutor
 
         while (startIndex < text.Length)
         {
-            int length = Math.Min(MaxSafeChunkChars, text.Length - startIndex);
+            int length = Math.Min(maxChunkChars, text.Length - startIndex);
             if (startIndex + length < text.Length)
             {
-                int lastNewline = text.LastIndexOf('\n', startIndex + length - 1, length);
-                if (lastNewline > startIndex)
+                // Prefer breaking at newline
+                int bestBreak = text.LastIndexOf('\n', startIndex + length - 1, length);
+
+                // If no newline found, look for whitespace in the latter half of the chunk
+                if (bestBreak <= startIndex)
                 {
-                    length = lastNewline - startIndex + 1;
+                    for (int j = startIndex + length - 1; j >= startIndex + (length / 2); j--)
+                    {
+                        if (char.IsWhiteSpace(text[j]))
+                        {
+                            bestBreak = j;
+                            break;
+                        }
+                    }
+                }
+
+                if (bestBreak > startIndex)
+                {
+                    length = bestBreak - startIndex + 1;
+                }
+                else if (char.IsHighSurrogate(text[startIndex + length - 1]))
+                {
+                    // Avoid splitting a surrogate pair
+                    length--;
                 }
             }
 

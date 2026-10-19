@@ -101,6 +101,47 @@ public class ReadOnlyCommandValidator
             return unquotedCheck;
         }
 
+        // Fast path for single commands without pipes, semicolons, or boolean chaining
+        if (commandLine.IndexOfAny(['|', ';', '&']) < 0)
+        {
+            var trimmed = commandLine.Trim();
+            if (string.IsNullOrEmpty(trimmed))
+            {
+                return new CommandValidationResult(true);
+            }
+
+            var tokenResult = Tokenize(trimmed);
+            if (!tokenResult.IsAllowed)
+            {
+                return new CommandValidationResult(false, tokenResult.Reason, trimmed);
+            }
+
+            var tokens = tokenResult.Tokens;
+            if (tokens.Count == 0)
+            {
+                return new CommandValidationResult(true);
+            }
+
+            if (_options.Dialect == ShellDialect.Bash)
+            {
+                var bashResult = ValidateBashSegment(trimmed, tokens);
+                if (!bashResult.IsAllowed)
+                {
+                    return bashResult;
+                }
+            }
+            else
+            {
+                var psResult = ValidatePowerShellSegment(trimmed, tokens);
+                if (!psResult.IsAllowed)
+                {
+                    return psResult;
+                }
+            }
+
+            return new CommandValidationResult(true);
+        }
+
         var segmentsResult = SplitCommandSegments(commandLine);
         if (!segmentsResult.IsAllowed)
         {

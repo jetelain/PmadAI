@@ -177,11 +177,12 @@ public class ThinkingTraceCompactor
         }
 
         // Deterministic prefix + truncation marker + suffix
-        var prefix = rawReasoning[.._options.FallbackPrefixLength];
-        var suffix = rawReasoning[^_options.FallbackSuffixLength..];
         var truncatedChars = rawReasoning.Length - _options.FallbackPrefixLength - _options.FallbackSuffixLength;
         var marker = string.Format(_options.FallbackTruncationMarker, truncatedChars);
-        var fallback = prefix + marker + suffix;
+        var fallback = string.Concat(
+            rawReasoning.AsSpan(0, _options.FallbackPrefixLength),
+            marker.AsSpan(),
+            rawReasoning.AsSpan(rawReasoning.Length - _options.FallbackSuffixLength, _options.FallbackSuffixLength));
 
         RecordCompactionEvent(sessionId, itemKey, rawReasoning.Length, fallback.Length, wasSpeculativeHit: false, CompactionMethods.PrefixSuffixTruncation);
         return fallback;
