@@ -50,13 +50,20 @@ public class ToolMapping
     /// </summary>
     public Dictionary<string, Dictionary<string, HashSet<string>>> NestedParameterAliases { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Explicit parameter value aliases mapping parameter paths to canonical values and acceptable alternative synonyms/codes
+    /// (e.g. "species" -> { "wild tiger": ["wild tigers", "tiger", "tigers"] } or "resource_type" -> { "MemoryMb": ["memory", "ram"] }).
+    /// </summary>
+    public Dictionary<string, Dictionary<string, HashSet<string>>> ParameterValueAliases { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
     public ToolMapping() { }
 
     public ToolMapping(
         IEnumerable<string>? aliases = null,
         IDictionary<string, IEnumerable<string>>? parameterAliases = null,
         IDictionary<string, ParameterComputer>? computedParameters = null,
-        IDictionary<string, IDictionary<string, IEnumerable<string>>>? nestedParameterAliases = null)
+        IDictionary<string, IDictionary<string, IEnumerable<string>>>? nestedParameterAliases = null,
+        IDictionary<string, IDictionary<string, IEnumerable<string>>>? parameterValueAliases = null)
     {
         if (aliases != null)
         {
@@ -94,6 +101,221 @@ public class ToolMapping
                 NestedParameterAliases[path] = inner;
             }
         }
+
+        if (parameterValueAliases != null)
+        {
+            foreach (var (path, valDict) in parameterValueAliases)
+            {
+                var inner = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (canonicalVal, vAliases) in valDict)
+                {
+                    inner[canonicalVal] = new HashSet<string>(vAliases, StringComparer.OrdinalIgnoreCase);
+                }
+                ParameterValueAliases[path] = inner;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Adds a parameter value alias mapping for a specified parameter or nested property path.
+    /// </summary>
+    public ToolMapping AddParameterValueAlias(string paramPath, string canonicalValue, params string[] aliases)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(paramPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(canonicalValue);
+
+        if (!ParameterValueAliases.TryGetValue(paramPath, out var valDict))
+        {
+            valDict = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            ParameterValueAliases[paramPath] = valDict;
+        }
+
+        if (!valDict.TryGetValue(canonicalValue, out var set))
+        {
+            set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            valDict[canonicalValue] = set;
+        }
+
+        foreach (var a in aliases)
+        {
+            if (!string.IsNullOrWhiteSpace(a))
+            {
+                set.Add(a.Trim());
+            }
+        }
+
+        return this;
+    }
+
+    /// <summary>
+    /// Discovers and registers <see cref="ToolValueAliasAttribute"/> aliases defined on enum members of <typeparamref name="TEnum"/>.
+    /// </summary>
+    public ToolMapping AddEnumAliases<TEnum>(string? paramPath = null) where TEnum : struct, Enum
+    {
+        var enumType = typeof(TEnum);
+        var targetPath = paramPath ?? enumType.Name;
+
+        foreach (var field in enumType.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+        {
+            var canonicalVal = field.Name;
+            var aliasAttr = (ToolValueAliasAttribute?)Attribute.GetCustomAttribute(field, typeof(ToolValueAliasAttribute));
+            if (aliasAttr != null && aliasAttr.Aliases.Length > 0)
+            {
+                AddParameterValueAlias(targetPath, canonicalVal, aliasAttr.Aliases);
+            }
+        }
+
+        return this;
+    }
+
+    /// <summary>
+    /// Attempts to resolve a parameter value alias (synonyms, plural/singular forms, casing variations)
+    /// to its canonical value for the specified parameter name or nested property path.
+    /// </summary>
+    public bool TryResolveValueAlias(string paramPath, string rawValue, out string canonicalValue)
+    {
+        canonicalValue = rawValue;
+        if (ParameterValueAliases == null || ParameterValueAliases.Count == 0 || string.IsNullOrWhiteSpace(rawValue))
+        {
+            return false;
+        }
+
+        if (FindValueAlias(paramPath, rawValue, out canonicalValue))
+        {
+            return true;
+        }
+
+        var altPath = paramPath.EndsWith("[]", StringComparison.Ordinal)
+            ? paramPath.Substring(0, paramPath.Length - 2)
+            : paramPath + "[]";
+
+        if (FindValueAlias(altPath, rawValue, out canonicalValue))
+        {
+            return true;
+        }
+
+        var lastDot = paramPath.LastIndexOf('.');
+        if (lastDot >= 0 && lastDot < paramPath.Length - 1)
+        {
+            var leafParam = paramPath.Substring(lastDot + 1).TrimEnd('[', ']');
+            if (FindValueAlias(leafParam, rawValue, out canonicalValue))
+            {
+                return true;
+            }
+        }
+
+        if (FindValueAlias("*", rawValue, out canonicalValue))
+        {
+            return true;
+        }
+
+        canonicalValue = rawValue;
+        return false;
+    }
+
+    private bool FindValueAlias(string path, string rawValue, out string canonicalValue)
+    {
+        canonicalValue = rawValue;
+        if (!ParameterValueAliases.TryGetValue(path, out var valMap))
+        {
+            var snakePath = LenientToolDispatcher.ToSnakeCase(path);
+            if (!ParameterValueAliases.TryGetValue(snakePath, out valMap))
+            {
+                var camelPath = LenientToolDispatcher.ToCamelCase(path);
+                if (!ParameterValueAliases.TryGetValue(camelPath, out valMap))
+                {
+                    var pascalPath = LenientToolDispatcher.ToPascalCase(path);
+                    if (!ParameterValueAliases.TryGetValue(pascalPath, out valMap))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // 1. Direct or registered alias match (case-insensitive)
+        foreach (var (canonical, aliases) in valMap)
+        {
+            if (string.Equals(canonical, rawValue, StringComparison.OrdinalIgnoreCase))
+            {
+                canonicalValue = canonical;
+                return true;
+            }
+            if (aliases.Contains(rawValue))
+            {
+                canonicalValue = canonical;
+                return true;
+            }
+        }
+
+        // 2. Snake_case match (e.g. "memory_limit" vs "MemoryLimit" or "memoryLimit")
+        var snakeRaw = LenientToolDispatcher.ToSnakeCase(rawValue);
+        foreach (var (canonical, aliases) in valMap)
+        {
+            if (string.Equals(LenientToolDispatcher.ToSnakeCase(canonical), snakeRaw, StringComparison.OrdinalIgnoreCase))
+            {
+                canonicalValue = canonical;
+                return true;
+            }
+            foreach (var alias in aliases)
+            {
+                if (string.Equals(LenientToolDispatcher.ToSnakeCase(alias), snakeRaw, StringComparison.OrdinalIgnoreCase))
+                {
+                    canonicalValue = canonical;
+                    return true;
+                }
+            }
+        }
+
+        // 3. Plural / singular heuristic (e.g. "wild tigers" -> "wild tiger" or "tigers" -> "tiger")
+        if (rawValue.EndsWith("s", StringComparison.OrdinalIgnoreCase) && rawValue.Length > 1)
+        {
+            var singular = rawValue.Substring(0, rawValue.Length - 1);
+            var snakeSingular = LenientToolDispatcher.ToSnakeCase(singular);
+            foreach (var (canonical, aliases) in valMap)
+            {
+                if (string.Equals(canonical, singular, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(LenientToolDispatcher.ToSnakeCase(canonical), snakeSingular, StringComparison.OrdinalIgnoreCase) ||
+                    aliases.Contains(singular))
+                {
+                    canonicalValue = canonical;
+                    return true;
+                }
+                foreach (var alias in aliases)
+                {
+                    if (string.Equals(LenientToolDispatcher.ToSnakeCase(alias), snakeSingular, StringComparison.OrdinalIgnoreCase))
+                    {
+                        canonicalValue = canonical;
+                        return true;
+                    }
+                }
+            }
+        }
+        else
+        {
+            var plural = rawValue + "s";
+            var snakePlural = LenientToolDispatcher.ToSnakeCase(plural);
+            foreach (var (canonical, aliases) in valMap)
+            {
+                if (string.Equals(canonical, plural, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(LenientToolDispatcher.ToSnakeCase(canonical), snakePlural, StringComparison.OrdinalIgnoreCase) ||
+                    aliases.Contains(plural))
+                {
+                    canonicalValue = canonical;
+                    return true;
+                }
+                foreach (var alias in aliases)
+                {
+                    if (string.Equals(LenientToolDispatcher.ToSnakeCase(alias), snakePlural, StringComparison.OrdinalIgnoreCase))
+                    {
+                        canonicalValue = canonical;
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -687,49 +909,44 @@ public class LenientToolDispatcher
             }
         }
 
-        // 5. Deep schema-driven normalization (nested property renaming, casing matching, stringified JSON parsing)
+        // 5. Deep schema-driven and mapping-driven normalization (nested property renaming, casing matching, stringified JSON parsing, value alias resolution)
         _toolRootSchemas.TryGetValue(canonicalTool, out var rootSchema);
-        if (_toolSchemaProperties.TryGetValue(canonicalTool, out var propDict))
+        _toolSchemaProperties.TryGetValue(canonicalTool, out var propDict);
+
+        var currentKeys = canonicalArgs.Keys.ToList();
+        foreach (var key in currentKeys)
         {
-            var currentKeys = canonicalArgs.Keys.ToList();
-            foreach (var key in currentKeys)
+            var val = canonicalArgs[key];
+            if (val == null) continue;
+
+            string canonicalKey = key;
+            JsonElement? paramSchema = null;
+
+            if (propDict != null && propDict.TryGetValue(key, out var schemaEntry))
             {
-                var val = canonicalArgs[key];
-                if (val == null) continue;
+                canonicalKey = schemaEntry.CanonicalName;
+                paramSchema = schemaEntry.Schema;
+            }
 
-                string canonicalKey = key;
-                JsonElement paramSchema = default;
-                bool foundSchema = false;
+            var normalizedVal = NormalizeValueDeep(val, paramSchema, mapping, canonicalKey, rootSchema);
 
-                if (propDict.TryGetValue(key, out var schemaEntry))
+            if (!string.Equals(canonicalKey, key, StringComparison.Ordinal))
+            {
+                canonicalArgs.Remove(key);
+                canonicalArgs[canonicalKey] = normalizedVal;
+                if (string.Equals(canonicalKey, key, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(ToSnakeCase(canonicalKey), ToSnakeCase(key), StringComparison.OrdinalIgnoreCase))
                 {
-                    canonicalKey = schemaEntry.CanonicalName;
-                    paramSchema = schemaEntry.Schema;
-                    foundSchema = true;
-                }
-
-                var normalizedVal = foundSchema
-                    ? NormalizeValueDeep(val, paramSchema, mapping, canonicalKey, rootSchema)
-                    : val;
-
-                if (!string.Equals(canonicalKey, key, StringComparison.Ordinal))
-                {
-                    canonicalArgs.Remove(key);
-                    canonicalArgs[canonicalKey] = normalizedVal;
-                    if (string.Equals(canonicalKey, key, StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(ToSnakeCase(canonicalKey), ToSnakeCase(key), StringComparison.OrdinalIgnoreCase))
-                    {
-                        Telemetry?.Record(LenientDispatchEventType.CasingNormalized, key, canonicalKey, SessionId);
-                    }
-                    else
-                    {
-                        Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, key, canonicalKey, SessionId);
-                    }
+                    Telemetry?.Record(LenientDispatchEventType.CasingNormalized, key, canonicalKey, SessionId);
                 }
                 else
                 {
-                    canonicalArgs[key] = normalizedVal;
+                    Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, key, canonicalKey, SessionId);
                 }
+            }
+            else
+            {
+                canonicalArgs[key] = normalizedVal;
             }
         }
 
@@ -1090,6 +1307,7 @@ public class LenientToolDispatcher
 
         _toolSchemaProperties.TryGetValue(canonicalToolName, out var propDict);
         _toolRootSchemas.TryGetValue(canonicalToolName, out var rootSchema);
+        _configuration.Tools.TryGetValue(canonicalToolName, out var mapping);
 
         var keyArray = new string[count];
         arguments.Keys.CopyTo(keyArray, 0);
@@ -1112,7 +1330,7 @@ public class LenientToolDispatcher
             }
 
             var resolvedSchema = paramSchemaFound ? ResolveSchema(paramSchema, rootSchema) : (JsonElement?)null;
-            var coercedVal = CoerceParameterValue(effectiveKey, value, resolvedSchema);
+            var coercedVal = CoerceParameterValue(effectiveKey, value, resolvedSchema, mapping);
             if (!string.Equals(effectiveKey, key, StringComparison.Ordinal))
             {
                 arguments.Remove(key);
@@ -1126,7 +1344,7 @@ public class LenientToolDispatcher
         }
     }
 
-    private static object? CoerceParameterValue(string paramName, object value, JsonElement? schema)
+    private static object? CoerceParameterValue(string paramName, object value, JsonElement? schema, ToolMapping? mapping = null)
     {
         if (value is not string strVal)
         {
@@ -1135,7 +1353,14 @@ public class LenientToolDispatcher
 
         var trimmed = strVal.Trim();
 
-        // 1. Schema-based Enum matching (case-insensitive)
+        // 0. ToolMapping parameter value alias resolution (synonyms, plural/singular, casing)
+        string? aliasVal = null;
+        if (mapping?.TryResolveValueAlias(paramName, trimmed, out aliasVal) == true && aliasVal != null)
+        {
+            trimmed = aliasVal;
+        }
+
+        // 1. Schema-based Enum matching (case-insensitive + casing/plural heuristics)
         if (schema.HasValue && schema.Value.TryGetProperty("enum", out var enumProp) && enumProp.ValueKind == JsonValueKind.Array)
         {
             foreach (var enumEl in enumProp.EnumerateArray())
@@ -1143,9 +1368,24 @@ public class LenientToolDispatcher
                 if (enumEl.ValueKind == JsonValueKind.String)
                 {
                     var enumStr = enumEl.GetString();
-                    if (string.Equals(enumStr, trimmed, StringComparison.OrdinalIgnoreCase))
+                    if (enumStr != null)
                     {
-                        return enumStr;
+                        if (string.Equals(enumStr, trimmed, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return enumStr;
+                        }
+                        if (string.Equals(ToSnakeCase(enumStr), ToSnakeCase(trimmed), StringComparison.OrdinalIgnoreCase))
+                        {
+                            return enumStr;
+                        }
+                        if (trimmed.EndsWith("s", StringComparison.OrdinalIgnoreCase) && string.Equals(enumStr, trimmed[..^1], StringComparison.OrdinalIgnoreCase))
+                        {
+                            return enumStr;
+                        }
+                        if (enumStr.EndsWith("s", StringComparison.OrdinalIgnoreCase) && string.Equals(enumStr[..^1], trimmed, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return enumStr;
+                        }
                     }
                 }
                 else if (enumEl.ValueKind is JsonValueKind.True or JsonValueKind.False)
@@ -1166,6 +1406,12 @@ public class LenientToolDispatcher
                     }
                 }
             }
+        }
+
+        // If a value alias was mapped and schema does not specify an alternative enum, return the resolved alias
+        if (aliasVal != null)
+        {
+            return aliasVal;
         }
 
         // 2. Boolean coercion (schema or heuristic)
@@ -1294,14 +1540,16 @@ public class LenientToolDispatcher
 
     private object? NormalizeValueDeep(
         object? value,
-        JsonElement schema,
+        JsonElement? schema,
         ToolMapping? mapping,
         string paramPath,
-        JsonElement rootSchema)
+        JsonElement? rootSchema)
     {
         if (value == null) return null;
 
-        schema = ResolveSchema(schema, rootSchema);
+        var resolvedSchema = schema.HasValue && rootSchema.HasValue
+            ? ResolveSchema(schema.Value, rootSchema.Value)
+            : schema;
 
         // 0. Unwrap JsonElement if present
         if (value is JsonElement je)
@@ -1310,15 +1558,21 @@ public class LenientToolDispatcher
             if (value == null) return null;
         }
 
-        // 1. If value is a stringified JSON (array or object), parse it only if schema expects an array or object
-        bool expectsArray = SchemaTypeMatches(schema, "array") || (schema.ValueKind == JsonValueKind.Object && schema.TryGetProperty("items", out _));
-        bool expectsObject = SchemaTypeMatches(schema, "object") || (schema.ValueKind == JsonValueKind.Object && schema.TryGetProperty("properties", out _));
-
-        if (value is string str && (expectsArray || expectsObject))
+        // 1. String value alias resolution & stringified JSON parsing
+        if (value is string str)
         {
+            if (mapping?.TryResolveValueAlias(paramPath, str, out var resolvedStr) == true)
+            {
+                str = resolvedStr;
+                value = str;
+            }
+
+            bool expectsArray = resolvedSchema.HasValue && (SchemaTypeMatches(resolvedSchema.Value, "array") || (resolvedSchema.Value.ValueKind == JsonValueKind.Object && resolvedSchema.Value.TryGetProperty("items", out _)));
+            bool expectsObject = resolvedSchema.HasValue && (SchemaTypeMatches(resolvedSchema.Value, "object") || (resolvedSchema.Value.ValueKind == JsonValueKind.Object && resolvedSchema.Value.TryGetProperty("properties", out _)));
+
             var trimmed = str.Trim();
-            if ((expectsObject && trimmed.StartsWith('{') && trimmed.EndsWith('}')) ||
-                (expectsArray && trimmed.StartsWith('[') && trimmed.EndsWith(']')))
+            if ((trimmed.StartsWith('{') && trimmed.EndsWith('}') && (expectsObject || !resolvedSchema.HasValue)) ||
+                (trimmed.StartsWith('[') && trimmed.EndsWith(']') && (expectsArray || !resolvedSchema.HasValue)))
             {
                 try
                 {
@@ -1331,128 +1585,120 @@ public class LenientToolDispatcher
         }
 
         // 2. Handle array of items
-        if (schema.ValueKind == JsonValueKind.Object &&
-            SchemaTypeMatches(schema, "array") &&
-            schema.TryGetProperty("items", out var itemsSchema) && itemsSchema.ValueKind == JsonValueKind.Object)
+        JsonElement? itemsSchema = null;
+        if (resolvedSchema.HasValue && resolvedSchema.Value.ValueKind == JsonValueKind.Object &&
+            resolvedSchema.Value.TryGetProperty("items", out var isEl) && isEl.ValueKind == JsonValueKind.Object)
         {
-            var resolvedItemsSchema = ResolveSchema(itemsSchema, rootSchema);
-            if (value is System.Collections.IEnumerable list and not string and not IDictionary<string, object?>)
+            itemsSchema = isEl;
+        }
+
+        if (value is System.Collections.IEnumerable list and not string and not IDictionary<string, object?> and not System.Collections.IDictionary)
+        {
+            var normalizedList = new List<object?>();
+            foreach (var item in list)
             {
-                var normalizedList = new List<object?>();
-                foreach (var item in list)
-                {
-                    normalizedList.Add(NormalizeValueDeep(item, resolvedItemsSchema, mapping, paramPath + "[]", rootSchema));
-                }
-                return normalizedList;
+                normalizedList.Add(NormalizeValueDeep(item, itemsSchema, mapping, paramPath + "[]", rootSchema));
             }
-            else if (value is IDictionary<string, object?> singleDict)
+            return normalizedList;
+        }
+        else if (resolvedSchema.HasValue && SchemaTypeMatches(resolvedSchema.Value, "array") && value is IDictionary<string, object?> singleDict)
+        {
+            // Single object shortcut healing for array parameters
+            return new List<object?>
             {
-                // Single object shortcut healing for array parameters
-                return new List<object?>
+                NormalizeValueDeep(singleDict, itemsSchema, mapping, paramPath + "[]", rootSchema)
+            };
+        }
+
+        // 3. Handle object properties (typed or untyped dictionary)
+        IDictionary<string, object?>? dict = null;
+        if (value is IDictionary<string, object?> typedDict)
+        {
+            dict = typedDict;
+        }
+        else if (value is System.Collections.IDictionary nonGenericDict)
+        {
+            dict = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (System.Collections.DictionaryEntry de in nonGenericDict)
+            {
+                if (de.Key != null)
                 {
-                    NormalizeValueDeep(singleDict, resolvedItemsSchema, mapping, paramPath + "[]", rootSchema)
-                };
+                    dict[de.Key.ToString()!] = de.Value;
+                }
             }
         }
 
-        // 3. Handle object properties
-        if (schema.ValueKind == JsonValueKind.Object &&
-            schema.TryGetProperty("properties", out var props) && props.ValueKind == JsonValueKind.Object)
+        if (dict != null)
         {
-            IDictionary<string, object?>? dict = null;
-            if (value is IDictionary<string, object?> typedDict)
-            {
-                dict = typedDict;
-            }
-            else if (value is System.Collections.IDictionary nonGenericDict)
-            {
-                dict = new Dictionary<string, object?>(StringComparer.Ordinal);
-                foreach (System.Collections.DictionaryEntry de in nonGenericDict)
-                {
-                    if (de.Key != null)
-                    {
-                        dict[de.Key.ToString()!] = de.Value;
-                    }
-                }
-            }
+            var normalizedDict = new Dictionary<string, object?>(StringComparer.Ordinal);
+            var expectedProperties = new Dictionary<string, (string CanonicalName, JsonElement Schema)>(StringComparer.OrdinalIgnoreCase);
 
-            if (dict != null)
+            if (resolvedSchema.HasValue && resolvedSchema.Value.ValueKind == JsonValueKind.Object &&
+                resolvedSchema.Value.TryGetProperty("properties", out var props) && props.ValueKind == JsonValueKind.Object)
             {
-                var normalizedDict = new Dictionary<string, object?>(StringComparer.Ordinal);
-                var expectedProperties = new Dictionary<string, (string CanonicalName, JsonElement Schema)>(StringComparer.OrdinalIgnoreCase);
-
                 foreach (var prop in props.EnumerateObject())
                 {
-                    var resolvedProp = ResolveSchema(prop.Value, rootSchema);
+                    var resolvedProp = rootSchema.HasValue ? ResolveSchema(prop.Value, rootSchema.Value) : prop.Value;
                     expectedProperties[prop.Name] = (prop.Name, resolvedProp);
                     expectedProperties[ToSnakeCase(prop.Name)] = (prop.Name, resolvedProp);
                     expectedProperties[ToCamelCase(prop.Name)] = (prop.Name, resolvedProp);
                     expectedProperties[ToPascalCase(prop.Name)] = (prop.Name, resolvedProp);
                 }
+            }
 
-                foreach (var (rawKey, rawVal) in dict)
+            foreach (var (rawKey, rawVal) in dict)
+            {
+                string canonicalKey = rawKey;
+                JsonElement? propSchema = null;
+
+                if (expectedProperties.TryGetValue(rawKey, out var entry))
                 {
-                    string canonicalKey = rawKey;
-                    JsonElement propSchema = default;
-                    bool foundSchema = false;
-
-                    if (expectedProperties.TryGetValue(rawKey, out var entry))
+                    canonicalKey = entry.CanonicalName;
+                    propSchema = entry.Schema;
+                }
+                else if (mapping?.TryGetNestedAlias(paramPath, rawKey, out var mappedAlias) == true)
+                {
+                    canonicalKey = mappedAlias;
+                    if (expectedProperties.TryGetValue(canonicalKey, out var canonicalEntry))
                     {
-                        canonicalKey = entry.CanonicalName;
-                        propSchema = entry.Schema;
-                        foundSchema = true;
+                        canonicalKey = canonicalEntry.CanonicalName;
+                        propSchema = canonicalEntry.Schema;
                     }
-                    else if (mapping?.TryGetNestedAlias(paramPath, rawKey, out var mappedAlias) == true)
-                    {
-                        canonicalKey = mappedAlias;
-                        if (expectedProperties.TryGetValue(canonicalKey, out var canonicalEntry))
-                        {
-                            canonicalKey = canonicalEntry.CanonicalName;
-                            propSchema = canonicalEntry.Schema;
-                            foundSchema = true;
-                        }
-                    }
-                    else if (expectedProperties.TryGetValue(ToSnakeCase(rawKey), out var snakeEntry))
-                    {
-                        canonicalKey = snakeEntry.CanonicalName;
-                        propSchema = snakeEntry.Schema;
-                        foundSchema = true;
-                    }
-                    else if (expectedProperties.TryGetValue(ToCamelCase(rawKey), out var camelEntry))
-                    {
-                        canonicalKey = camelEntry.CanonicalName;
-                        propSchema = camelEntry.Schema;
-                        foundSchema = true;
-                    }
-                    else if (expectedProperties.TryGetValue(ToPascalCase(rawKey), out var pascalEntry))
-                    {
-                        canonicalKey = pascalEntry.CanonicalName;
-                        propSchema = pascalEntry.Schema;
-                        foundSchema = true;
-                    }
-
-                    if (!string.Equals(canonicalKey, rawKey, StringComparison.Ordinal))
-                    {
-                        if (string.Equals(canonicalKey, rawKey, StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(ToSnakeCase(canonicalKey), ToSnakeCase(rawKey), StringComparison.OrdinalIgnoreCase))
-                        {
-                            Telemetry?.Record(LenientDispatchEventType.CasingNormalized, rawKey, canonicalKey, SessionId);
-                        }
-                        else
-                        {
-                            Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, rawKey, canonicalKey, SessionId);
-                        }
-                    }
-
-                    var normalizedSubVal = foundSchema
-                        ? NormalizeValueDeep(rawVal, propSchema, mapping, paramPath + "." + canonicalKey, rootSchema)
-                        : rawVal;
-
-                    normalizedDict[canonicalKey] = normalizedSubVal;
+                }
+                else if (expectedProperties.TryGetValue(ToSnakeCase(rawKey), out var snakeEntry))
+                {
+                    canonicalKey = snakeEntry.CanonicalName;
+                    propSchema = snakeEntry.Schema;
+                }
+                else if (expectedProperties.TryGetValue(ToCamelCase(rawKey), out var camelEntry))
+                {
+                    canonicalKey = camelEntry.CanonicalName;
+                    propSchema = camelEntry.Schema;
+                }
+                else if (expectedProperties.TryGetValue(ToPascalCase(rawKey), out var pascalEntry))
+                {
+                    canonicalKey = pascalEntry.CanonicalName;
+                    propSchema = pascalEntry.Schema;
                 }
 
-                return normalizedDict;
+                if (!string.Equals(canonicalKey, rawKey, StringComparison.Ordinal))
+                {
+                    if (string.Equals(canonicalKey, rawKey, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ToSnakeCase(canonicalKey), ToSnakeCase(rawKey), StringComparison.OrdinalIgnoreCase))
+                    {
+                        Telemetry?.Record(LenientDispatchEventType.CasingNormalized, rawKey, canonicalKey, SessionId);
+                    }
+                    else
+                    {
+                        Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, rawKey, canonicalKey, SessionId);
+                    }
+                }
+
+                var normalizedSubVal = NormalizeValueDeep(rawVal, propSchema, mapping, paramPath + "." + canonicalKey, rootSchema);
+                normalizedDict[canonicalKey] = normalizedSubVal;
             }
+
+            return normalizedDict;
         }
 
         return value;
@@ -1576,22 +1822,28 @@ public class LenientToolDispatcher
         }
     }
 
-    private static string ToSnakeCase(string name)
+    internal static string ToSnakeCase(string name)
     {
         if (string.IsNullOrEmpty(name)) return name;
         var sb = new StringBuilder(name.Length + 4);
         for (int i = 0; i < name.Length; i++)
         {
             char c = name[i];
-            if (c is '_' or '-')
+            if (c is '_' or '-' || char.IsWhiteSpace(c))
             {
-                sb.Append('_');
+                if (sb.Length > 0 && sb[sb.Length - 1] != '_')
+                {
+                    sb.Append('_');
+                }
             }
             else if (char.IsUpper(c))
             {
-                if (i > 0 && name[i - 1] != '_' && name[i - 1] != '-' && (!char.IsUpper(name[i - 1]) || (i + 1 < name.Length && char.IsLower(name[i + 1]))))
+                if (i > 0 && name[i - 1] != '_' && name[i - 1] != '-' && !char.IsWhiteSpace(name[i - 1]) && (!char.IsUpper(name[i - 1]) || (i + 1 < name.Length && char.IsLower(name[i + 1]))))
                 {
-                    sb.Append('_');
+                    if (sb.Length > 0 && sb[sb.Length - 1] != '_')
+                    {
+                        sb.Append('_');
+                    }
                 }
                 sb.Append(char.ToLowerInvariant(c));
             }
@@ -1603,7 +1855,7 @@ public class LenientToolDispatcher
         return sb.ToString();
     }
 
-    private static string ToCamelCase(string name)
+    internal static string ToCamelCase(string name)
     {
         if (string.IsNullOrEmpty(name)) return name;
         var sb = new StringBuilder(name.Length);
@@ -1612,7 +1864,7 @@ public class LenientToolDispatcher
         for (int i = 0; i < name.Length; i++)
         {
             char c = name[i];
-            if (c is '_' or '-')
+            if (c is '_' or '-' || char.IsWhiteSpace(c))
             {
                 capitalizeNext = true;
             }
@@ -1638,7 +1890,7 @@ public class LenientToolDispatcher
         return sb.ToString();
     }
 
-    private static string ToPascalCase(string name)
+    internal static string ToPascalCase(string name)
     {
         if (string.IsNullOrEmpty(name)) return name;
         var sb = new StringBuilder(name.Length);
@@ -1646,7 +1898,7 @@ public class LenientToolDispatcher
         for (int i = 0; i < name.Length; i++)
         {
             char c = name[i];
-            if (c is '_' or '-')
+            if (c is '_' or '-' || char.IsWhiteSpace(c))
             {
                 capitalizeNext = true;
             }

@@ -391,5 +391,141 @@ public class ToolDispatcherSourceGeneratorTests
         Assert.Contains("\"why\"", generatedText);
         Assert.Contains("\"explanation\"", generatedText);
     }
+
+    [Fact]
+    public void Generator_EmitsParameterValueAliases_ForEnumWithToolValueAlias()
+    {
+        var source = """
+        using Pmad.AI;
+        using Pmad.AI.Tools;
+
+        public enum ResourceType
+        {
+            [ToolValueAlias("memory", "memory_limit", "mem", "ram")]
+            MemoryMb,
+
+            [ToolValueAlias("cpu", "cpu_limit", "cores", "vcpu")]
+            CpuCores,
+
+            [ToolValueAlias("storage", "disk", "disk_size")]
+            StorageGb
+        }
+
+        public static class InfraTools
+        {
+            [ToolAlias("provision")]
+            public static void Provision(ResourceType resourceType)
+            {
+            }
+        }
+        """;
+
+        var compilation = CreateCompilation(source);
+        var generator = new ToolDispatcherGenerator();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generator);
+
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var runResult = driver.GetRunResult();
+        Assert.Single(runResult.GeneratedTrees);
+
+        var generatedText = runResult.GeneratedTrees[0].GetText().ToString();
+        Assert.Contains("parameterValueAliases:", generatedText);
+        Assert.Contains("[\"resourceType\"]", generatedText);
+        Assert.Contains("[\"MemoryMb\"]", generatedText);
+        Assert.Contains("\"memory_limit\"", generatedText);
+        Assert.Contains("\"ram\"", generatedText);
+        Assert.Contains("[\"CpuCores\"]", generatedText);
+        Assert.Contains("\"vcpu\"", generatedText);
+    }
+
+    [Fact]
+    public void Generator_EmitsParameterValueAliases_ForMethodWithToolParameterValueAlias()
+    {
+        var source = """
+        using Pmad.AI;
+        using Pmad.AI.Tools;
+
+        public static class BioTools
+        {
+            [ToolAlias("calculate_population")]
+            [ToolParameterValueAlias("species", "wild tiger", "wild tigers", "tiger", "tigers")]
+            [ToolParameterValueAlias("species", "african elephant", "african elephants", "elephant")]
+            public static double CalculatePopulation(string species, int censusCount)
+            {
+                return 0.0;
+            }
+        }
+        """;
+
+        var compilation = CreateCompilation(source);
+        var generator = new ToolDispatcherGenerator();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generator);
+
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var runResult = driver.GetRunResult();
+        Assert.Single(runResult.GeneratedTrees);
+
+        var generatedText = runResult.GeneratedTrees[0].GetText().ToString();
+        Assert.Contains("parameterValueAliases:", generatedText);
+        Assert.Contains("[\"species\"]", generatedText);
+        Assert.Contains("[\"wild tiger\"]", generatedText);
+        Assert.Contains("\"wild tigers\"", generatedText);
+        Assert.Contains("[\"african elephant\"]", generatedText);
+        Assert.Contains("\"african elephants\"", generatedText);
+    }
+
+    [Fact]
+    public void Generator_EmitsParameterValueAliases_ForComplexTypePropertyAndRecordParameterWithThreeArguments()
+    {
+        var source = """
+        using Pmad.AI;
+        using Pmad.AI.Tools;
+
+        public class DeployRequest
+        {
+            [ToolParameterValueAlias("Region", "us-east-1", "useast", "virginia")]
+            public string Region { get; set; } = string.Empty;
+        }
+
+        public record ClusterOptions(
+            [ToolParameterValueAlias("Zone", "zone-a", "za", "primary-zone")] string Zone);
+
+        public static class CloudTools
+        {
+            [ToolAlias("deploy_service")]
+            public static void Deploy(DeployRequest config, ClusterOptions options)
+            {
+            }
+        }
+        """;
+
+        var compilation = CreateCompilation(source);
+        var generator = new ToolDispatcherGenerator();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generator);
+
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var runResult = driver.GetRunResult();
+        Assert.Single(runResult.GeneratedTrees);
+
+        var generatedText = runResult.GeneratedTrees[0].GetText().ToString();
+        Assert.Contains("parameterValueAliases:", generatedText);
+        // Property value alias on DeployRequest
+        Assert.Contains("[\"us-east-1\"]", generatedText);
+        Assert.Contains("\"useast\"", generatedText);
+        Assert.Contains("\"virginia\"", generatedText);
+        // Record constructor parameter value alias on ClusterOptions
+        Assert.Contains("[\"zone-a\"]", generatedText);
+        Assert.Contains("\"za\"", generatedText);
+        Assert.Contains("\"primary-zone\"", generatedText);
+    }
 }
 

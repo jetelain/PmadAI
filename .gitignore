@@ -426,6 +426,6 @@ FodyWeavers.xsd
 
 # Official VS Code C# Dev Kit Extension exclusion
 #*.lscache
-/benchmark-progress.json
+/*.json
 /transcripts
 /docs/transcripts

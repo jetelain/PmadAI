@@ -44,3 +44,41 @@ public sealed class ToolTranslationAttribute(string sourceToolName, string comma
     public string CommandTemplate => commandTemplate;
     public ParameterEscapeMethod EscapeMethod { get; set; } = ParameterEscapeMethod.Bash;
 }
+
+/// <summary>
+/// Specifies alternative names, aliases, or common SLM misnomers for an enum member or property value.
+/// </summary>
+[AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, AllowMultiple = false)]
+public sealed class ToolValueAliasAttribute : Attribute
+{
+    public string[] Aliases { get; }
+
+    public ToolValueAliasAttribute(params string[] aliases)
+    {
+        Aliases = aliases ?? [];
+    }
+}
+
+/// <summary>
+/// Maps argument value aliases (synonyms, casing variations, plurals) to canonical values.
+/// Can be applied to a tool method, parameter, or property.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Parameter | AttributeTargets.Property, AllowMultiple = true)]
+public sealed class ToolParameterValueAliasAttribute : Attribute
+{
+    public string ParameterName { get; }
+    public string CanonicalValue { get; }
+    public string[] Aliases { get; }
+
+    public ToolParameterValueAliasAttribute(string parameterName, string canonicalValue, params string[] aliases)
+    {
+        ParameterName = parameterName ?? string.Empty;
+        CanonicalValue = canonicalValue ?? string.Empty;
+        Aliases = aliases ?? [];
+    }
+
+    public ToolParameterValueAliasAttribute(string canonicalValue, params string[] aliases)
+        : this(string.Empty, canonicalValue, aliases)
+    {
+    }
+}

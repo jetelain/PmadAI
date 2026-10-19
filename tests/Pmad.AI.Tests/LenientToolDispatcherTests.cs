@@ -652,6 +652,183 @@ public class LenientToolDispatcherTests
         Assert.Equal("Executed bash: grep 'antigravity' 'main.cs'", result?.ToString());
     }
 
+    public enum TestResourceType
+    {
+        [ToolValueAlias("memory", "memory_limit", "mem", "ram")]
+        MemoryMb,
+
+        [ToolValueAlias("cpu", "cpu_limit", "cores", "vcpu")]
+        CpuCores,
+
+        [ToolValueAlias("storage", "disk", "disk_size")]
+        StorageGb
+    }
+
+    [Fact]
+    public void NormalizeCall_ResolvesEnumValueAliases_FromEnumAttributes()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var mapping = new ToolMapping();
+        mapping.AddEnumAliases<TestResourceType>("resource_type");
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools = { ["provision"] = mapping }
+        });
+
+        dispatcher.RegisterTool(AIFunctionFactory.Create(
+            (TestResourceType resource_type) => $"provisioned: {resource_type}",
+            "provision"));
+
+        // Test alias "memory_limit" -> "MemoryMb"
+        var dispatched1 = dispatcher.NormalizeCall("provision", "{\"resource_type\": \"memory_limit\"}");
+        Assert.Equal("MemoryMb", dispatched1.Arguments["resource_type"]);
+
+        // Test alias "ram" -> "MemoryMb"
+        var dispatched2 = dispatcher.NormalizeCall("provision", "{\"resource_type\": \"ram\"}");
+        Assert.Equal("MemoryMb", dispatched2.Arguments["resource_type"]);
+
+        // Test alias "vcpu" -> "CpuCores"
+        var dispatched3 = dispatcher.NormalizeCall("provision", "{\"resource_type\": \"vcpu\"}");
+        Assert.Equal("CpuCores", dispatched3.Arguments["resource_type"]);
+    }
+
+    [Fact]
+    public void NormalizeCall_ResolvesStringValueAliases_ConfiguredOnToolMapping()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var mapping = new ToolMapping();
+        mapping.AddParameterValueAlias("species", "wild tiger", "wild tigers", "tiger", "tigers");
+        mapping.AddParameterValueAlias("species", "african elephant", "african elephants", "elephant");
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools = { ["calculate_effective_population_size"] = mapping }
+        });
+
+        dispatcher.RegisterTool(AIFunctionFactory.Create(
+            (string species, int censusCount) => $"{species}: {censusCount}",
+            "calculate_effective_population_size"));
+
+        var dispatched = dispatcher.NormalizeCall("calculate_effective_population_size", "{\"species\": \"wild tigers\", \"censusCount\": 500}");
+        Assert.Equal("wild tiger", dispatched.Arguments["species"]);
+    }
+
+    [Fact]
+    public void NormalizeCall_ResolvesValueAliases_AcrossPathCasingAndSnakeCasePlurals()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var mapping = new ToolMapping();
+        // Registered with camelCase path "targetSpecies"
+        mapping.AddParameterValueAlias("targetSpecies", "wild tiger", "tiger");
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools = { ["track_animal"] = mapping }
+        });
+
+        dispatcher.RegisterTool(AIFunctionFactory.Create(
+            (string target_species) => target_species,
+            "track_animal"));
+
+        // Call with snake_case parameter path "target_species" and snake_case plural "wild_tigers"
+        var dispatched = dispatcher.NormalizeCall("track_animal", "{\"target_species\": \"wild_tigers\"}");
+        Assert.Equal("wild tiger", dispatched.Arguments["target_species"]);
+    }
+
+    [Fact]
+    public async Task NormalizeCall_PerformsDeepObjectAndArrayNormalization()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var mapping = new ToolMapping(
+            nestedParameterAliases: new Dictionary<string, IDictionary<string, IEnumerable<string>>>
+            {
+                ["edits[]"] = new Dictionary<string, IEnumerable<string>>
+                {
+                    ["OldText"] = ["target_content", "old_text"],
+                    ["NewText"] = ["replacement_content", "new_text"]
+                }
+            });
+
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools = { ["apply_patch"] = mapping }
+        });
+
+        dispatcher.RegisterTool(AIFunctionFactory.Create(
+            (List<TestEditChunk> edits) => edits.Count,
+            "apply_patch"));
+
+        var json = """
+        {
+            "edits": [
+                {
+                    "target_content": "oldCode();",
+                    "replacement_content": "newCode();"
+                }
+            ]
+        }
+        """;
+
+        var dispatched = dispatcher.NormalizeCall("apply_patch", json);
+        Assert.True(dispatched.Arguments.ContainsKey("edits"));
+        var editsList = Assert.IsAssignableFrom<IEnumerable<object?>>(dispatched.Arguments["edits"]).ToList();
+        Assert.Single(editsList);
+        var firstEdit = Assert.IsAssignableFrom<IDictionary<string, object?>>(editsList[0]);
+        var oldVal = firstEdit.TryGetValue("oldText", out var ov) ? ov : firstEdit["OldText"];
+        var newVal = firstEdit.TryGetValue("newText", out var nv) ? nv : firstEdit["NewText"];
+        Assert.Equal("oldCode();", oldVal);
+        Assert.Equal("newCode();", newVal);
+
+        var result = await dispatcher.ExecuteAsync("apply_patch", json);
+        Assert.Equal(1, result);
+    }
+
+    [Fact]
+    public async Task LenientToolDispatcher_ExecutesSilently_WithoutInjectingApologiesOrNotices()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var mapping = new ToolMapping();
+        mapping.AddParameterValueAlias("species", "wild tiger", "wild tigers");
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools = { ["lookup"] = mapping }
+        });
+
+        dispatcher.RegisterTool(AIFunctionFactory.Create(
+            (string species) => $"found {species}",
+            "lookup"));
+
+        var client = new FakePipelineChatClient((messages, options, ct) =>
+        {
+            // Verify no apology, notice, or system correction message was injected into history
+            var msgList = messages.ToList();
+            Assert.DoesNotContain(msgList, m => m.Text != null && (m.Text.Contains("normalized") || m.Text.Contains("apologize") || m.Text.Contains("repaired")));
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "done")));
+        });
+
+        var pipeline = new ChatClientBuilder(client)
+            .UseLenientToolDispatch(dispatcher)
+            .Build();
+
+        var call = new FunctionCallContent("call_1", "lookup", new Dictionary<string, object?> { ["species"] = "wild tigers" });
+        var response = await pipeline.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "find species"),
+            new ChatMessage(ChatRole.Assistant, [call])
+        ]);
+
+        Assert.Equal("done", response.Text);
+    }
+
+    [Fact]
+    public void CasingHelpers_CorrectlyHandleWhitespaceAndMultipleSeparators()
+    {
+        Assert.Equal("wild_tiger", LenientToolDispatcher.ToSnakeCase("wild tiger"));
+        Assert.Equal("wild_tiger", LenientToolDispatcher.ToSnakeCase("wild   tiger"));
+        Assert.Equal("wild_tiger", LenientToolDispatcher.ToSnakeCase("wild  _  tiger"));
+        Assert.Equal("wildTiger", LenientToolDispatcher.ToCamelCase("wild tiger"));
+        Assert.Equal("wildTiger", LenientToolDispatcher.ToCamelCase("wild   tiger"));
+        Assert.Equal("WildTiger", LenientToolDispatcher.ToPascalCase("wild tiger"));
+        Assert.Equal("WildTiger", LenientToolDispatcher.ToPascalCase("wild   tiger"));
+    }
+
     private class FakePipelineChatClient : IChatClient
     {
         private readonly Func<IEnumerable<ChatMessage>, ChatOptions?, CancellationToken, Task<ChatResponse>> _getResponse;

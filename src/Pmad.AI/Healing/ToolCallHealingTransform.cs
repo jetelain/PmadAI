@@ -19,8 +19,17 @@ public static partial class ToolCallHealingTransform
     [GeneratedRegex(@"<(?:tool_call|function_call)>\s*(?:```(?:json)?\s*)?(?<payload>\{[\s\S]*?\})(?:\s*```)?\s*</(?:tool_call|function_call)>")]
     private static partial Regex ToolCallRegex();
 
-    [GeneratedRegex(@"Action:\s*(?<name>[a-zA-Z0-9_\-\.]+)\s*\nAction Input:\s*(?<payload>\{[\s\S]*?\})")]
+    [GeneratedRegex(@"<(?:tool_call|function_call)>\s*(?:```(?:json)?\s*)?")]
+    private static partial Regex UnclosedToolCallRegex();
+
+    [GeneratedRegex(@"Action:\s*(?<name>[a-zA-Z0-9_\-\.]+)\s*\r?\nAction Input:\s*(?:```(?:json)?\s*)?")]
+    private static partial Regex ActionHeaderRegex();
+
+    [GeneratedRegex(@"Action:\s*(?<name>[a-zA-Z0-9_\-\.]+)\s*\r?\nAction Input:\s*(?:```(?:json)?\s*)?(?<payload>\{[\s\S]*?\})(?:\s*```)?")]
     private static partial Regex ActionToolCallRegex();
+
+    [GeneratedRegex(@"^<(?:think|thought)>\s*([\s\S]*)$")]
+    private static partial Regex UnclosedThinkRegex();
 
     [GeneratedRegex(@",\s*([\}\]])")]
     private static partial Regex TrailingCommasRegex();
@@ -190,102 +199,27 @@ public static partial class ToolCallHealingTransform
 
         if ((toolCalls == null || toolCalls.Count == 0) && !string.IsNullOrWhiteSpace(content))
         {
-            var matches = ToolCallRegex().Matches(content);
-            if (matches.Count > 0)
+            var contentCopy = content;
+            if (TryExtractToolCalls(ref contentCopy, out var extractedCalls, out _, out _, logger, options, chatOptions) && extractedCalls.Count > 0)
             {
                 var newToolCalls = new JsonArray();
-                var updatedContent = content;
-
-                foreach (Match match in matches)
+                foreach (var call in extractedCalls)
                 {
-                    try
+                    var generatedId = call.CallId ?? $"call_{Guid.NewGuid():N}"[..12];
+                    newToolCalls.Add((JsonNode)new JsonObject
                     {
-                        var sanitizedPayload = SanitizeJson(match.Groups["payload"].Value, logger);
-                        var payloadNode = JsonNode.Parse(sanitizedPayload);
-                        var toolName = payloadNode?["name"]?.GetValue<string>();
-                        var argsNode = payloadNode?["arguments"] ?? payloadNode?["parameters"];
-                        var toolArgs = argsNode is JsonValue argVal && argVal.TryGetValue<string>(out var strArg)
-                            ? strArg
-                            : argsNode?.ToJsonString() ?? "{}";
-
-                        if (!string.IsNullOrEmpty(toolName))
+                        ["id"] = generatedId,
+                        ["type"] = "function",
+                        ["function"] = new JsonObject
                         {
-                            if (!ShouldPromoteToolCall(toolName, options, chatOptions))
-                            {
-                                logger?.LogInformation("Rejected pseudo-tool-call candidate '{ToolName}' because it does not match declared tools.", toolName);
-                                continue;
-                            }
-
-                            var generatedId = $"call_{Guid.NewGuid():N}"[..12];
-                            newToolCalls.Add((JsonNode)new JsonObject
-                            {
-                                ["id"] = generatedId,
-                                ["type"] = "function",
-                                ["function"] = new JsonObject
-                                {
-                                    ["name"] = toolName,
-                                    ["arguments"] = SanitizeArgumentsJson(toolArgs, logger, toolName)
-                                }
-                            });
-                            updatedContent = updatedContent.Replace(match.Value, "");
-                            logger?.LogInformation("Promoted pseudo-tool-call from content into structured tool call for '{ToolName}' (id: {ToolCallId})", toolName, generatedId);
+                            ["name"] = call.Name,
+                            ["arguments"] = SerializeArgumentsToJson(call.Arguments)
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        logger?.LogWarning(ex, "Failed to parse pseudo-tool-call payload in content: {Payload}", match.Groups["payload"].Value);
-                    }
+                    });
                 }
-
-                if (newToolCalls.Count > 0)
-                {
-                    toolCalls = newToolCalls;
-                    message["tool_calls"] = toolCalls;
-                    message["content"] = updatedContent.Trim();
-                }
-            }
-            else
-            {
-                var actionMatch = ActionToolCallRegex().Match(content);
-                if (actionMatch.Success)
-                {
-                    try
-                    {
-                        var toolName = actionMatch.Groups["name"].Value.Trim();
-                        var toolArgs = actionMatch.Groups["payload"].Value.Trim();
-                        if (!string.IsNullOrEmpty(toolName))
-                        {
-                            if (ShouldPromoteToolCall(toolName, options, chatOptions))
-                            {
-                                var generatedId = $"call_{Guid.NewGuid():N}"[..12];
-                                toolCalls = new JsonArray
-                                {
-                                    (JsonNode)new JsonObject
-                                    {
-                                        ["id"] = generatedId,
-                                        ["type"] = "function",
-                                        ["function"] = new JsonObject
-                                        {
-                                            ["name"] = toolName,
-                                            ["arguments"] = SanitizeArgumentsJson(toolArgs, logger, toolName)
-                                        }
-                                    }
-                                };
-                                message["tool_calls"] = toolCalls;
-                                message["content"] = content.Replace(actionMatch.Value, "").Trim();
-                                logger?.LogInformation("Promoted Action pseudo-tool-call from content into structured tool call for '{ToolName}' (id: {ToolCallId})", toolName, generatedId);
-                            }
-                            else
-                            {
-                                logger?.LogInformation("Rejected ReAct Action pseudo-tool-call candidate '{ToolName}' because it does not match declared tools.", toolName);
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        logger?.LogWarning(ex, "Failed to parse Action tool call payload in content: {Payload}", actionMatch.Groups["payload"].Value);
-                    }
-                }
+                toolCalls = newToolCalls;
+                message["tool_calls"] = toolCalls;
+                message["content"] = contentCopy.Trim();
             }
         }
 
@@ -538,7 +472,187 @@ public static partial class ToolCallHealingTransform
     }
 
     /// <summary>
-    /// Extracts pseudo-tool calls (<c>&lt;tool_call&gt;...&lt;/tool_call&gt;</c> or ReAct <c>Action: ...\nAction Input: {...}</c>)
+    /// Extracts a balanced JSON object starting from or after <paramref name="startIndex"/>.
+    /// Handles nested braces, string literals, and escape sequences, repairing truncated JSON if necessary.
+    /// </summary>
+    private static string? ExtractBalancedJson(string text, int startIndex, out int consumedLength, out bool isTruncated)
+    {
+        consumedLength = 0;
+        isTruncated = false;
+        if (string.IsNullOrEmpty(text) || startIndex < 0 || startIndex >= text.Length)
+        {
+            return null;
+        }
+
+        int startBrace = text.IndexOf('{', startIndex);
+        if (startBrace < 0)
+        {
+            return null;
+        }
+
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+
+        for (int i = startBrace; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (escaped)
+            {
+                escaped = false;
+                continue;
+            }
+
+            if (c == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inString = !inString;
+                continue;
+            }
+
+            if (!inString)
+            {
+                if (c == '{')
+                {
+                    depth++;
+                }
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        consumedLength = (i - startIndex) + 1;
+                        isTruncated = false;
+                        return text.Substring(startBrace, i - startBrace + 1);
+                    }
+                }
+            }
+        }
+
+        if (depth > 0)
+        {
+            consumedLength = text.Length - startIndex;
+            isTruncated = true;
+            var raw = text.Substring(startBrace);
+            var sb = new StringBuilder(raw);
+            if (escaped)
+            {
+                sb.Append('\\');
+            }
+            if (inString)
+            {
+                sb.Append('"');
+            }
+            while (depth-- > 0)
+            {
+                sb.Append('}');
+            }
+            return sb.ToString();
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Attempts to extract an unclosed pseudo-tool call (&lt;tool_call&gt; or &lt;function_call&gt;) lacking a closing tag.
+    /// Extracts balanced JSON, repairs truncated JSON payloads, and promotes to <see cref="FunctionCallContent"/>.
+    /// </summary>
+    public static bool TryExtractUnclosedToolCall(
+        ref string content,
+        out FunctionCallContent? toolCall,
+        out string? proseBefore,
+        out string? proseAfter,
+        ILogger? logger = null,
+        ToolCallHealingOptions? options = null,
+        ChatOptions? chatOptions = null)
+    {
+        toolCall = null;
+        proseBefore = null;
+        proseAfter = null;
+
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return false;
+        }
+
+        var match = UnclosedToolCallRegex().Match(content);
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        int jsonStart = match.Index + match.Length;
+        var balancedJson = ExtractBalancedJson(content, jsonStart, out int consumedLen, out _);
+        if (string.IsNullOrEmpty(balancedJson))
+        {
+            return false;
+        }
+
+        try
+        {
+            var sanitizedPayload = SanitizeJson(balancedJson, logger);
+            var payloadNode = JsonNode.Parse(sanitizedPayload);
+            var toolName = payloadNode?["name"]?.GetValue<string>();
+            var argsNode = payloadNode?["arguments"] ?? payloadNode?["parameters"];
+            var toolArgs = argsNode is JsonValue argVal && argVal.TryGetValue<string>(out var strArg)
+                ? strArg
+                : argsNode?.ToJsonString() ?? "{}";
+
+            if (!string.IsNullOrEmpty(toolName))
+            {
+                if (!ShouldPromoteToolCall(toolName, options, chatOptions))
+                {
+                    logger?.LogInformation("Rejected unclosed pseudo-tool-call candidate '{ToolName}' because it does not match declared tools.", toolName);
+                    return false;
+                }
+
+                var generatedId = $"call_{Guid.NewGuid():N}"[..12];
+                var parsedArgs = ParseArgumentsJson(toolArgs, logger, toolName, options);
+                toolCall = new FunctionCallContent(generatedId, toolName, parsedArgs);
+
+                proseBefore = content[..match.Index].Trim();
+
+                int matchEnd = jsonStart + consumedLen;
+                if (matchEnd < content.Length)
+                {
+                    var rem = content.Substring(matchEnd);
+                    var fenceMatch = Regex.Match(rem, @"^\s*```(?:\s*</(?:tool_call|function_call)>)?");
+                    if (fenceMatch.Success)
+                    {
+                        matchEnd += fenceMatch.Length;
+                    }
+                    else
+                    {
+                        var closeMatch = Regex.Match(rem, @"^\s*</(?:tool_call|function_call)>");
+                        if (closeMatch.Success)
+                        {
+                            matchEnd += closeMatch.Length;
+                        }
+                    }
+                }
+
+                proseAfter = matchEnd < content.Length ? content[matchEnd..].Trim() : string.Empty;
+                content = (proseBefore + (string.IsNullOrEmpty(proseAfter) ? "" : " " + proseAfter)).Trim();
+                logger?.LogInformation("Extracted unclosed pseudo-tool-call from text for '{ToolName}' (id: {ToolCallId})", toolName, generatedId);
+                options?.Telemetry?.Record(ToolCallHealingEventType.PseudoTagExtracted, toolName, options.SessionId);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex, "Failed to parse unclosed pseudo-tool-call payload: {Payload}", balancedJson);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Extracts pseudo-tool calls (<c>&lt;tool_call&gt;...&lt;/tool_call&gt;</c>, unclosed pseudo-tags, or ReAct <c>Action: ...\nAction Input: {...}</c>)
     /// from <paramref name="content"/>, converts them into strongly-typed <see cref="FunctionCallContent"/> instances,
     /// returns the preceding prose, extracted tool calls, and succeeding prose, and strips the matched tags from <paramref name="content"/>.
     /// </summary>
@@ -560,6 +674,7 @@ public static partial class ToolCallHealingTransform
             return false;
         }
 
+        // 1. Try closed <tool_call> / <function_call> tags
         var matches = ToolCallRegex().Matches(content);
         if (matches.Count > 0)
         {
@@ -614,25 +729,45 @@ public static partial class ToolCallHealingTransform
             }
         }
 
-        var actionMatch = ActionToolCallRegex().Match(content);
+        // 2. Try unclosed <tool_call> tags lacking closing tag
+        if (TryExtractUnclosedToolCall(ref content, out var unclosedCall, out proseBefore, out proseAfter, logger, options, chatOptions) && unclosedCall != null)
+        {
+            toolCalls.Add(unclosedCall);
+            return true;
+        }
+
+        // 3. Try ReAct Action blocks (with or without markdown code fences in Action Input)
+        var actionMatch = ActionHeaderRegex().Match(content);
         if (actionMatch.Success)
         {
             try
             {
                 var toolName = actionMatch.Groups["name"].Value.Trim();
-                var toolArgs = actionMatch.Groups["payload"].Value.Trim();
-                if (!string.IsNullOrEmpty(toolName))
+                int jsonStart = actionMatch.Index + actionMatch.Length;
+                var balancedJson = ExtractBalancedJson(content, jsonStart, out int consumedLen, out _);
+
+                if (!string.IsNullOrEmpty(toolName) && !string.IsNullOrEmpty(balancedJson))
                 {
                     if (ShouldPromoteToolCall(toolName, options, chatOptions))
                     {
                         var generatedId = $"call_{Guid.NewGuid():N}"[..12];
-                        var parsedArgs = ParseArgumentsJson(toolArgs, logger, toolName, options);
+                        var parsedArgs = ParseArgumentsJson(balancedJson, logger, toolName, options);
                         toolCalls.Add(new FunctionCallContent(generatedId, toolName, parsedArgs));
 
                         proseBefore = content[..actionMatch.Index].Trim();
-                        proseAfter = content[(actionMatch.Index + actionMatch.Length)..].Trim();
+                        int matchEnd = jsonStart + consumedLen;
+                        if (matchEnd < content.Length)
+                        {
+                            var rem = content.Substring(matchEnd);
+                            var fenceMatch = Regex.Match(rem, @"^\s*```");
+                            if (fenceMatch.Success)
+                            {
+                                matchEnd += fenceMatch.Length;
+                            }
+                        }
 
-                        content = content.Replace(actionMatch.Value, "").Trim();
+                        proseAfter = matchEnd < content.Length ? content[matchEnd..].Trim() : string.Empty;
+                        content = (proseBefore + (string.IsNullOrEmpty(proseAfter) ? "" : " " + proseAfter)).Trim();
                         logger?.LogInformation("Extracted ReAct pseudo-tool-call from text for '{ToolName}' (id: {ToolCallId})", toolName, generatedId);
                         options?.Telemetry?.Record(ToolCallHealingEventType.ActionBlockExtracted, toolName, options.SessionId);
                         return true;
@@ -645,7 +780,7 @@ public static partial class ToolCallHealingTransform
             }
             catch (Exception ex)
             {
-                logger?.LogWarning(ex, "Failed to parse Action tool call payload in content: {Payload}", actionMatch.Groups["payload"].Value);
+                logger?.LogWarning(ex, "Failed to parse Action tool call payload in content.");
             }
         }
 
@@ -693,13 +828,37 @@ public static partial class ToolCallHealingTransform
             return [message];
         }
 
+        // 0. Thinking trace runaway protection:
+        // If content is an unclosed <think> / <thought> block that exhausted token limit, preserve thought content as text.
+        for (int i = 0; i < message.Contents.Count; i++)
+        {
+            if (message.Contents[i] is TextContent tc && !string.IsNullOrWhiteSpace(tc.Text))
+            {
+                var text = tc.Text.Trim();
+                if ((text.StartsWith("<think>", StringComparison.OrdinalIgnoreCase) || text.StartsWith("<thought>", StringComparison.OrdinalIgnoreCase)) &&
+                    !text.Contains("</think>", StringComparison.OrdinalIgnoreCase) && !text.Contains("</thought>", StringComparison.OrdinalIgnoreCase))
+                {
+                    var match = UnclosedThinkRegex().Match(text);
+                    if (match.Success)
+                    {
+                        var thoughtText = match.Groups[1].Value.Trim();
+                        if (!string.IsNullOrWhiteSpace(thoughtText))
+                        {
+                            message.Contents[i] = new TextContent(thoughtText);
+                        }
+                    }
+                }
+            }
+        }
+
         // 1. Check for pseudo-tool calls in TextContent
         for (int i = 0; i < message.Contents.Count; i++)
         {
             if (message.Contents[i] is TextContent textContent && !string.IsNullOrWhiteSpace(textContent.Text))
             {
+                var originalText = textContent.Text;
                 var text = textContent.Text;
-                if (TryExtractToolCalls(ref text, out var extractedCalls, out var proseBefore, out var proseAfter, logger, options, chatOptions))
+                if (TryExtractToolCalls(ref text, out var extractedCalls, out var proseBefore, out var proseAfter, logger, options, chatOptions) && extractedCalls.Count > 0)
                 {
                     message.Contents.RemoveAt(i);
                     int insertIdx = i;
@@ -720,6 +879,11 @@ public static partial class ToolCallHealingTransform
                     }
 
                     i = insertIdx - 1;
+                }
+                else if (string.IsNullOrWhiteSpace(text) && !string.IsNullOrWhiteSpace(originalText))
+                {
+                    // Non-empty text safeguard: if stripping reduced text to whitespace with no tool calls, retain original text
+                    message.Contents[i] = new TextContent(originalText.Trim());
                 }
             }
         }
@@ -753,6 +917,18 @@ public static partial class ToolCallHealingTransform
                 {
                     message.Contents[i] = new FunctionCallContent(callId, fcc.Name, arguments);
                 }
+            }
+        }
+
+        // 3. Fallback: if no tool calls and no non-empty text content, but reasoning content exists, surface reasoning as text
+        bool hasToolCalls = message.Contents.OfType<FunctionCallContent>().Any();
+        bool hasNonEmptyText = message.Contents.OfType<TextContent>().Any(tc => !string.IsNullOrWhiteSpace(tc.Text));
+        if (!hasToolCalls && !hasNonEmptyText)
+        {
+            var reasoning = message.Contents.OfType<TextReasoningContent>().FirstOrDefault(rc => !string.IsNullOrWhiteSpace(rc.Text));
+            if (reasoning != null)
+            {
+                message.Contents.Add(new TextContent(reasoning.Text));
             }
         }
 
@@ -912,5 +1088,52 @@ public static partial class ToolCallHealingTransform
             JsonValueKind.Null => null,
             _ => element.Clone()
         };
+    }
+
+    internal static string SerializeArgumentsToJson(IDictionary<string, object?>? args)
+    {
+        if (args == null || args.Count == 0)
+        {
+            return "{}";
+        }
+        var obj = new JsonObject();
+        foreach (var (k, v) in args)
+        {
+            obj[k] = ConvertObjectToJsonNode(v);
+        }
+        return obj.ToJsonString();
+    }
+
+    private static JsonNode? ConvertObjectToJsonNode(object? value)
+    {
+        if (value == null) return null;
+        if (value is JsonNode jn) return jn.DeepClone();
+        if (value is JsonElement je) return JsonNode.Parse(je.GetRawText());
+        if (value is string s) return JsonValue.Create(s);
+        if (value is bool b) return JsonValue.Create(b);
+        if (value is int i) return JsonValue.Create(i);
+        if (value is long l) return JsonValue.Create(l);
+        if (value is double d) return JsonValue.Create(d);
+        if (value is float f) return JsonValue.Create(f);
+        if (value is decimal dec) return JsonValue.Create(dec);
+        if (value is IDictionary<string, object?> dict)
+        {
+            var jo = new JsonObject();
+            foreach (var (k, v) in dict)
+            {
+                jo[k] = ConvertObjectToJsonNode(v);
+            }
+            return jo;
+        }
+        if (value is System.Collections.IEnumerable list)
+        {
+            var ja = new JsonArray();
+            foreach (var item in list)
+            {
+                ja.Add(ConvertObjectToJsonNode(item));
+            }
+            return ja;
+        }
+        return JsonValue.Create(value.ToString());
     }
 }

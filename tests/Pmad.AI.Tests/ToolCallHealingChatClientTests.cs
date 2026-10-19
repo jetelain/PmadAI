@@ -475,4 +475,113 @@ public class ToolCallHealingChatClientTests
         Assert.Equal("run_command", fcc.Name);
         Assert.Equal("dir", fcc.Arguments?["command"]?.ToString());
     }
+
+    [Fact]
+    public async Task GetResponseAsync_Payload1_TruncatedUnclosedPseudoTag_PromotesToFunctionCall()
+    {
+        // Payload 1: Truncated / Unclosed Pseudo-Tag (BFCL Simple FC Turn 15)
+        var payload = "<tool_call>\n{\"name\": \"find_real_estate\", \"arguments\": {\"location\": \"San Diego, CA\", \"property_type\": \"villa\", \"bedrooms\": 3, \"budget\": {\"min\": 300000, \"max\": 400000}}}";
+
+        var innerClient = new FakeChatClient(getResponse: (_, _, _) =>
+        {
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, payload)));
+        });
+
+        var client = new ToolCallHealingChatClient(innerClient);
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Find real estate in San Diego")]);
+
+        Assert.Equal(ChatFinishReason.ToolCalls, response.FinishReason);
+        var call = Assert.Single(response.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        Assert.Equal("find_real_estate", call.Name);
+        Assert.Equal("San Diego, CA", call.Arguments?["location"]?.ToString());
+        Assert.Equal("villa", call.Arguments?["property_type"]?.ToString());
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_Payload2_ReActActionWithFencedCodeBlock_PromotesAndPreservesProse()
+    {
+        // Payload 2: ReAct Action with Fenced Code Block (Mock SWE-bench Turn 3)
+        var payload = "I will search for the relevant class in the repository.\n\nAction: search_code\nAction Input: ```json\n{\n  \"query\": \"class ConnectionPoolManager\",\n  \"path\": \"src/Pmad.Security\"\n}\n```\nLet me know if you need more details.";
+
+        var innerClient = new FakeChatClient(getResponse: (_, _, _) =>
+        {
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, payload)));
+        });
+
+        var client = new ToolCallHealingChatClient(innerClient);
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Search code")]);
+
+        Assert.Equal(ChatFinishReason.ToolCalls, response.FinishReason);
+        var call = Assert.Single(response.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        Assert.Equal("search_code", call.Name);
+        Assert.Equal("class ConnectionPoolManager", call.Arguments?["query"]?.ToString());
+        Assert.Equal("src/Pmad.Security", call.Arguments?["path"]?.ToString());
+
+        var texts = response.Messages.SelectMany(m => m.Contents).OfType<TextContent>().Select(t => t.Text).ToList();
+        Assert.Contains(texts, t => t.Contains("I will search for the relevant class in the repository."));
+        Assert.Contains(texts, t => t.Contains("Let me know if you need more details."));
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_Payload3_ThinkingTraceRunawayWithTruncation_PreservesTextSafely()
+    {
+        // Payload 3: Thinking Trace Runaway with Truncation (BFCL Irrelevance Turn 2)
+        var payload = "<think>\nThinking Process:\n1. Analyze request: explain synchronous vs asynchronous in two sentences.\n2. Draft sentence 1: Synchronous programming executes tasks sequentially...\n3. Draft sentence 2: Asynchronous programming allows tasks to run concurrently...\n4. Refining comparison: blocking vs non-blocking...";
+
+        var innerClient = new FakeChatClient(getResponse: (_, _, _) =>
+        {
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, payload)));
+        });
+
+        var client = new ToolCallHealingChatClient(innerClient);
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Explain sync vs async")]);
+
+        // Must not produce an empty message or violate protocol
+        Assert.NotEmpty(response.Messages);
+        var lastMsg = response.Messages.Last();
+        Assert.False(string.IsNullOrWhiteSpace(lastMsg.Text), "Assistant must not return empty output on unclosed thinking trace runaway.");
+        Assert.Contains("Synchronous programming executes tasks sequentially", lastMsg.Text);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_Payload4_TrailingCommasAndMultilineStringsInArguments_ParsesCleanly()
+    {
+        // Payload 4: Trailing Commas & Unescaped Quotes / Newlines in Arguments
+        var payload = "<tool_call>\n{\n  \"name\": \"apply_patch\",\n  \"arguments\": {\n    \"file_path\": \"sympy/matrices/dense.py\",\n    \"patch\": \"--- a/dense.py\\n+++ b/dense.py\\n@@ -10,3 +10,3 @@\\n- old_code()\\n+ new_code()\\n\",\n  }\n}\n</tool_call>";
+
+        var innerClient = new FakeChatClient(getResponse: (_, _, _) =>
+        {
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, payload)));
+        });
+
+        var client = new ToolCallHealingChatClient(innerClient);
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Apply patch")]);
+
+        Assert.Equal(ChatFinishReason.ToolCalls, response.FinishReason);
+        var call = Assert.Single(response.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        Assert.Equal("apply_patch", call.Name);
+        Assert.Equal("sympy/matrices/dense.py", call.Arguments?["file_path"]?.ToString());
+        Assert.Contains("+ new_code()", call.Arguments?["patch"]?.ToString());
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_UnclosedToolCallWithTrailingBackslash_ParsesCleanly()
+    {
+        // Truncated tool call where string cuts off right on an escape character '\'
+        var payload = "<tool_call>\n{\n  \"name\": \"search_code\",\n  \"arguments\": {\n    \"pattern\": \"hello\\";
+
+        var innerClient = new FakeChatClient(getResponse: (_, _, _) =>
+        {
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, payload)));
+        });
+
+        var client = new ToolCallHealingChatClient(innerClient);
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "search")]);
+
+        Assert.Equal(ChatFinishReason.ToolCalls, response.FinishReason);
+        var call = Assert.Single(response.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        Assert.Equal("search_code", call.Name);
+        Assert.NotNull(call.Arguments);
+        Assert.True(call.Arguments.ContainsKey("pattern"));
+    }
 }

@@ -57,12 +57,16 @@ public class PipelinePresetsTests
 
         bool breakerConfigured = false;
         bool thinkingConfigured = false;
-        bool toolResultConfigured = false;
         bool healingConfigured = false;
 
         var builder = new ChatClientBuilder(inner);
         builder.UseRecommendedSlmPipeline(
             dispatcher: dispatcher,
+            configureHealing: opts =>
+            {
+                healingConfigured = true;
+                Assert.True(opts.EnforceAvailableToolsGuardrail);
+            },
             configureBreaker: opts =>
             {
                 breakerConfigured = true;
@@ -74,30 +78,32 @@ public class PipelinePresetsTests
             {
                 thinkingConfigured = true;
                 Assert.Equal(5, opts.KeepVerbatimCount);
-                Assert.Equal(1500, opts.FallbackCharacterLimit);
+                Assert.Equal(2000, opts.FallbackCharacterLimit);
+                Assert.Equal(1400, opts.FallbackPrefixLength);
+                Assert.Equal(600, opts.FallbackSuffixLength);
                 Assert.Null(opts.Summarizer);
-            },
-            configureToolResult: opts =>
-            {
-                toolResultConfigured = true;
-                Assert.Equal(5, opts.KeepVerbatimCount);
-                Assert.Equal(4500, opts.FallbackCharacterLimit);
-            },
-            configureHealing: opts =>
-            {
-                healingConfigured = true;
-                Assert.True(opts.EnforceAvailableToolsGuardrail);
             });
 
         var client = builder.Build();
 
         Assert.True(breakerConfigured);
         Assert.True(thinkingConfigured);
-        Assert.True(toolResultConfigured);
         Assert.True(healingConfigured);
 
         var breaker = client.GetService<ToolLoopCircuitBreaker>();
         Assert.NotNull(breaker);
+
+        // Verify onion layering order: Thinking -> Breaker -> Dispatch -> Healing -> Inner
+        var c = client;
+        Assert.IsType<ThinkingTraceCompactionChatClient>(c);
+        c = GetInner(c);
+        Assert.IsType<ToolLoopCircuitBreakerChatClient>(c);
+        c = GetInner(c);
+        Assert.IsType<LenientToolDispatchChatClient>(c);
+        c = GetInner(c);
+        Assert.IsType<ToolCallHealingChatClient>(c);
+        c = GetInner(c);
+        Assert.IsType<DummyChatClient>(c);
 
         // Verify that healing works end-to-end through the pipeline
         var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "What is the weather in Paris?")]);
@@ -113,16 +119,13 @@ public class PipelinePresetsTests
         var builder = new ChatClientBuilder(inner);
 
         bool breakerConfigured = false;
-        bool toolResultConfigured = false;
 
         builder.UseRecommendedSlmPipeline(
             dispatcher: dispatcher,
-            configureBreaker: opts => breakerConfigured = true,
-            configureToolResult: opts => toolResultConfigured = true);
+            configureBreaker: opts => breakerConfigured = true);
 
         var client = builder.Build();
         Assert.True(breakerConfigured);
-        Assert.True(toolResultConfigured);
         Assert.NotNull(client.GetService<ToolLoopCircuitBreaker>());
     }
 
@@ -174,8 +177,28 @@ public class PipelinePresetsTests
         var breaker = client.GetService<ToolLoopCircuitBreaker>();
         Assert.NotNull(breaker);
 
+        // Verify onion layering order: Thinking -> ToolResult -> Breaker -> Dispatch -> Healing -> Inner
+        var c = client;
+        Assert.IsType<ThinkingTraceCompactionChatClient>(c);
+        c = GetInner(c);
+        Assert.IsType<ToolResultCompactionChatClient>(c);
+        c = GetInner(c);
+        Assert.IsType<ToolLoopCircuitBreakerChatClient>(c);
+        c = GetInner(c);
+        Assert.IsType<LenientToolDispatchChatClient>(c);
+        c = GetInner(c);
+        Assert.IsType<ToolCallHealingChatClient>(c);
+        c = GetInner(c);
+        Assert.IsType<DummyChatClient>(c);
+
         var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "Hello")]);
         var call = Assert.Single(response.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
         Assert.Equal("get_weather", call.Name);
+    }
+
+    private static IChatClient GetInner(IChatClient client)
+    {
+        var prop = typeof(DelegatingChatClient).GetProperty("InnerClient", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        return (IChatClient)prop!.GetValue(client)!;
     }
 }

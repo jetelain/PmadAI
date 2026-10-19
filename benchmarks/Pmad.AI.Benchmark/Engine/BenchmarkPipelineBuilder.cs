@@ -156,10 +156,6 @@ public static class BenchmarkPipelineBuilder
             {
                 opts.Telemetry = telemetry;
             },
-            configureToolResult: opts =>
-            {
-                opts.Telemetry = telemetry;
-            },
             configureHealing: opts =>
             {
                 opts.Telemetry = healingTelemetry;

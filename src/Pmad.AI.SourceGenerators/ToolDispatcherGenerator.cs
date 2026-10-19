@@ -15,7 +15,8 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
         string CanonicalName,
         EquatableArray<string> Aliases,
         EquatableArray<DiscoveredParamMapping> ParamMappings,
-        EquatableArray<DiscoveredNestedParamMapping> NestedParamMappings);
+        EquatableArray<DiscoveredNestedParamMapping> NestedParamMappings,
+        EquatableArray<DiscoveredValueAliasMapping> ValueAliasMappings);
 
     private sealed record DiscoveredParamMapping(
         string CanonicalParam,
@@ -24,6 +25,11 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
     private sealed record DiscoveredNestedParamMapping(
         string ParamPath,
         string PropertyName,
+        EquatableArray<string> Aliases);
+
+    private sealed record DiscoveredValueAliasMapping(
+        string ParamPath,
+        string CanonicalValue,
         EquatableArray<string> Aliases);
 
     private sealed record DiscoveredTranslation(
@@ -73,63 +79,84 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
             .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolTranslationAttribute" or "Pmad.AI.ToolTranslationAttribute")
             .ToList();
 
-        if (aliasAttrs.Count == 0 && transAttrs.Count == 0) return null;
+        var paramValAttrs = methodSymbol.GetAttributes()
+            .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolParameterValueAliasAttribute" or "Pmad.AI.ToolParameterValueAliasAttribute")
+            .ToList();
+
+        string canonicalName = ResolveMethodToolName(methodSymbol, aliasAttrs);
+        var aliases = new List<string>();
+
+        foreach (var attr in aliasAttrs)
+        {
+            foreach (var arg in attr.ConstructorArguments)
+            {
+                ExtractStringsFromTypedConstant(arg, aliases);
+            }
+        }
+
+        var paramMappings = new List<DiscoveredParamMapping>();
+        var nestedParamMappings = new List<DiscoveredNestedParamMapping>();
+        var valueAliasMappings = new List<DiscoveredValueAliasMapping>();
+
+        foreach (var attr in paramValAttrs)
+        {
+            string? paramName = null;
+            string? canonicalVal = null;
+            var vAliases = new List<string>();
+
+            if (attr.ConstructorArguments.Length == 2)
+            {
+                if (attr.ConstructorArguments[0].Value is string cv) canonicalVal = cv;
+                ExtractStringsFromTypedConstant(attr.ConstructorArguments[1], vAliases);
+            }
+            else if (attr.ConstructorArguments.Length >= 3)
+            {
+                if (attr.ConstructorArguments[0].Value is string pn) paramName = pn;
+                if (attr.ConstructorArguments[1].Value is string cv) canonicalVal = cv;
+                ExtractStringsFromTypedConstant(attr.ConstructorArguments[2], vAliases);
+            }
+
+            if (!string.IsNullOrWhiteSpace(canonicalVal) && vAliases.Count > 0)
+            {
+                valueAliasMappings.Add(new DiscoveredValueAliasMapping(
+                    paramName ?? "*",
+                    canonicalVal!,
+                    new EquatableArray<string>(vAliases.Distinct(StringComparer.OrdinalIgnoreCase).ToArray())));
+            }
+        }
+
+        foreach (var param in methodSymbol.Parameters)
+        {
+            var pAttrs = param.GetAttributes()
+                .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolParameterAliasAttribute" or "Pmad.AI.ToolParameterAliasAttribute");
+
+            var pAliases = new List<string>();
+            foreach (var pa in pAttrs)
+            {
+                foreach (var arg in pa.ConstructorArguments)
+                {
+                    ExtractStringsFromTypedConstant(arg, pAliases);
+                }
+            }
+
+            if (pAliases.Count > 0)
+            {
+                paramMappings.Add(new DiscoveredParamMapping(param.Name, new EquatableArray<string>(pAliases.ToArray())));
+            }
+
+            nestedParamMappings.AddRange(ExtractNestedParamMappings(param));
+            valueAliasMappings.AddRange(ExtractValueAliasesFromParameter(param));
+        }
 
         DiscoveredToolMapping? toolMapping = null;
-        if (aliasAttrs.Count > 0)
+        if (aliasAttrs.Count > 0 || paramValAttrs.Count > 0 || paramMappings.Count > 0 || nestedParamMappings.Count > 0 || valueAliasMappings.Count > 0)
         {
-            string canonicalName = ResolveMethodToolName(methodSymbol, aliasAttrs);
-            var aliases = new List<string>();
-
-            foreach (var attr in aliasAttrs)
-            {
-                foreach (var arg in attr.ConstructorArguments)
-                {
-                    if (arg.Kind == TypedConstantKind.Array)
-                    {
-                        foreach (var elem in arg.Values)
-                        {
-                            if (elem.Value is string s) aliases.Add(s);
-                        }
-                    }
-                }
-            }
-
-            var paramMappings = new List<DiscoveredParamMapping>();
-            var nestedParamMappings = new List<DiscoveredNestedParamMapping>();
-            foreach (var param in methodSymbol.Parameters)
-            {
-                var pAttrs = param.GetAttributes()
-                    .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolParameterAliasAttribute" or "Pmad.AI.ToolParameterAliasAttribute");
-
-                var pAliases = new List<string>();
-                foreach (var pa in pAttrs)
-                {
-                    foreach (var arg in pa.ConstructorArguments)
-                    {
-                        if (arg.Kind == TypedConstantKind.Array)
-                        {
-                            foreach (var elem in arg.Values)
-                            {
-                                if (elem.Value is string s) pAliases.Add(s);
-                            }
-                        }
-                    }
-                }
-
-                if (pAliases.Count > 0)
-                {
-                    paramMappings.Add(new DiscoveredParamMapping(param.Name, new EquatableArray<string>(pAliases.ToArray())));
-                }
-
-                nestedParamMappings.AddRange(ExtractNestedParamMappings(param));
-            }
-
             toolMapping = new DiscoveredToolMapping(
                 canonicalName,
                 new EquatableArray<string>(aliases.ToArray()),
                 new EquatableArray<DiscoveredParamMapping>(paramMappings.ToArray()),
-                new EquatableArray<DiscoveredNestedParamMapping>(nestedParamMappings.ToArray()));
+                new EquatableArray<DiscoveredNestedParamMapping>(nestedParamMappings.ToArray()),
+                new EquatableArray<DiscoveredValueAliasMapping>(valueAliasMappings.ToArray()));
         }
 
         List<DiscoveredTranslation>? translations = null;
@@ -156,6 +183,8 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
             }
         }
 
+        if (toolMapping == null && translations == null) return null;
+
         return (toolMapping, translations);
     }
 
@@ -167,13 +196,15 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
         string? explicitName = null;
         var aliases = new List<string>();
         bool hasToolAlias = false;
+        var valueAliasMappings = new List<DiscoveredValueAliasMapping>();
 
         foreach (var attrList in lambda.AttributeLists)
         {
             foreach (var attr in attrList.Attributes)
             {
                 var attrType = model.GetTypeInfo(attr).Type;
-                if (attrType?.ToDisplayString() is "Pmad.AI.Tools.ToolAliasAttribute" or "Pmad.AI.ToolAliasAttribute")
+                var typeStr = attrType?.ToDisplayString();
+                if (typeStr is "Pmad.AI.Tools.ToolAliasAttribute" or "Pmad.AI.ToolAliasAttribute")
                 {
                     hasToolAlias = true;
                     if (attr.ArgumentList != null)
@@ -193,10 +224,48 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                         }
                     }
                 }
+                else if (typeStr is "Pmad.AI.Tools.ToolParameterValueAliasAttribute" or "Pmad.AI.ToolParameterValueAliasAttribute")
+                {
+                    if (attr.ArgumentList != null)
+                    {
+                        string? paramName = null;
+                        string? canonicalVal = null;
+                        var vAliases = new List<string>();
+                        var args = attr.ArgumentList.Arguments;
+
+                        if (args.Count == 2)
+                        {
+                            var c0 = model.GetConstantValue(args[0].Expression);
+                            if (c0.HasValue && c0.Value is string cv) canonicalVal = cv;
+                            var c1 = model.GetConstantValue(args[1].Expression);
+                            if (c1.HasValue && c1.Value is string s) vAliases.Add(s);
+                        }
+                        else if (args.Count >= 3)
+                        {
+                            var c0 = model.GetConstantValue(args[0].Expression);
+                            if (c0.HasValue && c0.Value is string pn) paramName = pn;
+                            var c1 = model.GetConstantValue(args[1].Expression);
+                            if (c1.HasValue && c1.Value is string cv) canonicalVal = cv;
+                            for (int i = 2; i < args.Count; i++)
+                            {
+                                var ci = model.GetConstantValue(args[i].Expression);
+                                if (ci.HasValue && ci.Value is string s) vAliases.Add(s);
+                            }
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(canonicalVal) && vAliases.Count > 0)
+                        {
+                            valueAliasMappings.Add(new DiscoveredValueAliasMapping(
+                                paramName ?? "*",
+                                canonicalVal!,
+                                new EquatableArray<string>(vAliases.Distinct(StringComparer.OrdinalIgnoreCase).ToArray())));
+                        }
+                    }
+                }
             }
         }
 
-        if (!hasToolAlias) return null;
+        if (!hasToolAlias && valueAliasMappings.Count == 0) return null;
 
         string? canonicalName = explicitName;
         if (string.IsNullOrEmpty(canonicalName))
@@ -237,6 +306,7 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                 if (model.GetDeclaredSymbol(param) is IParameterSymbol paramSymbol)
                 {
                     nestedParamMappings.AddRange(ExtractNestedParamMappings(paramSymbol));
+                    valueAliasMappings.AddRange(ExtractValueAliasesFromParameter(paramSymbol));
                 }
             }
         }
@@ -245,7 +315,8 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
             canonicalName!,
             new EquatableArray<string>(aliases.ToArray()),
             new EquatableArray<DiscoveredParamMapping>(paramMappings.ToArray()),
-            new EquatableArray<DiscoveredNestedParamMapping>(nestedParamMappings.ToArray()));
+            new EquatableArray<DiscoveredNestedParamMapping>(nestedParamMappings.ToArray()),
+            new EquatableArray<DiscoveredValueAliasMapping>(valueAliasMappings.ToArray()));
 
         return (tool, null);
     }
@@ -294,6 +365,20 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                     }
                     foreach (var a in npm.Aliases) pSet.Add(a);
                 }
+                foreach (var vam in tool.ValueAliasMappings)
+                {
+                    if (!builder.ParamValueAliases.TryGetValue(vam.ParamPath, out var valDict))
+                    {
+                        valDict = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+                        builder.ParamValueAliases[vam.ParamPath] = valDict;
+                    }
+                    if (!valDict.TryGetValue(vam.CanonicalValue, out var vSet))
+                    {
+                        vSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        valDict[vam.CanonicalValue] = vSet;
+                    }
+                    foreach (var a in vam.Aliases) vSet.Add(a);
+                }
             }
 
             if (translations != null)
@@ -331,13 +416,13 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
             sb.AppendLine("                    parameterAliases: new Dictionary<string, IEnumerable<string>>(StringComparer.OrdinalIgnoreCase)");
             sb.AppendLine("                    {");
 
-            foreach (var pKvp in tool.ParamAliases)
+            foreach (var pKvp in tool.ParamAliases.OrderBy(k => k.Key, StringComparer.Ordinal))
             {
                 var pName = pKvp.Key;
                 var pAliases = pKvp.Value;
 
                 sb.Append($"                        [\"{EscapeString(pName)}\"] = [");
-                sb.Append(string.Join(", ", pAliases.Select(a => $"\"{EscapeString(a)}\"")));
+                sb.Append(string.Join(", ", pAliases.OrderBy(a => a, StringComparer.Ordinal).Select(a => $"\"{EscapeString(a)}\"")));
                 sb.AppendLine("],");
             }
 
@@ -360,6 +445,30 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                         var pAliases = propKvp.Value;
                         sb.Append($"                            [\"{EscapeString(propName)}\"] = [");
                         sb.Append(string.Join(", ", pAliases.OrderBy(a => a, StringComparer.Ordinal).Select(a => $"\"{EscapeString(a)}\"")));
+                        sb.AppendLine("],");
+                    }
+                    sb.AppendLine("                        },");
+                }
+                sb.Append("                    }");
+            }
+
+            if (tool.ParamValueAliases.Count > 0)
+            {
+                sb.AppendLine(",");
+                sb.AppendLine("                    parameterValueAliases: new Dictionary<string, IDictionary<string, IEnumerable<string>>>(StringComparer.OrdinalIgnoreCase)");
+                sb.AppendLine("                    {");
+                foreach (var pathKvp in tool.ParamValueAliases.OrderBy(k => k.Key, StringComparer.Ordinal))
+                {
+                    var path = pathKvp.Key;
+                    var valDict = pathKvp.Value;
+                    sb.AppendLine($"                        [\"{EscapeString(path)}\"] = new Dictionary<string, IEnumerable<string>>(StringComparer.OrdinalIgnoreCase)");
+                    sb.AppendLine("                        {");
+                    foreach (var valKvp in valDict.OrderBy(k => k.Key, StringComparer.Ordinal))
+                    {
+                        var canonicalVal = valKvp.Key;
+                        var vAliases = valKvp.Value;
+                        sb.Append($"                            [\"{EscapeString(canonicalVal)}\"] = [");
+                        sb.Append(string.Join(", ", vAliases.OrderBy(a => a, StringComparer.Ordinal).Select(a => $"\"{EscapeString(a)}\"")));
                         sb.AppendLine("],");
                     }
                     sb.AppendLine("                        },");
@@ -406,6 +515,7 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
         public HashSet<string> Aliases { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, HashSet<string>> ParamAliases { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, Dictionary<string, HashSet<string>>> NestedParamAliases { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, Dictionary<string, HashSet<string>>> ParamValueAliases { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
     private static string EscapeString(string s) =>
@@ -528,6 +638,221 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
         return list;
     }
 
+    private static List<DiscoveredValueAliasMapping> ExtractValueAliasesFromParameter(IParameterSymbol param)
+    {
+        var list = new List<DiscoveredValueAliasMapping>();
+
+        // 1. Direct [ToolParameterValueAlias] on parameter
+        var pValAttrs = param.GetAttributes()
+            .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolParameterValueAliasAttribute" or "Pmad.AI.ToolParameterValueAliasAttribute");
+        foreach (var pva in pValAttrs)
+        {
+            string paramName = param.Name;
+            string? canonicalVal = null;
+            var vAliases = new List<string>();
+
+            if (pva.ConstructorArguments.Length == 2)
+            {
+                if (pva.ConstructorArguments[0].Value is string cv) canonicalVal = cv;
+                ExtractStringsFromTypedConstant(pva.ConstructorArguments[1], vAliases);
+            }
+            else if (pva.ConstructorArguments.Length >= 3)
+            {
+                if (pva.ConstructorArguments[0].Value is string pn && !string.IsNullOrWhiteSpace(pn)) paramName = pn;
+                if (pva.ConstructorArguments[1].Value is string cv) canonicalVal = cv;
+                ExtractStringsFromTypedConstant(pva.ConstructorArguments[2], vAliases);
+            }
+
+            if (!string.IsNullOrWhiteSpace(canonicalVal) && vAliases.Count > 0)
+            {
+                list.Add(new DiscoveredValueAliasMapping(
+                    paramName,
+                    canonicalVal!,
+                    new EquatableArray<string>(vAliases.Distinct(StringComparer.OrdinalIgnoreCase).ToArray())));
+            }
+        }
+
+        // 2. Direct enum parameter type
+        ExtractEnumMemberValueAliases(param.Type, param.Name, list);
+
+        // 3. Collection of enums or complex types
+        var elemType = UnwrapCollectionElementType(param.Type);
+        if (elemType != null)
+        {
+            ExtractEnumMemberValueAliases(elemType, param.Name + "[]", list);
+        }
+
+        // 4. Complex object properties (either directly or as array element)
+        var targetType = elemType ?? param.Type;
+        var unwrappedTarget = UnwrapNullable(targetType);
+        string basePath = elemType != null ? param.Name + "[]" : param.Name;
+
+        if (unwrappedTarget is INamedTypeSymbol complexType &&
+            complexType.SpecialType == SpecialType.None &&
+            complexType.TypeKind != TypeKind.Enum &&
+            complexType.ContainingNamespace?.ToDisplayString() != "System" &&
+            complexType.ContainingNamespace?.ToDisplayString() != "System.Collections.Generic")
+        {
+            foreach (var member in complexType.GetMembers())
+            {
+                if (member is IPropertySymbol prop)
+                {
+                    string propPath = basePath + "." + prop.Name;
+
+                    ExtractEnumMemberValueAliases(prop.Type, propPath, list);
+                    ExtractEnumMemberValueAliases(prop.Type, prop.Name, list);
+
+                    var propValAttrs = prop.GetAttributes()
+                        .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolParameterValueAliasAttribute" or "Pmad.AI.ToolParameterValueAliasAttribute");
+                    foreach (var pva in propValAttrs)
+                    {
+                        string targetPropPath = propPath;
+                        string targetPropName = prop.Name;
+                        string? canonicalVal = null;
+                        var vAliases = new List<string>();
+                        if (pva.ConstructorArguments.Length == 2)
+                        {
+                            if (pva.ConstructorArguments[0].Value is string cv) canonicalVal = cv;
+                            ExtractStringsFromTypedConstant(pva.ConstructorArguments[1], vAliases);
+                        }
+                        else if (pva.ConstructorArguments.Length >= 3)
+                        {
+                            if (pva.ConstructorArguments[0].Value is string pn && !string.IsNullOrWhiteSpace(pn))
+                            {
+                                targetPropName = pn;
+                                targetPropPath = basePath + "." + pn;
+                            }
+                            if (pva.ConstructorArguments[1].Value is string cv) canonicalVal = cv;
+                            ExtractStringsFromTypedConstant(pva.ConstructorArguments[2], vAliases);
+                        }
+                        if (!string.IsNullOrWhiteSpace(canonicalVal) && vAliases.Count > 0)
+                        {
+                            list.Add(new DiscoveredValueAliasMapping(
+                                targetPropPath,
+                                canonicalVal!,
+                                new EquatableArray<string>(vAliases.Distinct(StringComparer.OrdinalIgnoreCase).ToArray())));
+                            list.Add(new DiscoveredValueAliasMapping(
+                                targetPropName,
+                                canonicalVal!,
+                                new EquatableArray<string>(vAliases.Distinct(StringComparer.OrdinalIgnoreCase).ToArray())));
+                        }
+                    }
+
+                    foreach (var ctor in complexType.Constructors)
+                    {
+                        var ctorParam = ctor.Parameters.FirstOrDefault(p => string.Equals(p.Name, prop.Name, StringComparison.OrdinalIgnoreCase));
+                        if (ctorParam != null)
+                        {
+                            var ctorValAttrs = ctorParam.GetAttributes()
+                                .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolParameterValueAliasAttribute" or "Pmad.AI.ToolParameterValueAliasAttribute");
+                            foreach (var pva in ctorValAttrs)
+                            {
+                                string targetPropPath = propPath;
+                                string targetPropName = prop.Name;
+                                string? canonicalVal = null;
+                                var vAliases = new List<string>();
+                                if (pva.ConstructorArguments.Length == 2)
+                                {
+                                    if (pva.ConstructorArguments[0].Value is string cv) canonicalVal = cv;
+                                    ExtractStringsFromTypedConstant(pva.ConstructorArguments[1], vAliases);
+                                }
+                                else if (pva.ConstructorArguments.Length >= 3)
+                                {
+                                    if (pva.ConstructorArguments[0].Value is string pn && !string.IsNullOrWhiteSpace(pn))
+                                    {
+                                        targetPropName = pn;
+                                        targetPropPath = basePath + "." + pn;
+                                    }
+                                    if (pva.ConstructorArguments[1].Value is string cv) canonicalVal = cv;
+                                    ExtractStringsFromTypedConstant(pva.ConstructorArguments[2], vAliases);
+                                }
+                                if (!string.IsNullOrWhiteSpace(canonicalVal) && vAliases.Count > 0)
+                                {
+                                    list.Add(new DiscoveredValueAliasMapping(
+                                        targetPropPath,
+                                        canonicalVal!,
+                                        new EquatableArray<string>(vAliases.Distinct(StringComparer.OrdinalIgnoreCase).ToArray())));
+                                    list.Add(new DiscoveredValueAliasMapping(
+                                        targetPropName,
+                                        canonicalVal!,
+                                        new EquatableArray<string>(vAliases.Distinct(StringComparer.OrdinalIgnoreCase).ToArray())));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return list;
+    }
+
+    private static void ExtractEnumMemberValueAliases(ITypeSymbol type, string basePath, List<DiscoveredValueAliasMapping> list)
+    {
+        var unwrapped = UnwrapNullable(type);
+        if (unwrapped.TypeKind != TypeKind.Enum) return;
+
+        foreach (var member in unwrapped.GetMembers())
+        {
+            if (member is IFieldSymbol field && field.HasConstantValue)
+            {
+                var valAttrs = field.GetAttributes()
+                    .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolValueAliasAttribute" or "Pmad.AI.ToolValueAliasAttribute");
+
+                var aliases = new List<string>();
+                foreach (var va in valAttrs)
+                {
+                    foreach (var arg in va.ConstructorArguments)
+                    {
+                        ExtractStringsFromTypedConstant(arg, aliases);
+                    }
+                }
+
+                if (aliases.Count > 0)
+                {
+                    list.Add(new DiscoveredValueAliasMapping(
+                        basePath,
+                        field.Name,
+                        new EquatableArray<string>(aliases.Distinct(StringComparer.OrdinalIgnoreCase).ToArray())));
+
+                    if (!string.Equals(basePath, unwrapped.Name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        list.Add(new DiscoveredValueAliasMapping(
+                            unwrapped.Name,
+                            field.Name,
+                            new EquatableArray<string>(aliases.Distinct(StringComparer.OrdinalIgnoreCase).ToArray())));
+                    }
+                }
+            }
+        }
+    }
+
+    private static ITypeSymbol UnwrapNullable(ITypeSymbol type)
+    {
+        if (type is INamedTypeSymbol nts && nts.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T && nts.TypeArguments.Length == 1)
+        {
+            return nts.TypeArguments[0];
+        }
+        return type;
+    }
+
+    private static ITypeSymbol? UnwrapCollectionElementType(ITypeSymbol type)
+    {
+        if (type is IArrayTypeSymbol arrayType)
+        {
+            return arrayType.ElementType;
+        }
+        if (type is INamedTypeSymbol namedType && namedType.IsGenericType && namedType.TypeArguments.Length == 1)
+        {
+            var typeName = namedType.Name;
+            if (typeName is "IEnumerable" or "List" or "IList" or "IReadOnlyList" or "ICollection" or "Collection" or "IReadOnlyCollection" or "HashSet" or "ISet" or "ImmutableArray")
+            {
+                return namedType.TypeArguments[0];
+            }
+        }
+        return null;
+    }
+
     private static List<string> ExtractMemberAliases(IPropertySymbol prop, INamedTypeSymbol containingType)
     {
         var aliases = new List<string>();
@@ -567,21 +892,26 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
         {
             foreach (var arg in pa.ConstructorArguments)
             {
-                if (arg.Kind == TypedConstantKind.Array)
+                ExtractStringsFromTypedConstant(arg, aliases);
+            }
+        }
+    }
+
+    private static void ExtractStringsFromTypedConstant(TypedConstant constant, List<string> strings)
+    {
+        if (constant.Kind == TypedConstantKind.Array)
+        {
+            foreach (var elem in constant.Values)
+            {
+                if (elem.Value is string s && !string.IsNullOrWhiteSpace(s))
                 {
-                    foreach (var elem in arg.Values)
-                    {
-                        if (elem.Value is string s && !string.IsNullOrWhiteSpace(s))
-                        {
-                            aliases.Add(s);
-                        }
-                    }
-                }
-                else if (arg.Value is string singleStr && !string.IsNullOrWhiteSpace(singleStr))
-                {
-                    aliases.Add(singleStr);
+                    strings.Add(s);
                 }
             }
+        }
+        else if (constant.Value is string singleStr && !string.IsNullOrWhiteSpace(singleStr))
+        {
+            strings.Add(singleStr);
         }
     }
 }
