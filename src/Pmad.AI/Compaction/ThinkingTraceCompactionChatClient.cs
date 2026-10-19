@@ -11,9 +11,9 @@ public class ThinkingTraceCompactionOptions : CompactionOptionsBase
     public ThinkingTraceCompactionOptions()
     {
         KeepVerbatimCount = 5;
-        FallbackCharacterLimit = 1500;
-        FallbackPrefixLength = 1000;
-        FallbackSuffixLength = 400;
+        FallbackCharacterLimit = 2500;
+        FallbackPrefixLength = 1800;
+        FallbackSuffixLength = 700;
     }
 
     /// <summary>Optional background SLM summarizer.</summary>

@@ -41,10 +41,6 @@ public static class BenchmarkPipelineBuilder
                 innerClient,
                 new ThinkingTraceCompactionOptions
                 {
-                    KeepVerbatimCount = 5,
-                    FallbackCharacterLimit = 1500,
-                    FallbackPrefixLength = 1000,
-                    FallbackSuffixLength = 400,
                     Telemetry = telemetry
                 }),
 
@@ -52,10 +48,6 @@ public static class BenchmarkPipelineBuilder
                 innerClient,
                 new ToolResultCompactionOptions
                 {
-                    KeepVerbatimCount = 5,
-                    FallbackCharacterLimit = 4500,
-                    FallbackPrefixLength = 2800,
-                    FallbackSuffixLength = 1200,
                     Telemetry = telemetry
                 }),
 
@@ -114,20 +106,12 @@ public static class BenchmarkPipelineBuilder
     {
         var toolOptions = new ToolResultCompactionOptions
         {
-            KeepVerbatimCount = 5,
-            FallbackCharacterLimit = 4500,
-            FallbackPrefixLength = 2800,
-            FallbackSuffixLength = 1200,
             Telemetry = telemetry
         };
         var withToolCompaction = new ToolResultCompactionChatClient(innerClient, toolOptions);
 
         var thinkOptions = new ThinkingTraceCompactionOptions
         {
-            KeepVerbatimCount = 5,
-            FallbackCharacterLimit = 1500,
-            FallbackPrefixLength = 1000,
-            FallbackSuffixLength = 400,
             Summarizer = speculativeSummarizer,
             Telemetry = telemetry
         };
@@ -141,10 +125,6 @@ public static class BenchmarkPipelineBuilder
 
         var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
         {
-            PingPongThreshold = 3,
-            ResetOnUserPrompt = true,
-            NgramMinLength = 4,
-            NgramMinOccurrences = 3,
             Telemetry = breakerTelemetry
         });
         var dispatcher = CreateConfiguredDispatcher();
@@ -171,8 +151,6 @@ public static class BenchmarkPipelineBuilder
             configureBreaker: opts =>
             {
                 opts.Telemetry = breakerTelemetry;
-                opts.NgramMinLength = 4;
-                opts.NgramMinOccurrences = 3;
             },
             configureToolResult: opts =>
             {
@@ -204,8 +182,6 @@ public static class BenchmarkPipelineBuilder
             configureBreaker: opts =>
             {
                 opts.Telemetry = breakerTelemetry;
-                opts.NgramMinLength = 4;
-                opts.NgramMinOccurrences = 3;
             },
             configureThinking: opts =>
             {
@@ -242,8 +218,6 @@ public static class BenchmarkPipelineBuilder
             configureBreaker: opts =>
             {
                 opts.Telemetry = breakerTelemetry;
-                opts.NgramMinLength = 4;
-                opts.NgramMinOccurrences = 3;
             },
             configureThinking: opts =>
             {
@@ -275,10 +249,6 @@ public static class BenchmarkPipelineBuilder
             .UseLenientToolDispatch(dispatcher)
             .UseToolLoopCircuitBreaker(dispatcher, opts =>
             {
-                opts.PingPongThreshold = 3;
-                opts.ResetOnUserPrompt = true;
-                opts.NgramMinLength = 4;
-                opts.NgramMinOccurrences = 3;
                 opts.Telemetry = breakerTelemetry;
             })
             .UseToolCallHealing(dispatcher, opts =>
@@ -299,10 +269,6 @@ public static class BenchmarkPipelineBuilder
         builder
             .UseToolResultCompaction(opts =>
             {
-                opts.KeepVerbatimCount = 5;
-                opts.FallbackCharacterLimit = 4500;
-                opts.FallbackPrefixLength = 2800;
-                opts.FallbackSuffixLength = 1200;
                 opts.Telemetry = telemetry;
             })
             .UseToolCallHealing(opts =>
@@ -335,20 +301,12 @@ public static class BenchmarkPipelineBuilder
         // 2. Tool result compaction (deterministic head/tail truncation)
         current = new ToolResultCompactionChatClient(current, new ToolResultCompactionOptions
         {
-            KeepVerbatimCount = 5,
-            FallbackCharacterLimit = 4500,
-            FallbackPrefixLength = 2800,
-            FallbackSuffixLength = 1200,
             Telemetry = telemetry
         });
 
         // 3. Thinking trace compaction (speculative SLM background summarizer)
         current = new ThinkingTraceCompactionChatClient(current, new ThinkingTraceCompactionOptions
         {
-            KeepVerbatimCount = 5,
-            FallbackCharacterLimit = 1500,
-            FallbackPrefixLength = 1000,
-            FallbackSuffixLength = 400,
             Summarizer = speculativeSummarizer,
             Telemetry = telemetry
         });
@@ -356,10 +314,6 @@ public static class BenchmarkPipelineBuilder
         // 4. Circuit breaker & lenient dispatch
         var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
         {
-            PingPongThreshold = 3,
-            ResetOnUserPrompt = true,
-            NgramMinLength = 4,
-            NgramMinOccurrences = 3,
             Telemetry = breakerTelemetry
         });
         current = new ToolLoopCircuitBreakerChatClient(current, breaker, dispatcher);
