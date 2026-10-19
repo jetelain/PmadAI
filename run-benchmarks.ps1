@@ -295,7 +295,8 @@ try {
             Write-Host "`n[Watchdog] Benchmark completed successfully with exit code 0." -ForegroundColor Green
             break
         } else {
-            Write-Host "`n[Watchdog] Benchmark process exited with non-zero code ($exitCode)." -ForegroundColor Red
+            $hexExit = '0x{0:X8}' -f [int]$exitCode
+            Write-Host "`n[Watchdog] Benchmark process exited with non-zero code $exitCode ($hexExit)." -ForegroundColor Red
             if ($attempt -le $MaxRetries) {
                 Write-Host "[Watchdog] Cooling down 10 seconds before auto-resuming from checkpoint..." -ForegroundColor Yellow
                 Start-Sleep -Seconds 10

@@ -137,7 +137,7 @@ try {
             break
         } else {
             # Format exit code in hex for typical fatal errors (e.g. 0xC0000005)
-            $hexExit = "0x" + ([uint32]$exitCode).ToString("X8")
+            $hexExit = '0x{0:X8}' -f [int]$exitCode
             Write-Host "`n[Watchdog] Benchmark process crashed or terminated with code $exitCode ($hexExit)." -ForegroundColor Red
 
             if ($attempt -le $MaxRetries) {
