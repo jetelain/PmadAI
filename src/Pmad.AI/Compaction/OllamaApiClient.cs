@@ -85,6 +85,8 @@ public class OllamaApiClient : IDisposable
         float? temperature = null,
         int? contextSize = null,
         string? keepAlive = null,
+        int? numGpu = null,
+        TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
         var messages = new List<(string Role, string Content)>(2);
@@ -94,7 +96,7 @@ public class OllamaApiClient : IDisposable
         }
         messages.Add(("user", prompt));
 
-        return await ChatAsync(messages, model, maxTokens, temperature, contextSize, keepAlive, cancellationToken).ConfigureAwait(false);
+        return await ChatAsync(messages, model, maxTokens, temperature, contextSize, keepAlive, numGpu, timeout, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -107,6 +109,8 @@ public class OllamaApiClient : IDisposable
         float? temperature = null,
         int? contextSize = null,
         string? keepAlive = null,
+        int? numGpu = null,
+        TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -123,12 +127,13 @@ public class OllamaApiClient : IDisposable
                 writer.WriteString("keep_alive", keepAlive);
             }
 
-            if (maxTokens.HasValue || temperature.HasValue || contextSize.HasValue)
+            if (maxTokens.HasValue || temperature.HasValue || contextSize.HasValue || numGpu.HasValue)
             {
                 writer.WriteStartObject("options");
                 if (maxTokens.HasValue) writer.WriteNumber("num_predict", maxTokens.Value);
                 if (temperature.HasValue) writer.WriteNumber("temperature", temperature.Value);
                 if (contextSize.HasValue) writer.WriteNumber("num_ctx", contextSize.Value);
+                if (numGpu.HasValue) writer.WriteNumber("num_gpu", numGpu.Value);
                 writer.WriteEndObject();
             }
 
@@ -145,6 +150,11 @@ public class OllamaApiClient : IDisposable
             writer.WriteEndObject();
         }
 
+        var effectiveTimeout = timeout ?? TimeSpan.FromSeconds(30);
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(effectiveTimeout);
+        var ct = timeoutCts.Token;
+
         using var content = new ReadOnlyMemoryContent(bufferWriter.WrittenMemory);
         content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
 
@@ -153,28 +163,18 @@ public class OllamaApiClient : IDisposable
             Content = content
         };
 
-        HttpResponseMessage response;
         try
         {
-            response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogWarning(ex, "Failed to connect to Ollama at {Endpoint}", _chatEndpoint);
-            return null;
-        }
-
-        using (response)
-        {
+            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
-                var errBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-                _logger.LogWarning("Ollama request failed with HTTP {StatusCode}: {Error}", response.StatusCode, errBody);
+                var errBody = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                _logger.LogWarning("Ollama request to {Endpoint} failed with HTTP {StatusCode}: {Error}", _chatEndpoint, response.StatusCode, errBody);
                 return null;
             }
 
-            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+            using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
 
             if (doc.RootElement.TryGetProperty("message", out var msgEl) &&
                 msgEl.TryGetProperty("content", out var contentEl) &&
@@ -183,6 +183,16 @@ public class OllamaApiClient : IDisposable
                 return contentEl.GetString()?.Trim();
             }
 
+            return null;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("Ollama request to {Endpoint} timed out after {Timeout}s", _chatEndpoint, effectiveTimeout.TotalSeconds);
+            return null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to connect or communicate with Ollama at {Endpoint}: {Message}", _chatEndpoint, ex.Message);
             return null;
         }
     }

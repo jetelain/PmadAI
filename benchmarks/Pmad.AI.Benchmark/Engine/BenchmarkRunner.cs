@@ -30,6 +30,7 @@ public sealed class BenchmarkRunner
     private readonly string? _transcriptPath;
     private readonly float? _temperature;
     private readonly long? _seed;
+    private readonly TimeSpan _turnTimeout;
 
     public BenchmarkRunner(
         IChatClient client,
@@ -45,7 +46,8 @@ public sealed class BenchmarkRunner
         string? optimizationConfigLabel = null,
         string? transcriptPath = null,
         float? temperature = null,
-        long? seed = null)
+        long? seed = null,
+        TimeSpan? turnTimeout = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _modelId = modelId ?? throw new ArgumentNullException(nameof(modelId));
@@ -61,6 +63,7 @@ public sealed class BenchmarkRunner
         _transcriptPath = transcriptPath;
         _temperature = temperature;
         _seed = seed;
+        _turnTimeout = turnTimeout ?? TimeSpan.FromMinutes(5);
     }
 
     /// <summary>
@@ -285,12 +288,25 @@ public sealed class BenchmarkRunner
                 toolIterations++;
                 ChatResponse response;
 
+                using var turnCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                turnCts.CancelAfter(_turnTimeout);
+
                 try
                 {
-                    response = await _client.GetResponseAsync(history, chatOptions, cancellationToken);
+                    response = await _client.GetResponseAsync(history, chatOptions, turnCts.Token);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    var msg = $"Turn timed out after {_turnTimeout.TotalMinutes:0.#} minutes awaiting model response.";
+                    Log($"    [ERROR] {msg}");
+                    turnResult.Status = BenchmarkStatus.Failed;
+                    turnResult.ValidationMessage = msg;
+                    scenarioResult.ErrorMessage = msg;
+                    break;
                 }
                 catch (Exception ex)
                 {
+                    Log($"    [ERROR] Client exception during GetResponseAsync: {ex.Message}");
                     turnResult.Status = BenchmarkStatus.Failed;
                     turnResult.ValidationMessage = $"Client exception during GetResponseAsync: {ex.Message}";
                     scenarioResult.ErrorMessage = ex.Message;

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Pmad.AI.Benchmark.Configuration;
 using Pmad.AI.Benchmark.Engine;
 using Pmad.AI.Benchmark.Reporting;
@@ -763,12 +764,17 @@ public static class Program
         try
         {
             var endpoint = new Uri(options.OllamaBaseUrl);
+            var logger = new ConsoleBenchmarkLogger();
+
             return new OllamaSpeculativeSummarizer(new OllamaSpeculativeSummarizerOptions
             {
                 Endpoint = endpoint,
                 Model = "qwen3.5:2b",
-                ContextSize = 4096
-            });
+                ContextSize = 4096,
+                NumGpu = 0,
+                RequestTimeout = TimeSpan.FromSeconds(30),
+                JobTimeout = TimeSpan.FromSeconds(30)
+            }, logger: logger);
         }
         catch (Exception ex)
         {
@@ -828,5 +834,20 @@ public static class Program
         var invalid = Path.GetInvalidFileNameChars();
         var chars = text.ToLowerInvariant().Select(c => invalid.Contains(c) || c == ' ' || c == '/' || c == '\\' || c == ':' ? '-' : c).ToArray();
         return new string(chars).Trim('-');
+    }
+
+    private sealed class ConsoleBenchmarkLogger : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (!IsEnabled(logLevel)) return;
+            var message = formatter(state, exception);
+            Console.ForegroundColor = logLevel >= LogLevel.Error ? ConsoleColor.Red : ConsoleColor.Yellow;
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [{logLevel}] {message}");
+            if (exception != null) Console.WriteLine(exception);
+            Console.ResetColor();
+        }
     }
 }

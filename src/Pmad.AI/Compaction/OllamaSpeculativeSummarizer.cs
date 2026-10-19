@@ -39,6 +39,15 @@ public class OllamaSpeculativeSummarizerOptions
 
     /// <summary>Optional custom system prompt for thinking monologue summarization.</summary>
     public string? ThinkingMonologueSystemPrompt { get; set; }
+
+    /// <summary>Number of GPU layers to offload to Ollama. Default: 0 (CPU-only execution, guaranteeing zero host GPU VRAM contention with primary model).</summary>
+    public int NumGpu { get; set; } = 0;
+
+    /// <summary>Timeout duration for individual speculative summarization network requests. Default: 30 seconds.</summary>
+    public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Timeout duration for individual speculative summarization queue jobs. Default: 30 seconds.</summary>
+    public TimeSpan JobTimeout { get; set; } = TimeSpan.FromSeconds(30);
 }
 
 /// <summary>
@@ -256,12 +265,18 @@ public class OllamaSpeculativeSummarizer : ISpeculativeSummarizer
 
             try
             {
-                var summary = await GenerateSummaryAsync(job, _cts.Token).ConfigureAwait(false);
+                using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+                jobCts.CancelAfter(_options.JobTimeout);
+                var summary = await GenerateSummaryAsync(job, jobCts.Token).ConfigureAwait(false);
                 if (!string.IsNullOrWhiteSpace(summary))
                 {
                     _cache[(job.SessionId, job.ItemKey)] = summary;
                     _logger.LogDebug("Precomputed speculative summary for '{ItemKey}' ({Length} chars)", job.ItemKey, summary.Length);
                 }
+            }
+            catch (OperationCanceledException) when (!_cts.Token.IsCancellationRequested)
+            {
+                _logger.LogWarning("Speculative summarization timed out for item '{ItemKey}' after {Timeout}s", job.ItemKey, _options.JobTimeout.TotalSeconds);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -290,14 +305,24 @@ public class OllamaSpeculativeSummarizer : ISpeculativeSummarizer
             _ => "Summarize the text concisely."
         };
 
+        var promptText = job.RawText;
+        var maxChars = _options.ContextSize * 4;
+        if (promptText.Length > maxChars)
+        {
+            int half = maxChars / 2;
+            promptText = string.Concat(promptText.AsSpan(0, half), "\n... [truncated for summarization] ...\n", promptText.AsSpan(promptText.Length - half));
+        }
+
         var rawSummary = await _client.ChatAsync(
-            prompt: job.RawText,
+            prompt: promptText,
             systemInstruction: systemInstruction,
             model: _options.Model,
             maxTokens: _options.MaxSummaryTokens,
             temperature: _options.Temperature,
             contextSize: _options.ContextSize,
             keepAlive: _options.KeepAlive,
+            numGpu: _options.NumGpu,
+            timeout: _options.RequestTimeout,
             cancellationToken: ct).ConfigureAwait(false);
 
         return rawSummary != null ? CleanSummary(rawSummary) : null;

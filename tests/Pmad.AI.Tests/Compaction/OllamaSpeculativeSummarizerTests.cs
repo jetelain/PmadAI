@@ -488,4 +488,154 @@ public class OllamaSpeculativeSummarizerTests
 
         Assert.Equal("Summary", summary);
     }
+
+    [Fact]
+    public async Task OllamaApiClient_ChatAsync_SerializesNumGpuWhenSpecified()
+    {
+        string? capturedBody = null;
+        var handler = new MockHttpMessageHandler(async req =>
+        {
+            capturedBody = await req.Content!.ReadAsStringAsync();
+            var responseJson = """
+            {
+                "model": "qwen3.5:2b",
+                "message": { "role": "assistant", "content": "OK" },
+                "done": true
+            }
+            """;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+            };
+        });
+
+        using var httpClient = new HttpClient(handler);
+        using var client = new OllamaApiClient(new Uri("http://localhost:11434"), "qwen3.5:2b", httpClient);
+
+        var result = await client.ChatAsync("test", numGpu: 0);
+
+        Assert.Equal("OK", result);
+        Assert.NotNull(capturedBody);
+        using var doc = JsonDocument.Parse(capturedBody);
+        Assert.Equal(0, doc.RootElement.GetProperty("options").GetProperty("num_gpu").GetInt32());
+    }
+
+    [Fact]
+    public async Task OllamaApiClient_ChatAsync_TimesOutGracefully()
+    {
+        var handler = new MockHttpMessageHandler(async req =>
+        {
+            await Task.Delay(1500); // Exceeds 200ms timeout
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{}", Encoding.UTF8, "application/json")
+            };
+        });
+
+        using var httpClient = new HttpClient(handler);
+        using var client = new OllamaApiClient(new Uri("http://localhost:11434"), "qwen3.5:2b", httpClient);
+
+        var result = await client.ChatAsync("test", timeout: TimeSpan.FromMilliseconds(200));
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task ProcessQueueAsync_JobTimesOut_AdvancesQueueWithoutHanging()
+    {
+        int callCount = 0;
+        var handler = new MockHttpMessageHandler(async req =>
+        {
+            var body = await req.Content!.ReadAsStringAsync();
+            Interlocked.Increment(ref callCount);
+
+            if (body.Contains("hanging_job"))
+            {
+                await Task.Delay(2000); // Simulates hung Ollama
+            }
+
+            var responseJson = """
+            {
+                "model": "qwen3.5:2b",
+                "message": { "role": "assistant", "content": "FastSummary" },
+                "done": true
+            }
+            """;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+            };
+        });
+
+        using var httpClient = new HttpClient(handler);
+        await using var summarizer = new OllamaSpeculativeSummarizer(
+            new OllamaSpeculativeSummarizerOptions
+            {
+                JobTimeout = TimeSpan.FromMilliseconds(200),
+                RequestTimeout = TimeSpan.FromMilliseconds(200)
+            },
+            httpClient);
+
+        summarizer.EnqueueSummarization("s1", "k_slow", SummarizationTarget.ToolResult, "hanging_job text");
+        summarizer.EnqueueSummarization("s1", "k_fast", SummarizationTarget.ToolResult, "fast text");
+
+        string? fastSummary = null;
+        for (int i = 0; i < 40; i++)
+        {
+            if (summarizer.TryGetSummary("s1", "k_fast", out fastSummary))
+            {
+                break;
+            }
+            await Task.Delay(50);
+        }
+
+        Assert.Equal("FastSummary", fastSummary);
+        Assert.False(summarizer.TryGetSummary("s1", "k_slow", out _));
+    }
+
+    [Fact]
+    public async Task GenerateSummaryAsync_ClampsOversizedInputText()
+    {
+        string? capturedBody = null;
+        var handler = new MockHttpMessageHandler(async req =>
+        {
+            capturedBody = await req.Content!.ReadAsStringAsync();
+            var responseJson = """
+            {
+                "model": "qwen3.5:2b",
+                "message": { "role": "assistant", "content": "ClampedSummary" },
+                "done": true
+            }
+            """;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+            };
+        });
+
+        using var httpClient = new HttpClient(handler);
+        await using var summarizer = new OllamaSpeculativeSummarizer(
+            new OllamaSpeculativeSummarizerOptions
+            {
+                ContextSize = 100 // 100 tokens -> max 400 chars
+            },
+            httpClient);
+
+        var largeText = new string('A', 2000);
+        summarizer.EnqueueSummarization("s1", "k_large", SummarizationTarget.ToolResult, largeText);
+
+        string? summary = null;
+        for (int i = 0; i < 40; i++)
+        {
+            if (summarizer.TryGetSummary("s1", "k_large", out summary))
+            {
+                break;
+            }
+            await Task.Delay(50);
+        }
+
+        Assert.Equal("ClampedSummary", summary);
+        Assert.NotNull(capturedBody);
+        Assert.Contains("[truncated for summarization]", capturedBody);
+    }
 }

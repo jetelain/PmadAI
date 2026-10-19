@@ -77,6 +77,7 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
 {
     private readonly VerbatimTranscriptOptions _options;
     private readonly ConcurrentDictionary<string, SessionTranscriptState> _sessions = new(StringComparer.Ordinal);
+    private readonly List<string> _sessionOrder = [];
     private bool _disposed;
 
     private sealed class SessionTranscriptState
@@ -268,7 +269,17 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
 
     private SessionTranscriptState GetOrCreateState(string sessionId)
     {
-        return _sessions.GetOrAdd(sessionId, _ => new SessionTranscriptState());
+        return _sessions.GetOrAdd(sessionId, id =>
+        {
+            lock (_sessionOrder)
+            {
+                if (!_sessionOrder.Contains(id))
+                {
+                    _sessionOrder.Add(id);
+                }
+            }
+            return new SessionTranscriptState();
+        });
     }
 
     private void CapturePristineInputs(SessionTranscriptState state, IEnumerable<ChatMessage> chatMessages, ChatOptions? options)
@@ -621,10 +632,15 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
     public string ToMarkdown()
     {
         var sb = new StringBuilder();
-        var sessions = _sessions.ToArray();
-
-        foreach (var (sessionId, state) in sessions)
+        List<string> orderedKeys;
+        lock (_sessionOrder)
         {
+            orderedKeys = [.. _sessionOrder];
+        }
+
+        foreach (var sessionId in orderedKeys)
+        {
+            if (!_sessions.TryGetValue(sessionId, out var state)) continue;
             lock (state.Lock)
             {
                 // Frontmatter
