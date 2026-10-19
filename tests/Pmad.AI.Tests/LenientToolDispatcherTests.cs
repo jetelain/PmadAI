@@ -343,6 +343,315 @@ public class LenientToolDispatcherTests
         Assert.Equal("Fast", dispatched.Arguments["mode"]);
     }
 
+    public record TestEditChunk(string OldText, string NewText);
+
+    [Fact]
+    public async Task NormalizeCall_DeepSchemaRenamesNestedSnakeCaseProperties()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (List<TestEditChunk> edits) => $"Applied {edits.Count} edits: {edits[0].OldText} -> {edits[0].NewText}",
+            "apply_edits");
+
+        dispatcher.RegisterTool(tool);
+
+        var json = "{\"edits\": [{\"old_text\": \"hello\", \"new_text\": \"world\"}]}";
+        var dispatched = dispatcher.NormalizeCall("apply_edits", json);
+
+        Assert.Equal("apply_edits", dispatched.CanonicalToolName);
+        var result = await tool.InvokeAsync(dispatched.Arguments);
+        Assert.Equal("Applied 1 edits: hello -> world", result?.ToString());
+    }
+
+    [Fact]
+    public async Task NormalizeCall_DeepSchemaParsesStringifiedJsonAndRenamesNestedAliases()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["apply_edits"] = new ToolMapping(
+                    nestedParameterAliases: new Dictionary<string, IDictionary<string, IEnumerable<string>>>
+                    {
+                        ["edits[]"] = new Dictionary<string, IEnumerable<string>>
+                        {
+                            ["OldText"] = ["targetContent", "search"],
+                            ["NewText"] = ["replacementContent", "replace"]
+                        }
+                    })
+            }
+        });
+
+        var tool = AIFunctionFactory.Create(
+            (List<TestEditChunk> edits) => $"{edits[0].OldText} => {edits[0].NewText}",
+            "apply_edits");
+
+        dispatcher.RegisterTool(tool);
+
+        // Stringified JSON array with aliases
+        var json = "{\"edits\": \"[{\\\"targetContent\\\": \\\"search_pattern\\\", \\\"replacementContent\\\": \\\"replaced_text\\\"}]\"}";
+        var dispatched = dispatcher.NormalizeCall("apply_edits", json);
+
+        var result = await tool.InvokeAsync(dispatched.Arguments);
+        Assert.Equal("search_pattern => replaced_text", result?.ToString());
+    }
+
+    [Fact]
+    public void NormalizeCall_EvaluatesComputedParametersForLineSlicing()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["slice_lines"] = new ToolMapping(
+                    computedParameters: new Dictionary<string, ParameterComputer>
+                    {
+                        ["offset"] = raw => raw.TryGetValue("start_line", out var sl) && sl != null ? Convert.ToInt32(sl) : null,
+                        ["limit"] = raw =>
+                        {
+                            if (raw.TryGetValue("start_line", out var sl) && raw.TryGetValue("end_line", out var el) && sl != null && el != null)
+                            {
+                                return Convert.ToInt32(el) - Convert.ToInt32(sl) + 1;
+                            }
+                            return null;
+                        }
+                    })
+            }
+        });
+
+        dispatcher.RegisterTool(AIFunctionFactory.Create(
+            (int offset, int limit) => $"{offset}:{limit}",
+            "slice_lines"));
+
+        var dispatched = dispatcher.NormalizeCall("slice_lines", "{\"start_line\": 10, \"end_line\": 25}");
+
+        Assert.Equal(10, dispatched.Arguments["offset"]);
+        Assert.Equal(16, dispatched.Arguments["limit"]);
+    }
+
+    [Fact]
+    public async Task LenientAIFunction_NormalizesArgumentsBeforeDirectInvocation()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["read_file"] = new ToolMapping(
+                    parameterAliases: new Dictionary<string, IEnumerable<string>>
+                    {
+                        ["path"] = ["filePath", "file_path"]
+                    })
+            }
+        });
+
+        var baseTool = AIFunctionFactory.Create(
+            (string path) => $"Read: {path}",
+            "read_file");
+
+        dispatcher.RegisterTool(baseTool);
+
+        var lenientTool = baseTool.AsLenient(dispatcher);
+
+        var args = new AIFunctionArguments { ["filePath"] = "src/main.cs" };
+        var result = await lenientTool.InvokeAsync(args);
+
+        Assert.Equal("Read: src/main.cs", result?.ToString());
+    }
+
+    [Fact]
+    public async Task LenientAIFunction_CatchesExecutionExceptionsGracefully()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var baseTool = AIFunctionFactory.Create(
+            string (string path) => throw new FileNotFoundException($"File not found: {path}"),
+            "read_file");
+
+        var lenientTool = baseTool.AsLenient(dispatcher);
+        var result = await lenientTool.InvokeAsync(new AIFunctionArguments { ["path"] = "missing.txt" });
+
+        var str = result?.ToString();
+        Assert.NotNull(str);
+        Assert.StartsWith("Error executing tool 'read_file':", str);
+        Assert.Contains("File not found: missing.txt", str);
+    }
+
+    [Fact]
+    public async Task NormalizeCall_DoesNotConvertJsonStringToDictionary_WhenSchemaExpectsString()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (string path, string content) => $"Wrote {content.Length} chars to {path}: {content}",
+            "write_file");
+
+        dispatcher.RegisterTool(tool);
+
+        var json = "{\"path\": \"appsettings.json\", \"content\": \"{\\\"logging\\\": true}\"}";
+        var dispatched = dispatcher.NormalizeCall("write_file", json);
+
+        Assert.IsType<string>(dispatched.Arguments["content"]);
+        var result = await tool.InvokeAsync(dispatched.Arguments);
+        Assert.Equal("Wrote 17 chars to appsettings.json: {\"logging\": true}", result?.ToString());
+    }
+
+    [Fact]
+    public async Task NormalizeCall_WrapsSingleObjectShortcutIntoArray_WhenSchemaExpectsArray()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (List<TestEditChunk> edits) => $"Applied {edits.Count} edits: {edits[0].OldText} -> {edits[0].NewText}",
+            "apply_edits");
+
+        dispatcher.RegisterTool(tool);
+
+        var json = "{\"edits\": {\"old_text\": \"foo\", \"new_text\": \"bar\"}}";
+        var dispatched = dispatcher.NormalizeCall("apply_edits", json);
+
+        var result = await tool.InvokeAsync(dispatched.Arguments);
+        Assert.Equal("Applied 1 edits: foo -> bar", result?.ToString());
+    }
+
+    [Fact]
+    public async Task NormalizeCall_ResolvesNullableComplexParameterSchemas()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (TestEditChunk? chunk) => chunk != null ? $"{chunk.OldText} => {chunk.NewText}" : "none",
+            "process_chunk");
+
+        dispatcher.RegisterTool(tool);
+
+        var json = "{\"chunk\": {\"old_text\": \"hello\", \"new_text\": \"world\"}}";
+        var dispatched = dispatcher.NormalizeCall("process_chunk", json);
+
+        var result = await tool.InvokeAsync(dispatched.Arguments);
+        Assert.Equal("hello => world", result?.ToString());
+    }
+
+    [Fact]
+    public void NormalizeCall_ComputerExceptionSafetyAndCaseInsensitivity()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["slice_lines"] = new ToolMapping(
+                    computedParameters: new Dictionary<string, ParameterComputer>
+                    {
+                        ["offset"] = raw => raw.TryGetValue("start_line", out var sl) && sl != null ? Convert.ToInt32(sl) : null,
+                        ["limit"] = raw =>
+                        {
+                            if (raw.TryGetValue("start_line", out var sl) && raw.TryGetValue("end_line", out var el) && sl != null && el != null)
+                            {
+                                return Convert.ToInt32(el) - Convert.ToInt32(sl) + 1;
+                            }
+                            return null;
+                        },
+                        ["buggy"] = raw => throw new InvalidOperationException("boom")
+                    })
+            }
+        });
+
+        dispatcher.RegisterTool(AIFunctionFactory.Create(
+            (int offset, int limit) => $"{offset}:{limit}",
+            "slice_lines"));
+
+        // Case-insensitive raw argument keys ("Start_Line" and "END_LINE")
+        var dispatched = dispatcher.NormalizeCall("slice_lines", "{\"Start_Line\": 5, \"END_LINE\": 15}");
+
+        Assert.Equal(5, dispatched.Arguments["offset"]);
+        Assert.Equal(11, dispatched.Arguments["limit"]);
+        Assert.False(dispatched.Arguments.ContainsKey("buggy"));
+    }
+
+    [Fact]
+    public void Validate_DoesNotWarn_OnNestedPropertyPaths()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["apply_edits"] = new ToolMapping(
+                    nestedParameterAliases: new Dictionary<string, IDictionary<string, IEnumerable<string>>>
+                    {
+                        ["edits[].chunk"] = new Dictionary<string, IEnumerable<string>>
+                        {
+                            ["OldText"] = ["targetContent"]
+                        }
+                    })
+            }
+        });
+
+        dispatcher.RegisterTool(AIFunctionFactory.Create(
+            (List<TestEditChunk> edits) => edits.Count,
+            "apply_edits"));
+
+        var report = dispatcher.Validate(throwOnError: false);
+        Assert.True(report.IsValid);
+        Assert.DoesNotContain(report.Issues, i => i.Message.Contains("non-existent root parameter"));
+    }
+
+    [Fact]
+    public async Task LenientAIFunction_AutoRegistersSchema_WhenNotRegisteredBeforehand()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        // Do NOT call dispatcher.RegisterTool
+        var baseTool = AIFunctionFactory.Create(
+            (List<TestEditChunk> edits) => $"Processed: {edits[0].OldText}",
+            "auto_reg_edits");
+
+        var lenientTool = baseTool.AsLenient(dispatcher);
+
+        var args = new AIFunctionArguments
+        {
+            ["edits"] = new List<Dictionary<string, object?>>
+            {
+                new() { ["old_text"] = "unregistered_auto_cached" }
+            }
+        };
+
+        var result = await lenientTool.InvokeAsync(args);
+        Assert.Equal("Processed: unregistered_auto_cached", result?.ToString());
+    }
+
+    [Fact]
+    public async Task LenientAIFunction_DispatchesToTargetTool_WhenTranslated()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Translations =
+            [
+                new ToolTranslation
+                {
+                    SourceTool = "virtual_grep",
+                    TargetTool = "bash",
+                    CommandTemplate = "grep {pattern} {path}"
+                }
+            ]
+        });
+
+        var bashTool = AIFunctionFactory.Create(
+            (string command) => $"Executed bash: {command}",
+            "bash");
+        dispatcher.RegisterTool(bashTool);
+
+        var virtualGrep = AIFunctionFactory.Create(
+            (string pattern, string path) => "raw grep",
+            "virtual_grep");
+
+        var lenientTool = virtualGrep.AsLenient(dispatcher);
+
+        var args = new AIFunctionArguments { ["pattern"] = "antigravity", ["path"] = "main.cs" };
+        var result = await lenientTool.InvokeAsync(args);
+
+        Assert.Equal("Executed bash: grep 'antigravity' 'main.cs'", result?.ToString());
+    }
+
     private class FakePipelineChatClient : IChatClient
     {
         private readonly Func<IEnumerable<ChatMessage>, ChatOptions?, CancellationToken, Task<ChatResponse>> _getResponse;

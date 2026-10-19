@@ -113,6 +113,15 @@ public static class Program
         }
         Console.WriteLine("✓ LenientToolDispatcher and AIFunction AOT dispatch verified");
 
+        // 4b. LenientAIFunction direct invocation in AOT
+        var lenientSearch = searchFunc.AsLenient(dispatcher);
+        var directResult = await lenientSearch.InvokeAsync(new AIFunctionArguments { ["q"] = "csharp", ["limit"] = 3 });
+        if (directResult?.ToString() != "Results for csharp (3)")
+        {
+            throw new InvalidOperationException($"LenientAIFunction direct invocation unexpected: {directResult}");
+        }
+        Console.WriteLine("✓ LenientAIFunction verified");
+
         // 5. Compaction (ThinkingTrace & ToolResult)
         var compactor = new ToolResultCompactor(new ToolResultCompactionOptions
         {

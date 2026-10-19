@@ -14,10 +14,16 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
     private sealed record DiscoveredToolMapping(
         string CanonicalName,
         EquatableArray<string> Aliases,
-        EquatableArray<DiscoveredParamMapping> ParamMappings);
+        EquatableArray<DiscoveredParamMapping> ParamMappings,
+        EquatableArray<DiscoveredNestedParamMapping> NestedParamMappings);
 
     private sealed record DiscoveredParamMapping(
         string CanonicalParam,
+        EquatableArray<string> Aliases);
+
+    private sealed record DiscoveredNestedParamMapping(
+        string ParamPath,
+        string PropertyName,
         EquatableArray<string> Aliases);
 
     private sealed record DiscoveredTranslation(
@@ -90,6 +96,7 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
             }
 
             var paramMappings = new List<DiscoveredParamMapping>();
+            var nestedParamMappings = new List<DiscoveredNestedParamMapping>();
             foreach (var param in methodSymbol.Parameters)
             {
                 var pAttrs = param.GetAttributes()
@@ -114,12 +121,15 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                 {
                     paramMappings.Add(new DiscoveredParamMapping(param.Name, new EquatableArray<string>(pAliases.ToArray())));
                 }
+
+                nestedParamMappings.AddRange(ExtractNestedParamMappings(param));
             }
 
             toolMapping = new DiscoveredToolMapping(
                 canonicalName,
                 new EquatableArray<string>(aliases.ToArray()),
-                new EquatableArray<DiscoveredParamMapping>(paramMappings.ToArray()));
+                new EquatableArray<DiscoveredParamMapping>(paramMappings.ToArray()),
+                new EquatableArray<DiscoveredNestedParamMapping>(nestedParamMappings.ToArray()));
         }
 
         List<DiscoveredTranslation>? translations = null;
@@ -197,6 +207,7 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
         if (string.IsNullOrEmpty(canonicalName)) return null;
 
         var paramMappings = new List<DiscoveredParamMapping>();
+        var nestedParamMappings = new List<DiscoveredNestedParamMapping>();
         if (lambda.ParameterList != null)
         {
             foreach (var param in lambda.ParameterList.Parameters)
@@ -222,13 +233,19 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                 {
                     paramMappings.Add(new DiscoveredParamMapping(param.Identifier.Text, new EquatableArray<string>(pAliases.ToArray())));
                 }
+
+                if (model.GetDeclaredSymbol(param) is IParameterSymbol paramSymbol)
+                {
+                    nestedParamMappings.AddRange(ExtractNestedParamMappings(paramSymbol));
+                }
             }
         }
 
         var tool = new DiscoveredToolMapping(
             canonicalName!,
             new EquatableArray<string>(aliases.ToArray()),
-            new EquatableArray<DiscoveredParamMapping>(paramMappings.ToArray()));
+            new EquatableArray<DiscoveredParamMapping>(paramMappings.ToArray()),
+            new EquatableArray<DiscoveredNestedParamMapping>(nestedParamMappings.ToArray()));
 
         return (tool, null);
     }
@@ -262,6 +279,20 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                         builder.ParamAliases[pm.CanonicalParam] = pSet;
                     }
                     foreach (var a in pm.Aliases) pSet.Add(a);
+                }
+                foreach (var npm in tool.NestedParamMappings)
+                {
+                    if (!builder.NestedParamAliases.TryGetValue(npm.ParamPath, out var propDict))
+                    {
+                        propDict = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+                        builder.NestedParamAliases[npm.ParamPath] = propDict;
+                    }
+                    if (!propDict.TryGetValue(npm.PropertyName, out var pSet))
+                    {
+                        pSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        propDict[npm.PropertyName] = pSet;
+                    }
+                    foreach (var a in npm.Aliases) pSet.Add(a);
                 }
             }
 
@@ -310,7 +341,33 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                 sb.AppendLine("],");
             }
 
-            sb.AppendLine("                    }),");
+            sb.Append("                    }");
+
+            if (tool.NestedParamAliases.Count > 0)
+            {
+                sb.AppendLine(",");
+                sb.AppendLine("                    nestedParameterAliases: new Dictionary<string, IDictionary<string, IEnumerable<string>>>(StringComparer.OrdinalIgnoreCase)");
+                sb.AppendLine("                    {");
+                foreach (var pathKvp in tool.NestedParamAliases.OrderBy(k => k.Key, StringComparer.Ordinal))
+                {
+                    var path = pathKvp.Key;
+                    var propDict = pathKvp.Value;
+                    sb.AppendLine($"                        [\"{EscapeString(path)}\"] = new Dictionary<string, IEnumerable<string>>(StringComparer.OrdinalIgnoreCase)");
+                    sb.AppendLine("                        {");
+                    foreach (var propKvp in propDict.OrderBy(k => k.Key, StringComparer.Ordinal))
+                    {
+                        var propName = propKvp.Key;
+                        var pAliases = propKvp.Value;
+                        sb.Append($"                            [\"{EscapeString(propName)}\"] = [");
+                        sb.Append(string.Join(", ", pAliases.OrderBy(a => a, StringComparer.Ordinal).Select(a => $"\"{EscapeString(a)}\"")));
+                        sb.AppendLine("],");
+                    }
+                    sb.AppendLine("                        },");
+                }
+                sb.Append("                    }");
+            }
+
+            sb.AppendLine("),");
         }
 
         sb.AppendLine("            },");
@@ -348,6 +405,7 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
         public string Name { get; } = name;
         public HashSet<string> Aliases { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, HashSet<string>> ParamAliases { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, Dictionary<string, HashSet<string>>> NestedParamAliases { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
     private static string EscapeString(string s) =>
@@ -418,6 +476,113 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
             parent = parent.Parent;
         }
         return null;
+    }
+
+    private static List<DiscoveredNestedParamMapping> ExtractNestedParamMappings(IParameterSymbol param)
+    {
+        var list = new List<DiscoveredNestedParamMapping>();
+        ITypeSymbol targetType = param.Type;
+        string path = param.Name;
+
+        if (targetType is IArrayTypeSymbol arrayType)
+        {
+            targetType = arrayType.ElementType;
+            path = param.Name + "[]";
+        }
+        else if (targetType is INamedTypeSymbol namedType && namedType.IsGenericType && namedType.TypeArguments.Length == 1)
+        {
+            var typeName = namedType.Name;
+            if (typeName is "IEnumerable" or "List" or "IList" or "IReadOnlyList" or "ICollection" or "Collection" or "IReadOnlyCollection" or "HashSet" or "ISet" or "ImmutableArray")
+            {
+                targetType = namedType.TypeArguments[0];
+                path = param.Name + "[]";
+            }
+        }
+
+        if (targetType is INamedTypeSymbol complexType &&
+            complexType.SpecialType == SpecialType.None &&
+            complexType.ContainingNamespace?.ToDisplayString() != "System" &&
+            complexType.ContainingNamespace?.ToDisplayString() != "System.Collections.Generic")
+        {
+            foreach (var member in complexType.GetMembers())
+            {
+                if (member is IPropertySymbol prop)
+                {
+                    var aliases = ExtractMemberAliases(prop, complexType);
+                    if (aliases.Count > 0)
+                    {
+                        list.Add(new DiscoveredNestedParamMapping(path, prop.Name, new EquatableArray<string>(aliases.ToArray())));
+                    }
+                }
+                else if (member is IFieldSymbol field)
+                {
+                    var aliases = ExtractFieldAliases(field);
+                    if (aliases.Count > 0)
+                    {
+                        list.Add(new DiscoveredNestedParamMapping(path, field.Name, new EquatableArray<string>(aliases.ToArray())));
+                    }
+                }
+            }
+        }
+
+        return list;
+    }
+
+    private static List<string> ExtractMemberAliases(IPropertySymbol prop, INamedTypeSymbol containingType)
+    {
+        var aliases = new List<string>();
+
+        // 1. Direct attributes on property
+        var propAttrs = prop.GetAttributes()
+            .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolParameterAliasAttribute" or "Pmad.AI.ToolParameterAliasAttribute");
+        ExtractAliasesFromAttributes(propAttrs, aliases);
+
+        // 2. Primary constructor parameter attributes if record / primary ctor
+        foreach (var ctor in containingType.Constructors)
+        {
+            var ctorParam = ctor.Parameters.FirstOrDefault(p => string.Equals(p.Name, prop.Name, StringComparison.OrdinalIgnoreCase));
+            if (ctorParam != null)
+            {
+                var paramAttrs = ctorParam.GetAttributes()
+                    .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolParameterAliasAttribute" or "Pmad.AI.ToolParameterAliasAttribute");
+                ExtractAliasesFromAttributes(paramAttrs, aliases);
+            }
+        }
+
+        return aliases.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static List<string> ExtractFieldAliases(IFieldSymbol field)
+    {
+        var aliases = new List<string>();
+        var fieldAttrs = field.GetAttributes()
+            .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolParameterAliasAttribute" or "Pmad.AI.ToolParameterAliasAttribute");
+        ExtractAliasesFromAttributes(fieldAttrs, aliases);
+        return aliases.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static void ExtractAliasesFromAttributes(IEnumerable<AttributeData> attributes, List<string> aliases)
+    {
+        foreach (var pa in attributes)
+        {
+            foreach (var arg in pa.ConstructorArguments)
+            {
+                if (arg.Kind == TypedConstantKind.Array)
+                {
+                    foreach (var elem in arg.Values)
+                    {
+                        if (elem.Value is string s && !string.IsNullOrWhiteSpace(s))
+                        {
+                            aliases.Add(s);
+                        }
+                    }
+                }
+                else if (arg.Value is string singleStr && !string.IsNullOrWhiteSpace(singleStr))
+                {
+                    aliases.Add(singleStr);
+                }
+            }
+        }
     }
 }
 

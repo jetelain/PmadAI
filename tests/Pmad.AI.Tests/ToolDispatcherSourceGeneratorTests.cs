@@ -306,5 +306,90 @@ public class ToolDispatcherSourceGeneratorTests
         var generatedText = generatedTree.GetText().ToString();
         Assert.Contains(""""CommandTemplate = "line1\nline2\r\nline3 \"quotes\"","""", generatedText);
     }
+
+    [Fact]
+    public void Generator_EmitsNestedParameterAliases_ForComplexRecordParameters()
+    {
+        var source = """
+        using System.Collections.Generic;
+        using Pmad.AI;
+        using Pmad.AI.Tools;
+
+        public record EditChunk(
+            [property: ToolParameterAlias("old_text", "search")] string OldText,
+            [property: ToolParameterAlias("new_text", "replace")] string NewText);
+
+        public static class MyTools
+        {
+            [ToolAlias("apply_edits", Name = "apply_edits")]
+            public static void ApplyEdits(List<EditChunk> edits)
+            {
+            }
+        }
+        """;
+
+        var compilation = CreateCompilation(source);
+        var generator = new ToolDispatcherGenerator();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generator);
+
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var runResult = driver.GetRunResult();
+        Assert.Single(runResult.GeneratedTrees);
+
+        var generatedText = runResult.GeneratedTrees[0].GetText().ToString();
+        Assert.Contains("nestedParameterAliases:", generatedText);
+        Assert.Contains("[\"edits[]\"]", generatedText);
+        Assert.Contains("[\"OldText\"]", generatedText);
+        Assert.Contains("\"old_text\"", generatedText);
+        Assert.Contains("\"search\"", generatedText);
+        Assert.Contains("[\"NewText\"]", generatedText);
+        Assert.Contains("\"new_text\"", generatedText);
+        Assert.Contains("\"replace\"", generatedText);
+    }
+
+    [Fact]
+    public void Generator_EmitsDeterministicNestedAliases_ForIReadOnlyListAndMultipleParameters()
+    {
+        var source = """
+        using System.Collections.Generic;
+        using Pmad.AI;
+        using Pmad.AI.Tools;
+
+        public record QuestionItem(
+            [property: ToolParameterAlias("prompt", "text")] string Question,
+            [property: ToolParameterAlias("why", "explanation")] string Rationale);
+
+        public static class AgentTools
+        {
+            [ToolAlias("ask_questions", Name = "ask_questions")]
+            public static void Ask(IReadOnlyList<QuestionItem> questions)
+            {
+            }
+        }
+        """;
+
+        var compilation = CreateCompilation(source);
+        var generator = new ToolDispatcherGenerator();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generator);
+
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var runResult = driver.GetRunResult();
+        Assert.Single(runResult.GeneratedTrees);
+
+        var generatedText = runResult.GeneratedTrees[0].GetText().ToString();
+        Assert.Contains("[\"questions[]\"]", generatedText);
+        Assert.Contains("[\"Question\"]", generatedText);
+        Assert.Contains("\"prompt\"", generatedText);
+        Assert.Contains("\"text\"", generatedText);
+        Assert.Contains("[\"Rationale\"]", generatedText);
+        Assert.Contains("\"why\"", generatedText);
+        Assert.Contains("\"explanation\"", generatedText);
+    }
 }
 

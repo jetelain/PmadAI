@@ -24,10 +24,10 @@ public sealed class ToolAliasAttribute : Attribute
 }
 
 /// <summary>
-/// Declares parameter aliases for a method parameter or lambda parameter.
+/// Declares parameter or nested property aliases.
 /// Consumed at compile time by the Pmad.AI.SourceGenerators package.
 /// </summary>
-[AttributeUsage(AttributeTargets.Parameter, AllowMultiple = true)]
+[AttributeUsage(AttributeTargets.Parameter | AttributeTargets.Property | AttributeTargets.Field, AllowMultiple = true)]
 public sealed class ToolParameterAliasAttribute(params string[] aliases) : Attribute
 {
     public string[] Aliases => aliases;
