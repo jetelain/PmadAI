@@ -217,8 +217,8 @@ public class CompactionTests
         var msg1 = new ChatMessage(ChatRole.Assistant, [new TextReasoningContent("Reasoning sample text")]);
         var msg2 = new ChatMessage(ChatRole.Assistant, [new TextReasoningContent("Reasoning sample text")]);
 
-        var key1 = CompactionItemKeyResolver.ResolveItemKey(msg1, SummarizationTarget.ThinkingMonologue, "Reasoning sample text");
-        var key2 = CompactionItemKeyResolver.ResolveItemKey(msg2, SummarizationTarget.ThinkingMonologue, "Reasoning sample text");
+        var key1 = CompactionItemKeyResolver.ResolveItemKey(msg1, CompactionTarget.ThinkingMonologue, "Reasoning sample text");
+        var key2 = CompactionItemKeyResolver.ResolveItemKey(msg2, CompactionTarget.ThinkingMonologue, "Reasoning sample text");
 
         Assert.Equal(key1, key2);
 
@@ -227,7 +227,7 @@ public class CompactionTests
         {
             AdditionalProperties = new AdditionalPropertiesDictionary { ["id"] = "explicit_123" }
         };
-        var explicitKey = CompactionItemKeyResolver.ResolveItemKey(msgWithId, SummarizationTarget.ThinkingMonologue, "Test");
+        var explicitKey = CompactionItemKeyResolver.ResolveItemKey(msgWithId, CompactionTarget.ThinkingMonologue, "Test");
         Assert.Equal("explicit_123", explicitKey);
     }
 
@@ -240,8 +240,8 @@ public class CompactionTests
             new FunctionResultContent("call_b", "B")
         ]);
 
-        var keyA = CompactionItemKeyResolver.ResolveItemKey(msg, SummarizationTarget.ToolResult, "A", "call_a");
-        var keyB = CompactionItemKeyResolver.ResolveItemKey(msg, SummarizationTarget.ToolResult, "B", "call_b");
+        var keyA = CompactionItemKeyResolver.ResolveItemKey(msg, CompactionTarget.ToolResult, "A", "call_a");
+        var keyB = CompactionItemKeyResolver.ResolveItemKey(msg, CompactionTarget.ToolResult, "B", "call_b");
 
         Assert.Equal("call_a", keyA);
         Assert.Equal("call_b", keyB);
@@ -256,8 +256,8 @@ public class CompactionTests
             new TextContent("Result 2 text")
         ]);
 
-        var key1 = CompactionItemKeyResolver.ResolveItemKey(msg, SummarizationTarget.ToolResult, "Result 1 text");
-        var key2 = CompactionItemKeyResolver.ResolveItemKey(msg, SummarizationTarget.ToolResult, "Result 2 text");
+        var key1 = CompactionItemKeyResolver.ResolveItemKey(msg, CompactionTarget.ToolResult, "Result 1 text");
+        var key2 = CompactionItemKeyResolver.ResolveItemKey(msg, CompactionTarget.ToolResult, "Result 2 text");
 
         Assert.NotEqual(key1, key2);
     }
@@ -265,41 +265,10 @@ public class CompactionTests
     private sealed class RecordingSummarizer : ISpeculativeSummarizer
     {
         public List<(string Key, string Text)> Enqueued { get; } = [];
-        public void EnqueueSummarization(string sessionId, string itemKey, SummarizationTarget target, string rawText) => Enqueued.Add((itemKey, rawText));
+        public void EnqueueSummarization(string sessionId, string itemKey, string rawText) => Enqueued.Add((itemKey, rawText));
         public bool TryGetSummary(string sessionId, string itemKey, out string? summary) { summary = null; return false; }
         public void EvictSession(string sessionId) { }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ToolResultCompaction_EnqueuesOriginalUntruncatedText(bool mutateInPlace)
-    {
-        var summarizer = new RecordingSummarizer();
-        var fake = new FakeChatClient((_, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"))));
-        var client = new ToolResultCompactionChatClient(fake, new ToolResultCompactionOptions
-        {
-            Summarizer = summarizer,
-            KeepVerbatimCount = 1,
-            FallbackCharacterLimit = 100,
-            FallbackPrefixLength = 50,
-            FallbackSuffixLength = 20,
-            MutateInPlace = mutateInPlace
-        });
-
-        var big = new string('x', 500);
-        var messages = new List<ChatMessage>
-        {
-            new(ChatRole.Tool, [new FunctionResultContent("c1", big)]),
-            new(ChatRole.Tool, [new FunctionResultContent("c2", "small")])
-        };
-
-        await client.GetResponseAsync(messages);
-
-        var entry = Assert.Single(summarizer.Enqueued);
-        Assert.Equal("c1", entry.Key);
-        Assert.Equal(big, entry.Text);
     }
 
     [Theory]
@@ -332,33 +301,6 @@ public class CompactionTests
         var entry = summarizer.Enqueued.First(e => e.Text == bigReasoning);
         Assert.Equal(bigReasoning, entry.Text);
         Assert.DoesNotContain(summarizer.Enqueued, e => e.Text.StartsWith("[Reasoned:"));
-    }
-
-    [Fact]
-    public async Task ToolResultCompaction_EnqueuesTextContentInToolMessages()
-    {
-        var summarizer = new RecordingSummarizer();
-        var fake = new FakeChatClient((_, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"))));
-        var client = new ToolResultCompactionChatClient(fake, new ToolResultCompactionOptions
-        {
-            Summarizer = summarizer,
-            KeepVerbatimCount = 1,
-            FallbackCharacterLimit = 100,
-            FallbackPrefixLength = 50,
-            FallbackSuffixLength = 20
-        });
-
-        var bigText = new string('Y', 300);
-        var messages = new List<ChatMessage>
-        {
-            new(ChatRole.Tool, [new TextContent(bigText)]),
-            new(ChatRole.Tool, [new TextContent("small")])
-        };
-
-        await client.GetResponseAsync(messages);
-
-        var entry = Assert.Single(summarizer.Enqueued);
-        Assert.Equal(bigText, entry.Text);
     }
 
     [Theory]

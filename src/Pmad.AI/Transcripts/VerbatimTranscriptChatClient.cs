@@ -753,7 +753,7 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
                                 foreach (var tr in turn.ToolResults)
                                 {
                                     var matchingCompaction = state.CompactionEvents.Where(e =>
-                                        e.Target == SummarizationTarget.ToolResult &&
+                                        e.Target == CompactionTarget.ToolResult &&
                                         (string.Equals(e.ItemKey, tr.CallId, StringComparison.OrdinalIgnoreCase) ||
                                          (!string.IsNullOrEmpty(tr.CallId) && e.ItemKey.Contains(tr.CallId, StringComparison.OrdinalIgnoreCase)))).ToList();
 
@@ -781,7 +781,7 @@ public class VerbatimTranscriptChatClient : DelegatingChatClient, IAsyncDisposab
                             if (!string.IsNullOrEmpty(turn.Reasoning))
                             {
                                 var matchingReasoning = state.CompactionEvents.Where(e =>
-                                    e.Target == SummarizationTarget.ThinkingMonologue &&
+                                    e.Target == CompactionTarget.ThinkingMonologue &&
                                     (e.ItemKey.Contains(turn.TurnNumber.ToString()) ||
                                      turn.Reasoning.StartsWith("[Reasoned") ||
                                      turn.Reasoning.StartsWith("[THINKING_SUMMARY") ||

@@ -1,8 +1,18 @@
-using System.Runtime.CompilerServices;
-using System.Text;
 using Microsoft.Extensions.AI;
 
 namespace Pmad.AI.Compaction;
+
+/// <summary>
+/// Target category
+/// </summary>
+public enum CompactionTarget
+{
+    /// <summary>Bulky output produced by tool or function execution.</summary>
+    ToolResult,
+
+    /// <summary>Historical chain-of-thought or reasoning monologue produced by an assistant model.</summary>
+    ThinkingMonologue
+}
 
 /// <summary>
 /// Helper for resolving session IDs and computing canonical, deterministic item keys for conversation compaction.
@@ -37,10 +47,10 @@ internal static class CompactionItemKeyResolver
         return "default";
     }
 
-    public static string ResolveItemKey(ChatMessage message, SummarizationTarget target, string targetText, string? callId = null)
+    public static string ResolveItemKey(ChatMessage message, CompactionTarget target, string targetText, string? callId = null)
     {
         // 1. Tool result CallId (per-item identifier)
-        if (target == SummarizationTarget.ToolResult && !string.IsNullOrWhiteSpace(callId))
+        if (target == CompactionTarget.ToolResult && !string.IsNullOrWhiteSpace(callId))
         {
             return callId;
         }
@@ -58,7 +68,7 @@ internal static class CompactionItemKeyResolver
         }
 
         // 3. Deterministic 64-bit FNV-1a hash over target content + role
-        var prefix = target == SummarizationTarget.ThinkingMonologue ? "assistant:" : "tool:";
+        var prefix = target == CompactionTarget.ThinkingMonologue ? "assistant:" : "tool:";
         return ComputeFnv1aKey(prefix, targetText);
     }
 

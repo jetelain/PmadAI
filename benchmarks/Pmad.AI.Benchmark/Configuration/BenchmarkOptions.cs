@@ -139,6 +139,11 @@ public sealed class BenchmarkOptions
     public string OllamaBaseUrl { get; set; } = "http://localhost:11434";
 
     /// <summary>
+    /// Target model tag for background speculative SLM summarization (default: "gemma4:e2b").
+    /// </summary>
+    public string SlmModel { get; set; } = "gemma4:e2b";
+
+    /// <summary>
     /// When true, resumes execution from the latest checkpoint file, skipping already completed runs.
     /// </summary>
     public bool Resume { get; set; }
@@ -341,6 +346,10 @@ public sealed class BenchmarkOptions
             {
                 options.CalibrateTokens = true;
             }
+            else if (arg is "--slm-model" or "--speculative-model" && i + 1 < args.Length)
+            {
+                options.SlmModel = args[++i];
+            }
             else if (arg is "--slm-threads" or "--speculative-threads" && i + 1 < args.Length && int.TryParse(args[++i], out var slmThreads))
             {
                 options.SlmThreads = slmThreads;
@@ -418,6 +427,7 @@ Hardware & Backend:
   --compare-backends       Run each model on both CPU (0 GPU layers) and Vulkan GPU acceleration.
   -g, --gpu <layers>       GPU layers to offload (default: 99; use 0 for CPU).
   -c, --context <tokens>   Context size (default: 65536 for SLMs < 9B; 131072 for LLMs 9B+).
+  --slm-model <tag>        Model tag for background speculative SLM summarizer (default: 'gemma4:e2b').
   --slm-threads <count>    CPU threads for background speculative SLM summarizer (default: 2).
 
 Reasoning:

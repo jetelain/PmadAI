@@ -26,13 +26,11 @@ public static class ToolResultCompactionChatClientExtensions
     /// </summary>
     public static ChatClientBuilder UseToolResultCompaction(
         this ChatClientBuilder builder,
-        ISpeculativeSummarizer? summarizer,
         int keepVerbatimCount = 20,
         int fallbackCharacterLimit = 1750)
     {
         return builder.UseToolResultCompaction(options =>
         {
-            options.Summarizer = summarizer;
             options.KeepVerbatimCount = keepVerbatimCount;
             options.FallbackCharacterLimit = fallbackCharacterLimit;
         });

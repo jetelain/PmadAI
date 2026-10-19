@@ -13,8 +13,8 @@ public class OllamaSpeculativeSummarizerOptions
     /// <summary>Endpoint URL for the Ollama server. Default: "http://localhost:11434".</summary>
     public Uri Endpoint { get; set; } = new("http://localhost:11434");
 
-    /// <summary>Target model tag for speculative summarization. Default: "qwen3.5:2b".</summary>
-    public string Model { get; set; } = "qwen3.5:2b";
+    /// <summary>Target model tag for speculative summarization. Default: "gemma4:e2b".</summary>
+    public string Model { get; set; } = "gemma4:e2b";
 
     /// <summary>Context size allocated for the summarizer in tokens. Default: 4096.</summary>
     public int ContextSize { get; set; } = 4096;
@@ -25,8 +25,8 @@ public class OllamaSpeculativeSummarizerOptions
     /// <summary>Sampling temperature for summary generation. Default: 0.2.</summary>
     public float Temperature { get; set; } = 0.2f;
 
-    /// <summary>Keep-alive duration in Ollama memory (e.g. "5m", "1h"). Default: "5m".</summary>
-    public string KeepAlive { get; set; } = "5m";
+    /// <summary>Keep-alive duration in Ollama memory (e.g. "15m", "1h"). Default: "15m".</summary>
+    public string KeepAlive { get; set; } = "15m";
 
     /// <summary>Maximum queue capacity for pending summarization tasks. Default: 100.</summary>
     public int QueueCapacity { get; set; } = 100;
@@ -34,14 +34,14 @@ public class OllamaSpeculativeSummarizerOptions
     /// <summary>Queue drop behavior when capacity is exceeded. Default: DropWrite.</summary>
     public BoundedChannelFullMode DropPolicy { get; set; } = BoundedChannelFullMode.DropWrite;
 
-    /// <summary>Optional custom system prompt for tool result summarization.</summary>
-    public string? ToolResultSystemPrompt { get; set; }
-
     /// <summary>Optional custom system prompt for thinking monologue summarization.</summary>
     public string? ThinkingMonologueSystemPrompt { get; set; }
 
     /// <summary>Number of GPU layers to offload to Ollama. Default: 0 (CPU-only execution, guaranteeing zero host GPU VRAM contention with primary model).</summary>
     public int NumGpu { get; set; } = 0;
+
+    /// <summary>Number of CPU threads to allocate to Ollama for summarization (null uses Ollama default). Default: null.</summary>
+    public int? NumThread { get; set; }
 
     /// <summary>Timeout duration for individual speculative summarization network requests. Default: 30 seconds.</summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
@@ -54,57 +54,39 @@ public class OllamaSpeculativeSummarizerOptions
 /// Speculative SLM summarization engine offloading precomputations to a lightweight Ollama HTTP client.
 /// Uses background asynchronous requests to precompute concise semantic summaries during inter-turn idle time,
 /// providing instantaneous O(1) memory lookup for compaction with zero host GPU VRAM overhead and zero CPU contention.
-/// Defaults to "qwen3.5:2b".
+/// Defaults to "gemma4:e2b".
 /// </summary>
 public class OllamaSpeculativeSummarizer : ISpeculativeSummarizer
 {
-    private const string DefaultToolResultPrompt =
-        """
-        You are a concise technical summarizer. Summarize the following tool execution output in a dense, lossless key-value format:
-        [TOOL_RESULT_SUMMARY]
-        Status: SUCCESS|FAILED
-        Key_Entities: [id, name, path]
-        Output_Summary: <single factual sentence>
-        Error_Context: <exact error if failed>
-        [/TOOL_RESULT_SUMMARY]
-        Be extremely brief (under 100 tokens). Output strictly the [TOOL_RESULT_SUMMARY] block without any introductory text, markdown code fences, or conversational filler.
-        """;
-
     private const string DefaultThinkingMonologuePrompt =
         """
-        You are a concise technical summarizer. Summarize the following reasoning monologue in a dense, structured key-value format:
+        You are a concise technical summarizer. Compress the following internal reasoning into an ultra-dense summary:
         [THINKING_SUMMARY]
-        Decision: <key architectural or implementation decision made>
-        Constraints: <critical constraints, edge cases, or errors considered>
-        Next_Step: <immediate action or conclusion reached>
+        - Finding: <key technical observation or diagnosis>
+        - Decision: <concrete action taken and why>
+        - Ruled_Out: <hypotheses or approaches considered but rejected, if any>
         [/THINKING_SUMMARY]
-        Be extremely brief (under 100 tokens). Output strictly the [THINKING_SUMMARY] block without any introductory text, markdown code fences, or conversational filler.
+        Output strictly the [THINKING_SUMMARY] block. Limit output to 2-3 dense lines. Do not use code blocks or conversational filler.
         """;
 
     private readonly struct JobPriority : IComparable<JobPriority>
     {
-        public readonly int Tier;        // 0 for ToolResult, 1 for ThinkingMonologue
         public readonly int TextLength;  // Larger length = higher priority
         public readonly long Sequence;   // Smaller sequence = earlier arrival (FIFO tie-breaker)
 
-        public JobPriority(SummarizationTarget target, int textLength, long sequence)
+        public JobPriority(int textLength, long sequence)
         {
-            Tier = target == SummarizationTarget.ToolResult ? 0 : 1;
             TextLength = textLength;
             Sequence = sequence;
         }
 
         public int CompareTo(JobPriority other)
         {
-            // 1. Tool results before thinking monologues
-            int tierComp = Tier.CompareTo(other.Tier);
-            if (tierComp != 0) return tierComp;
-
-            // 2. Larger texts before smaller texts (descending order)
+            // Larger texts before smaller texts (descending order)
             int lenComp = other.TextLength.CompareTo(TextLength);
             if (lenComp != 0) return lenComp;
 
-            // 3. FIFO tie-breaker for identical tier and length
+            // FIFO tie-breaker for identical length
             return Sequence.CompareTo(other.Sequence);
         }
     }
@@ -126,7 +108,6 @@ public class OllamaSpeculativeSummarizer : ISpeculativeSummarizer
     private sealed record SummarizationJob(
         string SessionId,
         string ItemKey,
-        SummarizationTarget Target,
         string RawText);
 
     public OllamaSpeculativeSummarizer(
@@ -163,7 +144,7 @@ public class OllamaSpeculativeSummarizer : ISpeculativeSummarizer
 
     public OllamaSpeculativeSummarizer(
         string endpoint,
-        string model = "qwen3.5:2b",
+        string model = "gemma4:e2b",
         ILogger? logger = null)
         : this(new OllamaSpeculativeSummarizerOptions
         {
@@ -175,7 +156,7 @@ public class OllamaSpeculativeSummarizer : ISpeculativeSummarizer
 
     public OllamaSpeculativeSummarizer(
         Uri endpoint,
-        string model = "qwen3.5:2b",
+        string model = "gemma4:e2b",
         ILogger? logger = null)
         : this(new OllamaSpeculativeSummarizerOptions
         {
@@ -186,7 +167,7 @@ public class OllamaSpeculativeSummarizer : ISpeculativeSummarizer
     }
 
     /// <inheritdoc/>
-    public void EnqueueSummarization(string sessionId, string itemKey, SummarizationTarget target, string rawText)
+    public void EnqueueSummarization(string sessionId, string itemKey, string rawText)
     {
         if (_disposed || string.IsNullOrWhiteSpace(rawText)) return;
 
@@ -206,8 +187,8 @@ public class OllamaSpeculativeSummarizer : ISpeculativeSummarizer
 
             _queuedKeys.Add(key);
 
-            var job = new SummarizationJob(sessionId, itemKey, target, rawText);
-            var priority = new JobPriority(target, rawText.Length, ++_sequenceCounter);
+            var job = new SummarizationJob(sessionId, itemKey, rawText);
+            var priority = new JobPriority(rawText.Length, ++_sequenceCounter);
             _queue.Enqueue(job, priority);
             _signal.Release();
         }
@@ -294,16 +275,7 @@ public class OllamaSpeculativeSummarizer : ISpeculativeSummarizer
 
     private async Task<string?> GenerateSummaryAsync(SummarizationJob job, CancellationToken ct)
     {
-        string systemInstruction = job.Target switch
-        {
-            SummarizationTarget.ToolResult =>
-                _options.ToolResultSystemPrompt ?? DefaultToolResultPrompt,
-
-            SummarizationTarget.ThinkingMonologue =>
-                _options.ThinkingMonologueSystemPrompt ?? DefaultThinkingMonologuePrompt,
-
-            _ => "Summarize the text concisely."
-        };
+        string systemInstruction = _options.ThinkingMonologueSystemPrompt ?? DefaultThinkingMonologuePrompt;
 
         var promptText = job.RawText;
         var maxChars = _options.ContextSize * 4;
@@ -322,6 +294,7 @@ public class OllamaSpeculativeSummarizer : ISpeculativeSummarizer
             contextSize: _options.ContextSize,
             keepAlive: _options.KeepAlive,
             numGpu: _options.NumGpu,
+            numThread: _options.NumThread,
             timeout: _options.RequestTimeout,
             cancellationToken: ct).ConfigureAwait(false);
 
@@ -400,7 +373,7 @@ public class RemoteOllamaSpeculativeSummarizer : OllamaSpeculativeSummarizer
 
     public RemoteOllamaSpeculativeSummarizer(
         string endpoint = "http://localhost:11434",
-        string model = "qwen3.5:2b",
+        string model = "gemma4:e2b",
         ILogger? logger = null)
         : base(endpoint, model, logger)
     {
@@ -408,7 +381,7 @@ public class RemoteOllamaSpeculativeSummarizer : OllamaSpeculativeSummarizer
 
     public RemoteOllamaSpeculativeSummarizer(
         Uri endpoint,
-        string model = "qwen3.5:2b",
+        string model = "gemma4:e2b",
         ILogger? logger = null)
         : base(endpoint, model, logger)
     {

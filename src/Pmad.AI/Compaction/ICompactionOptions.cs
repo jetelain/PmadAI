@@ -33,9 +33,6 @@ public interface ICompactionOptions
     /// </summary>
     bool MutateInPlace { get; set; }
 
-    /// <summary>Optional background SLM summarizer.</summary>
-    ISpeculativeSummarizer? Summarizer { get; set; }
-
     /// <summary>Resolves the session id used to scope summaries (default: ChatOptions.ConversationId, then "default").</summary>
     Func<ChatOptions?, string>? SessionIdResolver { get; set; }
 
@@ -51,20 +48,20 @@ public interface ICompactionOptions
 /// </summary>
 public abstract class CompactionOptionsBase : ICompactionOptions
 {
-    /// <summary>Number of recent turns to retain verbatim. Default: 10.</summary>
-    public int KeepVerbatimCount { get; set; } = 10;
+    /// <summary>Number of recent turns to retain verbatim. Default: 5.</summary>
+    public int KeepVerbatimCount { get; set; } = 5;
 
     /// <summary>
-    /// Maximum character limit before deterministic fallback truncation occurs. Default: 1,750.
+    /// Maximum character limit before deterministic fallback truncation occurs. Default: 1,500.
     /// Must be &gt;= FallbackPrefixLength + FallbackSuffixLength.
     /// </summary>
-    public int FallbackCharacterLimit { get; set; } = 1750;
+    public int FallbackCharacterLimit { get; set; } = 1500;
 
-    /// <summary>Number of initial characters preserved during fallback truncation. Default: 1,500.</summary>
-    public int FallbackPrefixLength { get; set; } = 1500;
+    /// <summary>Number of initial characters preserved during fallback truncation. Default: 1,000.</summary>
+    public int FallbackPrefixLength { get; set; } = 1000;
 
-    /// <summary>Number of trailing characters preserved during fallback truncation. Default: 250.</summary>
-    public int FallbackSuffixLength { get; set; } = 250;
+    /// <summary>Number of trailing characters preserved during fallback truncation. Default: 400.</summary>
+    public int FallbackSuffixLength { get; set; } = 400;
 
     /// <summary>Format string for the truncation marker inserted between prefix and suffix. Default: "\n... [Truncated {0} characters] ...\n"</summary>
     public string FallbackTruncationMarker { get; set; } = "\n... [Truncated {0} characters] ...\n";
@@ -75,9 +72,6 @@ public abstract class CompactionOptionsBase : ICompactionOptions
     /// conversation history remains pristine and immutable.
     /// </summary>
     public bool MutateInPlace { get; set; } = false;
-
-    /// <summary>Optional background SLM summarizer.</summary>
-    public ISpeculativeSummarizer? Summarizer { get; set; }
 
     /// <summary>Resolves the session id used to scope summaries (default: ChatOptions.ConversationId, then "default").</summary>
     public Func<ChatOptions?, string>? SessionIdResolver { get; set; }

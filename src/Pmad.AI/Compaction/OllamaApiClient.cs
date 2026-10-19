@@ -34,12 +34,12 @@ public class OllamaApiClient : IDisposable
     /// Initializes a new instance of <see cref="OllamaApiClient"/>.
     /// </summary>
     /// <param name="baseUrl">Base URL of the Ollama server (e.g., http://localhost:11434). Defaults to http://localhost:11434.</param>
-    /// <param name="defaultModel">Default model to target (defaults to "qwen3.5:2b").</param>
+    /// <param name="defaultModel">Default model to target (defaults to "gemma4:e2b").</param>
     /// <param name="httpClient">Optional external <see cref="HttpClient"/> instance to use.</param>
     /// <param name="logger">Optional logger for diagnostics.</param>
     public OllamaApiClient(
         Uri? baseUrl = null,
-        string defaultModel = "qwen3.5:2b",
+        string defaultModel = "gemma4:e2b",
         HttpClient? httpClient = null,
         ILogger? logger = null)
     {
@@ -47,7 +47,7 @@ public class OllamaApiClient : IDisposable
         var baseStr = _baseUrl.ToString().TrimEnd('/') + "/";
         _baseUrl = new Uri(baseStr);
         _chatEndpoint = new Uri(_baseUrl, "api/chat");
-        _defaultModel = string.IsNullOrWhiteSpace(defaultModel) ? "qwen3.5:2b" : defaultModel;
+        _defaultModel = string.IsNullOrWhiteSpace(defaultModel) ? "gemma4:e2b" : defaultModel;
         _logger = logger ?? NullLogger.Instance;
 
         if (httpClient != null)
@@ -67,7 +67,7 @@ public class OllamaApiClient : IDisposable
     /// </summary>
     public OllamaApiClient(
         string baseUrl,
-        string defaultModel = "qwen3.5:2b",
+        string defaultModel = "gemma4:e2b",
         HttpClient? httpClient = null,
         ILogger? logger = null)
         : this(new Uri(baseUrl), defaultModel, httpClient, logger)
@@ -86,6 +86,7 @@ public class OllamaApiClient : IDisposable
         int? contextSize = null,
         string? keepAlive = null,
         int? numGpu = null,
+        int? numThread = null,
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
@@ -96,7 +97,7 @@ public class OllamaApiClient : IDisposable
         }
         messages.Add(("user", prompt));
 
-        return await ChatAsync(messages, model, maxTokens, temperature, contextSize, keepAlive, numGpu, timeout, cancellationToken).ConfigureAwait(false);
+        return await ChatAsync(messages, model, maxTokens, temperature, contextSize, keepAlive, numGpu, numThread, timeout, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -110,6 +111,7 @@ public class OllamaApiClient : IDisposable
         int? contextSize = null,
         string? keepAlive = null,
         int? numGpu = null,
+        int? numThread = null,
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
@@ -127,13 +129,14 @@ public class OllamaApiClient : IDisposable
                 writer.WriteString("keep_alive", keepAlive);
             }
 
-            if (maxTokens.HasValue || temperature.HasValue || contextSize.HasValue || numGpu.HasValue)
+            if (maxTokens.HasValue || temperature.HasValue || contextSize.HasValue || numGpu.HasValue || numThread.HasValue)
             {
                 writer.WriteStartObject("options");
                 if (maxTokens.HasValue) writer.WriteNumber("num_predict", maxTokens.Value);
                 if (temperature.HasValue) writer.WriteNumber("temperature", temperature.Value);
                 if (contextSize.HasValue) writer.WriteNumber("num_ctx", contextSize.Value);
                 if (numGpu.HasValue) writer.WriteNumber("num_gpu", numGpu.Value);
+                if (numThread.HasValue) writer.WriteNumber("num_thread", numThread.Value);
                 writer.WriteEndObject();
             }
 
@@ -215,6 +218,52 @@ public class OllamaApiClient : IDisposable
         {
             _logger.LogDebug(ex, "Ollama health check failed for {Endpoint}", _baseUrl);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Retrieves the list of installed model tags from the Ollama server via <c>/api/tags</c>.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetInstalledModelsAsync(CancellationToken cancellationToken = default)
+    {
+        if (_disposed) return Array.Empty<string>();
+
+        try
+        {
+            var tagsEndpoint = new Uri(_baseUrl, "api/tags");
+            using var request = new HttpRequestMessage(HttpMethod.Get, tagsEndpoint);
+            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return Array.Empty<string>();
+            }
+
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            if (doc.RootElement.TryGetProperty("models", out var modelsEl) && modelsEl.ValueKind == JsonValueKind.Array)
+            {
+                var list = new List<string>(modelsEl.GetArrayLength());
+                foreach (var m in modelsEl.EnumerateArray())
+                {
+                    if ((m.TryGetProperty("name", out var nameEl) || m.TryGetProperty("model", out nameEl)) && nameEl.ValueKind == JsonValueKind.String)
+                    {
+                        var name = nameEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(name))
+                        {
+                            list.Add(name);
+                        }
+                    }
+                }
+                return list;
+            }
+
+            return Array.Empty<string>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to fetch installed models from {Endpoint}", _baseUrl);
+            return Array.Empty<string>();
         }
     }
 

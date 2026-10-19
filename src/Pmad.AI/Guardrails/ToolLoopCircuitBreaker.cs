@@ -46,16 +46,15 @@ public class ToolLoopCircuitBreakerOptions
 
     /// <summary>
     /// Consecutive identical invocations (same name, canonical arguments and state signature)
-    /// that trip the ping-pong breaker. Default: 2 (the 2nd identical call is flagged).
+    /// that trip the ping-pong breaker. Default: 3 (the 3rd identical call is flagged).
     /// </summary>
-    public int PingPongThreshold { get; set; } = 2;
+    public int PingPongThreshold { get; set; } = 3;
 
     /// <summary>
     /// When true, resetting ping-pong tracking occurs when a distinct user prompt is observed.
-    /// Default: false (repeating the exact same tool call on unchanged observation state across turns
-    /// is treated as a loop regardless of user prompt wording variations).
+    /// Default: true (distinct user messages allow fresh tool exploration).
     /// </summary>
-    public bool ResetOnUserPrompt { get; set; } = false;
+    public bool ResetOnUserPrompt { get; set; } = true;
 
     /// <summary>
     /// Optional telemetry collector to record circuit breaker trip events.

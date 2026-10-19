@@ -5,6 +5,14 @@ namespace Pmad.AI.Tests;
 public class ToolLoopCircuitBreakerTests
 {
     [Fact]
+    public void ToolLoopCircuitBreakerOptions_DefaultValues_AreCalibrated()
+    {
+        var options = new ToolLoopCircuitBreakerOptions();
+        Assert.Equal(3, options.PingPongThreshold);
+        Assert.True(options.ResetOnUserPrompt);
+    }
+
+    [Fact]
     public void DetectStreamingRepetition_DetectsDegenerateRepetition()
     {
         var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions

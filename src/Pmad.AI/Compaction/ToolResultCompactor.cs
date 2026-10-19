@@ -10,7 +10,10 @@ public class ToolResultCompactionOptions : CompactionOptionsBase
 {
     public ToolResultCompactionOptions()
     {
-        KeepVerbatimCount = 20;
+        KeepVerbatimCount = 5;
+        FallbackCharacterLimit = 4500;
+        FallbackPrefixLength = 2800;
+        FallbackSuffixLength = 1200;
     }
 }
 
@@ -31,11 +34,10 @@ public class ToolResultCompactor
     }
 
     public ToolResultCompactor(
-        ISpeculativeSummarizer? summarizer,
-        int keepVerbatimCount = 20,
-        int fallbackCharacterLimit = 1750,
-        int fallbackPrefixLength = 1500,
-        int fallbackSuffixLength = 250)
+        int keepVerbatimCount = 5,
+        int fallbackCharacterLimit = 4500,
+        int fallbackPrefixLength = 2800,
+        int fallbackSuffixLength = 1200)
     {
         if (fallbackCharacterLimit < fallbackPrefixLength + fallbackSuffixLength)
         {
@@ -44,7 +46,6 @@ public class ToolResultCompactor
 
         _options = new ToolResultCompactionOptions
         {
-            Summarizer = summarizer,
             KeepVerbatimCount = keepVerbatimCount,
             FallbackPrefixLength = fallbackPrefixLength,
             FallbackSuffixLength = fallbackSuffixLength,
@@ -114,7 +115,7 @@ public class ToolResultCompactor
                 var rawStr = frc.Result as string ?? frc.Result?.ToString();
                 if (!string.IsNullOrEmpty(rawStr) && rawStr.Length > _options.FallbackCharacterLimit)
                 {
-                    var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, SummarizationTarget.ToolResult, rawStr, frc.CallId);
+                    var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, CompactionTarget.ToolResult, rawStr, frc.CallId);
                     var compacted = ResolveCompactedResult(rawStr, sessionId, itemKey);
                     message.Contents[i] = new FunctionResultContent(frc.CallId, compacted);
                 }
@@ -123,7 +124,7 @@ public class ToolResultCompactor
             {
                 if (!string.IsNullOrEmpty(tc.Text) && tc.Text.Length > _options.FallbackCharacterLimit)
                 {
-                    var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, SummarizationTarget.ToolResult, tc.Text);
+                    var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, CompactionTarget.ToolResult, tc.Text);
                     var compacted = ResolveCompactedResult(tc.Text, sessionId, itemKey);
                     message.Contents[i] = new TextContent(compacted);
                 }
@@ -143,7 +144,7 @@ public class ToolResultCompactor
                 var rawStr = frc.Result as string ?? frc.Result?.ToString();
                 if (!string.IsNullOrEmpty(rawStr) && rawStr.Length > _options.FallbackCharacterLimit)
                 {
-                    var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, SummarizationTarget.ToolResult, rawStr, frc.CallId);
+                    var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, CompactionTarget.ToolResult, rawStr, frc.CallId);
                     var compacted = ResolveCompactedResult(rawStr, sessionId, itemKey);
                     newContents.Add(new FunctionResultContent(frc.CallId, compacted));
                     modified = true;
@@ -154,7 +155,7 @@ public class ToolResultCompactor
             {
                 if (!string.IsNullOrEmpty(tc.Text) && tc.Text.Length > _options.FallbackCharacterLimit)
                 {
-                    var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, SummarizationTarget.ToolResult, tc.Text);
+                    var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, CompactionTarget.ToolResult, tc.Text);
                     var compacted = ResolveCompactedResult(tc.Text, sessionId, itemKey);
                     newContents.Add(new TextContent(compacted));
                     modified = true;
@@ -179,19 +180,6 @@ public class ToolResultCompactor
 
     private string ResolveCompactedResult(string rawText, string sessionId, string itemKey)
     {
-        // Try speculative summary
-        if (_options.Summarizer != null && _options.Summarizer.TryGetSummary(sessionId, itemKey, out var summary) && !string.IsNullOrWhiteSpace(summary))
-        {
-            var trimmed = summary.Trim();
-            var compacted = (trimmed.StartsWith("[TOOL_RESULT_SUMMARY]", StringComparison.OrdinalIgnoreCase) ||
-                trimmed.StartsWith("[Semantic Summary:", StringComparison.OrdinalIgnoreCase))
-                ? trimmed
-                : $"[Semantic Summary: {trimmed}]";
-
-            RecordCompactionEvent(sessionId, itemKey, rawText.Length, compacted.Length, wasSpeculativeHit: true, CompactionMethods.SemanticSummary);
-            return compacted;
-        }
-
         // Deterministic prefix + truncation marker + suffix
         var truncatedChars = rawText.Length - _options.FallbackPrefixLength - _options.FallbackSuffixLength;
         var marker = string.Format(_options.FallbackTruncationMarker, truncatedChars);
@@ -210,7 +198,7 @@ public class ToolResultCompactor
         var evt = new CompactionEvent(
             DateTimeOffset.UtcNow,
             sessionId,
-            SummarizationTarget.ToolResult,
+            CompactionTarget.ToolResult,
             itemKey,
             origChars,
             compactedChars,
@@ -252,9 +240,6 @@ public class ToolResultCompactionChatClient : DelegatingChatClient
         var sessionId = CompactionItemKeyResolver.ResolveSessionId(options, _options.SessionIdResolver);
         var msgList = chatMessages as IList<ChatMessage> ?? chatMessages.ToList();
 
-        // Enqueue from the original text before compaction (compaction may mutate in place or truncate).
-        TriggerSpeculativeEnqueue(msgList, sessionId);
-
         var compacted = _compactor.Compact(msgList, sessionId);
 
         return await base.GetResponseAsync(compacted, options, cancellationToken);
@@ -268,48 +253,11 @@ public class ToolResultCompactionChatClient : DelegatingChatClient
         var sessionId = CompactionItemKeyResolver.ResolveSessionId(options, _options.SessionIdResolver);
         var msgList = chatMessages as IList<ChatMessage> ?? chatMessages.ToList();
 
-        // Enqueue from the original text before compaction (compaction may mutate in place or truncate).
-        TriggerSpeculativeEnqueue(msgList, sessionId);
-
         var compacted = _compactor.Compact(msgList, sessionId);
 
         await foreach (var update in base.GetStreamingResponseAsync(compacted, options, cancellationToken))
         {
             yield return update;
-        }
-    }
-
-    private void TriggerSpeculativeEnqueue(IList<ChatMessage> messages, string sessionId)
-    {
-        if (_options.Summarizer == null) return;
-
-        var toolMsgs = messages.Where(m => m.Role == ChatRole.Tool || m.Contents.Any(c => c is FunctionResultContent)).ToList();
-        int threshold = Math.Max(0, toolMsgs.Count - _options.KeepVerbatimCount);
-
-        for (int i = 0; i <= threshold && i < toolMsgs.Count; i++)
-        {
-            var msg = toolMsgs[i];
-            foreach (var frc in msg.Contents.OfType<FunctionResultContent>())
-            {
-                var rawStr = frc.Result as string ?? frc.Result?.ToString();
-                if (!string.IsNullOrEmpty(rawStr) && rawStr.Length > _options.FallbackCharacterLimit)
-                {
-                    var itemKey = CompactionItemKeyResolver.ResolveItemKey(msg, SummarizationTarget.ToolResult, rawStr, frc.CallId);
-                    _options.Summarizer.EnqueueSummarization(sessionId, itemKey, SummarizationTarget.ToolResult, rawStr);
-                }
-            }
-
-            if (msg.Role == ChatRole.Tool)
-            {
-                foreach (var tc in msg.Contents.OfType<TextContent>())
-                {
-                    if (!string.IsNullOrEmpty(tc.Text) && tc.Text.Length > _options.FallbackCharacterLimit)
-                    {
-                        var itemKey = CompactionItemKeyResolver.ResolveItemKey(msg, SummarizationTarget.ToolResult, tc.Text);
-                        _options.Summarizer.EnqueueSummarization(sessionId, itemKey, SummarizationTarget.ToolResult, tc.Text);
-                    }
-                }
-            }
         }
     }
 }

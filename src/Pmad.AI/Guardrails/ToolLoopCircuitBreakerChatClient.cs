@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
+using Pmad.AI.Tools;
 
 namespace Pmad.AI.Guardrails;
 
@@ -13,11 +14,16 @@ namespace Pmad.AI.Guardrails;
 public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
 {
     private readonly ToolLoopCircuitBreaker _breaker;
+    private readonly LenientToolDispatcher? _dispatcher;
 
-    public ToolLoopCircuitBreakerChatClient(IChatClient innerClient, ToolLoopCircuitBreaker? breaker = null)
+    public ToolLoopCircuitBreakerChatClient(
+        IChatClient innerClient,
+        ToolLoopCircuitBreaker? breaker = null,
+        LenientToolDispatcher? dispatcher = null)
         : base(innerClient)
     {
         _breaker = breaker ?? new ToolLoopCircuitBreaker();
+        _dispatcher = dispatcher;
     }
 
     public ToolLoopCircuitBreaker Breaker => _breaker;
@@ -34,6 +40,8 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
 
         InspectChatMessages(chatMessages);
 
+        var dispatcher = _dispatcher ?? options.GetToolDispatcher() ?? (GetService(typeof(LenientToolDispatcher)) as LenientToolDispatcher);
+
         var response = await base.GetResponseAsync(chatMessages, options, cancellationToken);
         if (response?.Messages != null)
         {
@@ -44,7 +52,28 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
                 {
                     foreach (var call in functionCalls)
                     {
-                        var check = _breaker.EvaluateToolInvocation(call.Name, call.Arguments);
+                        if (string.IsNullOrWhiteSpace(call.Name))
+                        {
+                            continue;
+                        }
+                        string toolName = call.Name;
+                        IDictionary<string, object?>? toolArgs = call.Arguments;
+
+                        if (dispatcher != null)
+                        {
+                            try
+                            {
+                                var dispatched = dispatcher.NormalizeCall(call.Name, call.Arguments ?? new Dictionary<string, object?>());
+                                toolName = dispatched.CanonicalToolName;
+                                toolArgs = dispatched.Arguments;
+                            }
+                            catch (KeyNotFoundException)
+                            {
+                                // If normalization fails due to missing template parameters, fallback to raw invocation
+                            }
+                        }
+
+                        var check = _breaker.EvaluateToolInvocation(toolName, toolArgs);
                         if (check.IsLoopDetected)
                         {
                             message.Contents.Clear();
@@ -153,6 +182,7 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
         if (serviceType == typeof(ToolLoopCircuitBreakerChatClient)) return this;
         if (serviceType == typeof(ToolLoopCircuitBreaker)) return _breaker;
         if (serviceType == typeof(CircuitBreakerTelemetry) && _breaker.Options.Telemetry != null) return _breaker.Options.Telemetry;
+        if (serviceType == typeof(LenientToolDispatcher) && _dispatcher != null) return _dispatcher;
         return base.GetService(serviceType, serviceKey);
     }
 }

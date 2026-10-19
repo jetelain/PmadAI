@@ -192,7 +192,7 @@ public static class Program
         {
             Model = "qwen3.5:2b"
         });
-        summarizer.EnqueueSummarization("session-aot", "key-1", SummarizationTarget.ToolResult, "Test raw text");
+        summarizer.EnqueueSummarization("session-aot", "key-1", "Test raw text");
         _ = summarizer.TryGetSummary("session-aot", "key-1", out _);
         summarizer.EvictSession("session-aot");
         Console.WriteLine("✓ OllamaSpeculativeSummarizer verified");

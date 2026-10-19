@@ -29,7 +29,7 @@ public class PipelinePresetsTests
 
     private class DummySummarizer : ISpeculativeSummarizer
     {
-        public void EnqueueSummarization(string sessionId, string itemKey, SummarizationTarget target, string rawText) { }
+        public void EnqueueSummarization(string sessionId, string itemKey, string rawText) { }
 
         public bool TryGetSummary(string sessionId, string itemKey, out string? summary)
         {
@@ -65,15 +65,15 @@ public class PipelinePresetsTests
             configureBreaker: opts =>
             {
                 breakerConfigured = true;
-                Assert.Equal(2, opts.PingPongThreshold);
+                Assert.Equal(3, opts.PingPongThreshold);
+                Assert.True(opts.ResetOnUserPrompt);
                 Assert.Equal(30, opts.MaxToolHistory);
             },
             configureToolResult: opts =>
             {
                 toolResultConfigured = true;
-                Assert.Equal(4, opts.KeepVerbatimCount);
-                Assert.Equal(2500, opts.FallbackCharacterLimit);
-                Assert.Null(opts.Summarizer);
+                Assert.Equal(5, opts.KeepVerbatimCount);
+                Assert.Equal(4500, opts.FallbackCharacterLimit);
             },
             configureHealing: opts =>
             {
@@ -115,7 +115,8 @@ public class PipelinePresetsTests
             configureBreaker: opts =>
             {
                 breakerConfigured = true;
-                Assert.Equal(2, opts.PingPongThreshold);
+                Assert.Equal(3, opts.PingPongThreshold);
+                Assert.True(opts.ResetOnUserPrompt);
             },
             configureThinking: opts =>
             {
@@ -127,7 +128,6 @@ public class PipelinePresetsTests
             {
                 toolResultConfigured = true;
                 Assert.Equal(5, opts.KeepVerbatimCount);
-                Assert.Same(summarizer, opts.Summarizer);
             },
             configureHealing: opts =>
             {

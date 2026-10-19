@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.AI;
 using Pmad.AI.Guardrails;
+using Pmad.AI.Tools;
 
 namespace Pmad.AI.Tests;
 
@@ -374,4 +375,204 @@ public class ToolLoopCircuitBreakerChatClientTests
         Assert.Empty(r3.Messages.First().Contents.OfType<FunctionCallContent>());
         Assert.Contains("[Circuit Breaker Tripped]", r3.Messages.First().Text);
     }
+
+    [Fact]
+    public async Task GetResponseAsync_TripsOnThirdInvocationByDefault_AllowsSecondInvocation()
+    {
+        var inner = new TestChatClient(getResponse: (_, _, _) => Task.FromResult(new ChatResponse([
+            new ChatMessage(ChatRole.Assistant, [
+                new FunctionCallContent("call", "read_file", new Dictionary<string, object?> { ["path"] = "main.cs" })
+            ])
+        ])));
+
+        // Default breaker has PingPongThreshold = 3
+        var client = new ToolLoopCircuitBreakerChatClient(inner);
+
+        // Turn 1: 1st invocation before any observation
+        var r1 = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "read main.cs")]);
+        Assert.Single(r1.Messages.First().Contents.OfType<FunctionCallContent>());
+
+        // Turn 2: observation recorded; 1st invocation on this observation
+        var r2 = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "read main.cs"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("call1", "read_file", new Dictionary<string, object?> { ["path"] = "main.cs" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("call1", "file content")])
+        ]);
+        Assert.Single(r2.Messages.First().Contents.OfType<FunctionCallContent>());
+
+        // Turn 3: 2nd invocation on same observation -> allowed under PingPongThreshold = 3
+        var r3 = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "read main.cs"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("call1", "read_file", new Dictionary<string, object?> { ["path"] = "main.cs" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("call1", "file content")]),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("call2", "read_file", new Dictionary<string, object?> { ["path"] = "main.cs" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("call2", "file content")])
+        ]);
+        Assert.Single(r3.Messages.First().Contents.OfType<FunctionCallContent>());
+
+        // Turn 4: 3rd invocation on unchanged observation -> trips circuit breaker!
+        var r4 = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "read main.cs"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("call1", "read_file", new Dictionary<string, object?> { ["path"] = "main.cs" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("call1", "file content")]),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("call2", "read_file", new Dictionary<string, object?> { ["path"] = "main.cs" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("call2", "file content")]),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("call3", "read_file", new Dictionary<string, object?> { ["path"] = "main.cs" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("call3", "file content")])
+        ]);
+        Assert.Empty(r4.Messages.First().Contents.OfType<FunctionCallContent>());
+        Assert.Contains("[Circuit Breaker Tripped]", r4.Messages.First().Text);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_WithLenientToolDispatcher_NormalizesToolAliasesBeforeLoopEvaluation()
+    {
+        int callCount = 0;
+        var inner = new TestChatClient(getResponse: (_, _, _) =>
+        {
+            callCount++;
+            // Call 1, 3: "cat"; Call 2, 4: "read_file"
+            string toolName = (callCount % 2 == 1) ? "cat" : "read_file";
+            return Task.FromResult(new ChatResponse([
+                new ChatMessage(ChatRole.Assistant, [
+                    new FunctionCallContent($"c{callCount}", toolName, new Dictionary<string, object?> { ["path"] = "main.cs" })
+                ])
+            ]));
+        });
+
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Tools = new()
+            {
+                ["read_file"] = new ToolMapping(aliases: ["cat"])
+            }
+        });
+
+        // Default breaker threshold = 3, injected dispatcher
+        var client = new ToolLoopCircuitBreakerChatClient(inner, dispatcher: dispatcher);
+
+        // Turn 1: model returns "cat" -> normalized to "read_file" -> allowed
+        var r1 = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "show me main.cs")]);
+        Assert.Single(r1.Messages.First().Contents.OfType<FunctionCallContent>());
+
+        // Turn 2: observation recorded; model returns "read_file" -> normalized to "read_file" (count 1 on this observation) -> allowed
+        var r2 = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "show me main.cs"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c1", "cat", new Dictionary<string, object?> { ["path"] = "main.cs" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", "content")])
+        ]);
+        Assert.Single(r2.Messages.First().Contents.OfType<FunctionCallContent>());
+
+        // Turn 3: model returns "cat" -> normalized to "read_file" (count 2 on this observation) -> allowed
+        var r3 = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "show me main.cs"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c1", "cat", new Dictionary<string, object?> { ["path"] = "main.cs" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", "content")]),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c2", "read_file", new Dictionary<string, object?> { ["path"] = "main.cs" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c2", "content")])
+        ]);
+        Assert.Single(r3.Messages.First().Contents.OfType<FunctionCallContent>());
+
+        // Turn 4: model returns "read_file" -> normalized to "read_file" (count 3 on this observation) -> TRIPS!
+        var r4 = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "show me main.cs"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c1", "cat", new Dictionary<string, object?> { ["path"] = "main.cs" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", "content")]),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c2", "read_file", new Dictionary<string, object?> { ["path"] = "main.cs" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c2", "content")]),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c3", "cat", new Dictionary<string, object?> { ["path"] = "main.cs" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c3", "content")])
+        ]);
+
+        Assert.Empty(r4.Messages.First().Contents.OfType<FunctionCallContent>());
+        Assert.Contains("[Circuit Breaker Tripped]", r4.Messages.First().Text);
+        Assert.Contains("read_file", r4.Messages.First().Text);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_ResetOnUserPrompt_ResetsLoopCounterWhenNewGoalIsIssued()
+    {
+        var inner = new TestChatClient(getResponse: (_, _, _) => Task.FromResult(new ChatResponse([
+            new ChatMessage(ChatRole.Assistant, [
+                new FunctionCallContent("c1", "search", new Dictionary<string, object?> { ["q"] = "test" })
+            ])
+        ])));
+
+        // Breaker with PingPongThreshold = 2, ResetOnUserPrompt = true (default)
+        var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
+        {
+            PingPongThreshold = 2,
+            ResetOnUserPrompt = true
+        });
+        var client = new ToolLoopCircuitBreakerChatClient(inner, breaker);
+
+        // Turn 1: user "find bug in parser"
+        var r1 = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "find bug in parser")]);
+        Assert.Single(r1.Messages.First().Contents.OfType<FunctionCallContent>());
+
+        // Turn 2: user issues distinct new task "now clean up build artifacts"
+        // Without ResetOnUserPrompt, this identical tool call would trip (count=2).
+        // With ResetOnUserPrompt, consecutive counter reset on distinct user prompt!
+        var r2 = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "now clean up build artifacts")
+        ]);
+        Assert.Single(r2.Messages.First().Contents.OfType<FunctionCallContent>());
+        Assert.DoesNotContain("[Circuit Breaker Tripped]", r2.Messages.First().Text ?? string.Empty);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task GetResponseAsync_WithEmptyOrWhitespaceToolName_SkipsSafelyWithoutException(string emptyToolName)
+    {
+        var inner = new TestChatClient(getResponse: (_, _, _) => Task.FromResult(new ChatResponse([
+            new ChatMessage(ChatRole.Assistant, [
+                new FunctionCallContent("c1", emptyToolName, new Dictionary<string, object?>())
+            ])
+        ])));
+
+        var dispatcher = new LenientToolDispatcher();
+        var client = new ToolLoopCircuitBreakerChatClient(inner, dispatcher: dispatcher);
+
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "test")]);
+
+        Assert.NotNull(response);
+        var call = Assert.Single(response.Messages.First().Contents.OfType<FunctionCallContent>());
+        Assert.Equal(emptyToolName, call.Name);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_WithFailingTranslation_FallsBackToRawInvocationWithoutThrowing()
+    {
+        var inner = new TestChatClient(getResponse: (_, _, _) => Task.FromResult(new ChatResponse([
+            new ChatMessage(ChatRole.Assistant, [
+                new FunctionCallContent("c1", "cat", new Dictionary<string, object?>()) // missing required 'path' parameter
+            ])
+        ])));
+
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.Configure(new ToolDispatcherConfiguration
+        {
+            Translations =
+            [
+                new ToolTranslation
+                {
+                    SourceTool = "cat",
+                    TargetTool = "read_file",
+                    CommandTemplate = "{path}"
+                }
+            ]
+        });
+
+        var client = new ToolLoopCircuitBreakerChatClient(inner, dispatcher: dispatcher);
+
+        // Should not throw KeyNotFoundException when template parameter is missing
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "test")]);
+
+        Assert.NotNull(response);
+        var call = Assert.Single(response.Messages.First().Contents.OfType<FunctionCallContent>());
+        Assert.Equal("cat", call.Name);
+    }
 }
+

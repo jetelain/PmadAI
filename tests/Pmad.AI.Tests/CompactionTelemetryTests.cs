@@ -38,7 +38,7 @@ public class CompactionTelemetryTests
         telemetry.Record(new CompactionEvent(
             DateTimeOffset.UtcNow,
             "session-1",
-            SummarizationTarget.ToolResult,
+            CompactionTarget.ToolResult,
             "call_123",
             OriginalChars: 5420,
             CompactedChars: 240,
@@ -53,7 +53,7 @@ public class CompactionTelemetryTests
         telemetry.Record(new CompactionEvent(
             DateTimeOffset.UtcNow,
             "session-1",
-            SummarizationTarget.ToolResult,
+            CompactionTarget.ToolResult,
             "call_456",
             OriginalChars: 3000,
             CompactedChars: 1750,
@@ -63,7 +63,7 @@ public class CompactionTelemetryTests
         telemetry.Record(new CompactionEvent(
             DateTimeOffset.UtcNow,
             "session-2",
-            SummarizationTarget.ThinkingMonologue,
+            CompactionTarget.ThinkingMonologue,
             "think_1",
             OriginalChars: 4000,
             CompactedChars: 120,
@@ -102,7 +102,7 @@ public class CompactionTelemetryTests
         var toolSemanticEvent = new CompactionEvent(
             DateTimeOffset.UtcNow,
             "s1",
-            SummarizationTarget.ToolResult,
+            CompactionTarget.ToolResult,
             "call_123",
             OriginalChars: 5420,
             CompactedChars: 240,
@@ -115,7 +115,7 @@ public class CompactionTelemetryTests
         var toolTruncatedEvent = new CompactionEvent(
             DateTimeOffset.UtcNow,
             "s1",
-            SummarizationTarget.ToolResult,
+            CompactionTarget.ToolResult,
             "call_999",
             OriginalChars: 3500,
             CompactedChars: 1750,
@@ -128,7 +128,7 @@ public class CompactionTelemetryTests
         var thinkingStubEvent = new CompactionEvent(
             DateTimeOffset.UtcNow,
             "s1",
-            SummarizationTarget.ThinkingMonologue,
+            CompactionTarget.ThinkingMonologue,
             "reasoning_1",
             OriginalChars: 4120,
             CompactedChars: 120,
@@ -140,16 +140,9 @@ public class CompactionTelemetryTests
     }
 
     [Fact]
-    public async Task ToolResultCompactor_EmitsCompactionEvents_OnFallbackAndSpeculative()
+    public async Task ToolResultCompactor_EmitsCompactionEvents()
     {
         var telemetry = new CompactionTelemetry();
-        var mockSummarizer = new Mock<ISpeculativeSummarizer>();
-        mockSummarizer.Setup(s => s.TryGetSummary("session-test", "call_spec", out It.Ref<string?>.IsAny))
-            .Returns(new TryGetSummaryCallback((string sId, string key, out string? sum) =>
-            {
-                sum = "[TOOL_RESULT_SUMMARY]\nStatus: SUCCESS\nKey_Entities: [test]\nOutput_Summary: Completed successfully\n[/TOOL_RESULT_SUMMARY]";
-                return true;
-            }));
 
         var fake = new FakeChatClient((msgs, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "OK"))));
         var client = new ToolResultCompactionChatClient(fake, new ToolResultCompactionOptions
@@ -158,7 +151,6 @@ public class CompactionTelemetryTests
             FallbackCharacterLimit = 100,
             FallbackPrefixLength = 50,
             FallbackSuffixLength = 20,
-            Summarizer = mockSummarizer.Object,
             Telemetry = telemetry
         });
 
@@ -176,8 +168,8 @@ public class CompactionTelemetryTests
         Assert.Equal(2, telemetry.TotalEvents);
 
         var specEvent = telemetry.Events.First(e => e.ItemKey == "call_spec");
-        Assert.True(specEvent.WasSpeculativeHit);
-        Assert.Equal(CompactionMethods.SemanticSummary, specEvent.Method);
+        Assert.False(specEvent.WasSpeculativeHit);
+        Assert.Equal(CompactionMethods.PrefixSuffixTruncation, specEvent.Method);
         Assert.Equal(500, specEvent.OriginalChars);
 
         var fallbackEvent = telemetry.Events.First(e => e.ItemKey == "call_fallback");
@@ -219,7 +211,7 @@ public class CompactionTelemetryTests
         await client.GetResponseAsync(messages, options);
 
         var thinkEvent = Assert.Single(telemetry.Events);
-        Assert.Equal(SummarizationTarget.ThinkingMonologue, thinkEvent.Target);
+        Assert.Equal(CompactionTarget.ThinkingMonologue, thinkEvent.Target);
         Assert.True(thinkEvent.WasSpeculativeHit);
         Assert.Equal(CompactionMethods.SemanticSummary, thinkEvent.Method);
     }
@@ -247,7 +239,7 @@ public class CompactionTelemetryTests
         await client.GetResponseAsync(messages);
 
         var thinkEvent = Assert.Single(telemetry.Events);
-        Assert.Equal(SummarizationTarget.ThinkingMonologue, thinkEvent.Target);
+        Assert.Equal(CompactionTarget.ThinkingMonologue, thinkEvent.Target);
         Assert.False(thinkEvent.WasSpeculativeHit);
         Assert.Equal(CompactionMethods.PrefixSuffixTruncation, thinkEvent.Method);
         Assert.Equal(300, thinkEvent.OriginalChars);
@@ -305,7 +297,7 @@ public class CompactionTelemetryTests
         telemetry.Record(new CompactionEvent(
             DateTimeOffset.UtcNow,
             "session-abc",
-            SummarizationTarget.ToolResult,
+            CompactionTarget.ToolResult,
             "call_abc",
             OriginalChars: 5420,
             CompactedChars: 240,

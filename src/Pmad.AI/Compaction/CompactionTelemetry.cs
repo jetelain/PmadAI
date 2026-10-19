@@ -32,7 +32,7 @@ public static class CompactionMethods
 public sealed record CompactionEvent(
     DateTimeOffset Timestamp,
     string SessionId,
-    SummarizationTarget Target,
+    CompactionTarget Target,
     string ItemKey,
     int OriginalChars,
     int CompactedChars,
@@ -69,7 +69,7 @@ public sealed record CompactionEvent(
         var origFormatted = OriginalChars.ToString("N0", CultureInfo.InvariantCulture);
         var compFormatted = CompactedChars.ToString("N0", CultureInfo.InvariantCulture);
 
-        if (Target == SummarizationTarget.ToolResult)
+        if (Target == CompactionTarget.ToolResult)
         {
             return $"> ✂️ **[Compaction Event: Tool Result for `{ItemKey}` pruned: {origFormatted} chars -> {compFormatted} chars ({MethodDisplayName})]**";
         }
@@ -164,22 +164,22 @@ public sealed class CompactionTelemetry
     /// <summary>
     /// Count of assistant reasoning / thinking traces collapsed.
     /// </summary>
-    public int ThinkingTracesCollapsed => _events.Count(e => e.Target == SummarizationTarget.ThinkingMonologue);
+    public int ThinkingTracesCollapsed => _events.Count(e => e.Target == CompactionTarget.ThinkingMonologue);
 
     /// <summary>
     /// Count of tool results compacted using prefix-suffix fallback truncation.
     /// </summary>
-    public int ToolResultsTruncated => _events.Count(e => e.Target == SummarizationTarget.ToolResult && e.Method == CompactionMethods.PrefixSuffixTruncation);
+    public int ToolResultsTruncated => _events.Count(e => e.Target == CompactionTarget.ToolResult && e.Method == CompactionMethods.PrefixSuffixTruncation);
 
     /// <summary>
     /// Count of tool results compacted using semantic SLM summaries.
     /// </summary>
-    public int ToolResultsSummarized => _events.Count(e => e.Target == SummarizationTarget.ToolResult && e.Method == CompactionMethods.SemanticSummary);
+    public int ToolResultsSummarized => _events.Count(e => e.Target == CompactionTarget.ToolResult && e.Method == CompactionMethods.SemanticSummary);
 
     /// <summary>
     /// Total count of tool result compaction events.
     /// </summary>
-    public int ToolResultsCompacted => _events.Count(e => e.Target == SummarizationTarget.ToolResult);
+    public int ToolResultsCompacted => _events.Count(e => e.Target == CompactionTarget.ToolResult);
 
     /// <summary>
     /// Creates an immutable summary snapshot of current compaction telemetry, optionally filtered by session ID.
@@ -197,10 +197,10 @@ public sealed class CompactionTelemetry
         var estTokens = (int)Math.Round(totalPruned / 4.0);
         var specHits = relevant.Count(e => e.WasSpeculativeHit);
         var hitRate = totalEvents > 0 ? Math.Round((double)specHits * 100.0 / totalEvents, 1) : 0.0;
-        var thinking = relevant.Count(e => e.Target == SummarizationTarget.ThinkingMonologue);
-        var toolTrunc = relevant.Count(e => e.Target == SummarizationTarget.ToolResult && e.Method == CompactionMethods.PrefixSuffixTruncation);
-        var toolSumm = relevant.Count(e => e.Target == SummarizationTarget.ToolResult && e.Method == CompactionMethods.SemanticSummary);
-        var toolComp = relevant.Count(e => e.Target == SummarizationTarget.ToolResult);
+        var thinking = relevant.Count(e => e.Target == CompactionTarget.ThinkingMonologue);
+        var toolTrunc = relevant.Count(e => e.Target == CompactionTarget.ToolResult && e.Method == CompactionMethods.PrefixSuffixTruncation);
+        var toolSumm = relevant.Count(e => e.Target == CompactionTarget.ToolResult && e.Method == CompactionMethods.SemanticSummary);
+        var toolComp = relevant.Count(e => e.Target == CompactionTarget.ToolResult);
 
         return new CompactionTelemetrySnapshot(
             TotalEvents: totalEvents,

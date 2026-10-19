@@ -32,4 +32,18 @@ public static class ToolLoopCircuitBreakerExtensions
         configure(options);
         return builder.Use(innerClient => new ToolLoopCircuitBreakerChatClient(innerClient, new ToolLoopCircuitBreaker(options)));
     }
+
+    /// <summary>
+    /// Adds <see cref="ToolLoopCircuitBreakerChatClient"/> middleware with dispatcher awareness and custom breaker options.
+    /// </summary>
+    public static ChatClientBuilder UseToolLoopCircuitBreaker(
+        this ChatClientBuilder builder,
+        Pmad.AI.Tools.LenientToolDispatcher? dispatcher,
+        Action<ToolLoopCircuitBreakerOptions>? configure = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        var options = new ToolLoopCircuitBreakerOptions();
+        configure?.Invoke(options);
+        return builder.Use(innerClient => new ToolLoopCircuitBreakerChatClient(innerClient, new ToolLoopCircuitBreaker(options), dispatcher));
+    }
 }

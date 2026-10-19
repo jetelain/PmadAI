@@ -768,6 +768,9 @@ public static class Program
         };
     }
 
+    private static bool? _slmModelAvailable;
+    private static readonly object _slmCheckLock = new();
+
     private static ISpeculativeSummarizer? CreateSpeculativeSummarizer(OptimizationConfig config, BenchmarkOptions options)
     {
         if (config.Id is not ("opt-speculative-slm" or "all-optimizations" or "opt-all-local-llm-with-slm"))
@@ -780,12 +783,45 @@ public static class Program
             var endpoint = new Uri(options.OllamaBaseUrl);
             var logger = new ConsoleBenchmarkLogger();
 
+            lock (_slmCheckLock)
+            {
+                if (!_slmModelAvailable.HasValue)
+                {
+                    using var checkClient = new OllamaApiClient(endpoint, options.SlmModel);
+                    using var checkCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    var installedModels = checkClient.GetInstalledModelsAsync(checkCts.Token).GetAwaiter().GetResult();
+                    _slmModelAvailable = installedModels.Any(m =>
+                        string.Equals(m, options.SlmModel, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(m, $"{options.SlmModel}:latest", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(m.Split(':')[0], options.SlmModel, StringComparison.OrdinalIgnoreCase));
+
+                    if (_slmModelAvailable.Value)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine($"[Speculative SLM] Verified model '{options.SlmModel}' on Ollama at {options.OllamaBaseUrl}. Initializing summarizer.");
+                        Console.ResetColor();
+                    }
+                    else
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine($"[Speculative SLM] Model '{options.SlmModel}' not found in Ollama at {options.OllamaBaseUrl}. Run 'ollama pull {options.SlmModel}' or specify --slm-model <tag>. Falling back to deterministic compaction.");
+                        Console.ResetColor();
+                    }
+                }
+            }
+
+            if (!_slmModelAvailable.Value)
+            {
+                return null;
+            }
+
             return new OllamaSpeculativeSummarizer(new OllamaSpeculativeSummarizerOptions
             {
                 Endpoint = endpoint,
-                Model = "qwen3.5:2b",
+                Model = options.SlmModel,
                 ContextSize = 4096,
                 NumGpu = 0,
+                NumThread = options.SlmThreads > 0 ? options.SlmThreads : null,
                 RequestTimeout = TimeSpan.FromSeconds(30),
                 JobTimeout = TimeSpan.FromSeconds(30)
             }, logger: logger);

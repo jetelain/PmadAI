@@ -24,13 +24,13 @@ public class OllamaSpeculativeSummarizerTests
     public void OllamaSpeculativeSummarizerOptions_DefaultValues_AreSensible()
     {
         var options = new OllamaSpeculativeSummarizerOptions();
-        Assert.Equal("qwen3.5:2b", options.Model);
+        Assert.Equal("gemma4:e2b", options.Model);
         Assert.Equal(new Uri("http://localhost:11434"), options.Endpoint);
         Assert.Equal(4096, options.ContextSize);
         Assert.Equal(150, options.MaxSummaryTokens);
         Assert.Equal(100, options.QueueCapacity);
         Assert.Equal(0.2f, options.Temperature);
-        Assert.Equal("5m", options.KeepAlive);
+        Assert.Equal("15m", options.KeepAlive);
     }
 
     [Fact]
@@ -149,7 +149,7 @@ public class OllamaSpeculativeSummarizerTests
             new OllamaSpeculativeSummarizerOptions { MaxSummaryTokens = 50 },
             httpClient);
 
-        summarizer.EnqueueSummarization("session_1", "item_a", SummarizationTarget.ToolResult, "Extensive log output of 500 lines...");
+        summarizer.EnqueueSummarization("session_1", "item_a", "Extensive log output of 500 lines...");
 
         string? summary = null;
         for (int i = 0; i < 40; i++)
@@ -177,7 +177,7 @@ public class OllamaSpeculativeSummarizerTests
 
             var responseJson = $$"""
             {
-                "model": "qwen3.5:2b",
+                "model": "gemma4:e2b",
                 "message": {
                     "role": "assistant",
                     "content": "Summary for {{userText}}"
@@ -197,8 +197,8 @@ public class OllamaSpeculativeSummarizerTests
             new OllamaSpeculativeSummarizerOptions(),
             httpClient);
 
-        summarizer.EnqueueSummarization("session_A", "key_1", SummarizationTarget.ToolResult, "Raw 1");
-        summarizer.EnqueueSummarization("session_B", "key_2", SummarizationTarget.ToolResult, "Raw 2");
+        summarizer.EnqueueSummarization("session_A", "key_1", "Raw 1");
+        summarizer.EnqueueSummarization("session_B", "key_2", "Raw 2");
 
         for (int i = 0; i < 40; i++)
         {
@@ -220,15 +220,12 @@ public class OllamaSpeculativeSummarizerTests
     }
 
     [Fact]
-    public async Task PrioritizesToolResultOverThinkingMonologue()
+    public async Task ToolResultsAreIgnoredAndNotEnqueued()
     {
         var processedOrder = new List<string>();
-        var tcsBlock = new TaskCompletionSource<bool>();
 
         var handler = new MockHttpMessageHandler(async req =>
         {
-            await tcsBlock.Task; // Hold until released
-
             var body = await req.Content!.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
             var msgs = doc.RootElement.GetProperty("messages");
@@ -240,7 +237,7 @@ public class OllamaSpeculativeSummarizerTests
 
             var responseJson = """
             {
-                "model": "qwen3.5:2b",
+                "model": "gemma4:e2b",
                 "message": {
                     "role": "assistant",
                     "content": "Done"
@@ -260,31 +257,27 @@ public class OllamaSpeculativeSummarizerTests
             new OllamaSpeculativeSummarizerOptions { QueueCapacity = 10 },
             httpClient);
 
-        // Enqueue thinking monologue first, then tool result
-        summarizer.EnqueueSummarization("s1", "think1", SummarizationTarget.ThinkingMonologue, "Thought 1");
-        summarizer.EnqueueSummarization("s1", "tool1", SummarizationTarget.ToolResult, "Tool Result 1");
-
-        // Release the worker
-        tcsBlock.SetResult(true);
+        // Enqueue thinking monologue and tool result
+        summarizer.EnqueueSummarization("s1", "think1", "Thought 1");
 
         for (int i = 0; i < 40; i++)
         {
-            if (summarizer.TryGetSummary("s1", "think1", out _) &&
-                summarizer.TryGetSummary("s1", "tool1", out _))
+            if (summarizer.TryGetSummary("s1", "think1", out _))
             {
                 break;
             }
             await Task.Delay(50);
         }
 
-        // ToolResult (priority 0) should be processed before ThinkingMonologue (priority 1)
-        Assert.Equal(2, processedOrder.Count);
-        Assert.Contains("Tool Result 1", processedOrder);
-        Assert.Contains("Thought 1", processedOrder);
+        // Only ThinkingMonologue should be queued and processed
+        Assert.Single(processedOrder);
+        Assert.Equal("Thought 1", processedOrder[0]);
+        Assert.True(summarizer.TryGetSummary("s1", "think1", out _));
+        Assert.False(summarizer.TryGetSummary("s1", "tool1", out _));
     }
 
     [Fact]
-    public async Task PrioritizesLargeToolResultsOverThinkingTraces()
+    public async Task PrioritizesLargeThinkingTracesOverShorterTraces()
     {
         var processedOrder = new List<string>();
         var tcsBlock = new TaskCompletionSource<bool>();
@@ -312,7 +305,7 @@ public class OllamaSpeculativeSummarizerTests
 
             var responseJson = """
             {
-                "model": "qwen3.5:2b",
+                "model": "gemma4:e2b",
                 "message": { "role": "assistant", "content": "Done" },
                 "done": true
             }
@@ -330,19 +323,17 @@ public class OllamaSpeculativeSummarizerTests
             httpClient);
 
         // 1. Prime the worker to guarantee it is blocked inside handler
-        summarizer.EnqueueSummarization("s0", "prime", SummarizationTarget.ThinkingMonologue, "Prime");
+        summarizer.EnqueueSummarization("s0", "prime", "Prime");
         await firstRequestEntered.Task;
 
         // 2. While worker is blocked, enqueue all test items into queue
         var thinkLong = new string('T', 1000);
-        var toolShort = new string('S', 50);
-        var toolLarge = new string('L', 5000);
+        var thinkLarge = new string('L', 5000);
         var thinkShort = new string('t', 20);
 
-        summarizer.EnqueueSummarization("s1", "think_long", SummarizationTarget.ThinkingMonologue, thinkLong);
-        summarizer.EnqueueSummarization("s1", "tool_short", SummarizationTarget.ToolResult, toolShort);
-        summarizer.EnqueueSummarization("s1", "tool_large", SummarizationTarget.ToolResult, toolLarge);
-        summarizer.EnqueueSummarization("s1", "think_short", SummarizationTarget.ThinkingMonologue, thinkShort);
+        summarizer.EnqueueSummarization("s1", "think_long", thinkLong);
+        summarizer.EnqueueSummarization("s1", "think_large", thinkLarge);
+        summarizer.EnqueueSummarization("s1", "think_short", thinkShort);
 
         // 3. Release the blocked worker
         tcsBlock.SetResult(true);
@@ -350,8 +341,7 @@ public class OllamaSpeculativeSummarizerTests
         for (int i = 0; i < 40; i++)
         {
             if (summarizer.TryGetSummary("s1", "think_long", out _) &&
-                summarizer.TryGetSummary("s1", "tool_short", out _) &&
-                summarizer.TryGetSummary("s1", "tool_large", out _) &&
+                summarizer.TryGetSummary("s1", "think_large", out _) &&
                 summarizer.TryGetSummary("s1", "think_short", out _))
             {
                 break;
@@ -359,16 +349,16 @@ public class OllamaSpeculativeSummarizerTests
             await Task.Delay(50);
         }
 
-        Assert.Equal(4, processedOrder.Count);
-        // Tool results must precede thinking traces, and within tool results, large precedes short
-        Assert.Equal(toolLarge, processedOrder[0]);
-        Assert.Equal(toolShort, processedOrder[1]);
-        Assert.Equal(thinkLong, processedOrder[2]);
-        Assert.Equal(thinkShort, processedOrder[3]);
+        Assert.Equal(3, processedOrder.Count);
+        // Larger thinking monologues must precede shorter thinking monologues
+        Assert.Equal(thinkLarge, processedOrder[0]);
+        Assert.Equal(thinkLong, processedOrder[1]);
+        Assert.Equal(thinkShort, processedOrder[2]);
+        Assert.False(summarizer.TryGetSummary("s1", "tool_ignored", out _));
     }
 
     [Fact]
-    public async Task StructuredPrompts_ToolResult_SendsKeyValueFormatAndStripsMarkdownFences()
+    public async Task StructuredPrompts_ThinkingMonologue_SendsKeyValueFormatAndStripsMarkdownFences()
     {
         string? capturedSystemPrompt = null;
 
@@ -382,10 +372,10 @@ public class OllamaSpeculativeSummarizerTests
             // Simulate SLM returning markdown-fenced structured output
             var responseJson = """
             {
-                "model": "qwen3.5:2b",
+                "model": "gemma4:e2b",
                 "message": {
                     "role": "assistant",
-                    "content": "```text\n[TOOL_RESULT_SUMMARY]\nStatus: SUCCESS\nKey_Entities: [test.py, run_tests]\nOutput_Summary: All 12 unit tests passed.\nError_Context: None\n[/TOOL_RESULT_SUMMARY]\n```"
+                    "content": "```text\n[THINKING_SUMMARY]\n- Finding: Regex mismatch in parser\n- Decision: Updated regex pattern\n- Ruled_Out: Rewriting full parser\n[/THINKING_SUMMARY]\n```"
                 },
                 "done": true
             }
@@ -402,7 +392,7 @@ public class OllamaSpeculativeSummarizerTests
             new OllamaSpeculativeSummarizerOptions(),
             httpClient);
 
-        summarizer.EnqueueSummarization("s1", "call_1", SummarizationTarget.ToolResult, "Test execution output...");
+        summarizer.EnqueueSummarization("s1", "call_1", "Long internal reasoning trace exceeding the limits...");
 
         string? summary = null;
         for (int i = 0; i < 40; i++)
@@ -415,20 +405,19 @@ public class OllamaSpeculativeSummarizerTests
         }
 
         Assert.NotNull(capturedSystemPrompt);
-        Assert.Contains("[TOOL_RESULT_SUMMARY]", capturedSystemPrompt);
-        Assert.Contains("Status: SUCCESS|FAILED", capturedSystemPrompt);
-        Assert.Contains("Key_Entities: [id, name, path]", capturedSystemPrompt);
-        Assert.Contains("Output_Summary: <single factual sentence>", capturedSystemPrompt);
-        Assert.Contains("Error_Context: <exact error if failed>", capturedSystemPrompt);
+        Assert.Contains("[THINKING_SUMMARY]", capturedSystemPrompt);
+        Assert.Contains("- Finding:", capturedSystemPrompt);
+        Assert.Contains("- Decision:", capturedSystemPrompt);
+        Assert.Contains("- Ruled_Out:", capturedSystemPrompt);
 
         // Verify markdown code fences were stripped
         Assert.NotNull(summary);
-        Assert.StartsWith("[TOOL_RESULT_SUMMARY]", summary);
-        Assert.EndsWith("[/TOOL_RESULT_SUMMARY]", summary);
+        Assert.StartsWith("[THINKING_SUMMARY]", summary);
+        Assert.EndsWith("[/THINKING_SUMMARY]", summary);
         Assert.DoesNotContain("```", summary);
 
-        // Verify ToolResultCompactor preserves the structured block cleanly
-        var compactor = new ToolResultCompactor(new ToolResultCompactionOptions
+        // Verify ThinkingTraceCompactor preserves the structured block cleanly
+        var compactor = new ThinkingTraceCompactor(new ThinkingTraceCompactionOptions
         {
             Summarizer = summarizer,
             KeepVerbatimCount = 0,
@@ -439,15 +428,21 @@ public class OllamaSpeculativeSummarizerTests
 
         var compacted = compactor.Compact([
             new Microsoft.Extensions.AI.ChatMessage(
-                Microsoft.Extensions.AI.ChatRole.Tool,
-                [new Microsoft.Extensions.AI.FunctionResultContent("call_1", "Test execution output...")])
+                Microsoft.Extensions.AI.ChatRole.Assistant,
+                [new Microsoft.Extensions.AI.TextReasoningContent("Long internal reasoning trace exceeding the limits...")])
+            {
+                AdditionalProperties = new Microsoft.Extensions.AI.AdditionalPropertiesDictionary
+                {
+                    ["id"] = "call_1"
+                }
+            }
         ], "s1");
 
-        var frc = Assert.IsType<Microsoft.Extensions.AI.FunctionResultContent>(compacted[0].Contents[0]);
-        var resultText = frc.Result?.ToString();
+        var trc = Assert.IsType<Microsoft.Extensions.AI.TextReasoningContent>(compacted[0].Contents[0]);
+        var resultText = trc.Text;
         Assert.NotNull(resultText);
-        Assert.StartsWith("[TOOL_RESULT_SUMMARY]", resultText);
-        Assert.DoesNotContain("[Semantic Summary: [TOOL_RESULT_SUMMARY]", resultText);
+        Assert.StartsWith("[THINKING_SUMMARY]", resultText);
+        Assert.DoesNotContain("[Reasoned Summary: [THINKING_SUMMARY]", resultText);
     }
 
     [Fact]
@@ -474,7 +469,7 @@ public class OllamaSpeculativeSummarizerTests
             new OllamaSpeculativeSummarizerOptions(),
             httpClient);
 
-        summarizer.EnqueueSummarization("s1", "k1", SummarizationTarget.ToolResult, "data");
+        summarizer.EnqueueSummarization("s1", "k1", "data");
 
         string? summary = null;
         for (int i = 0; i < 40; i++)
@@ -576,8 +571,8 @@ public class OllamaSpeculativeSummarizerTests
             },
             httpClient);
 
-        summarizer.EnqueueSummarization("s1", "k_slow", SummarizationTarget.ToolResult, "hanging_job text");
-        summarizer.EnqueueSummarization("s1", "k_fast", SummarizationTarget.ToolResult, "fast text");
+        summarizer.EnqueueSummarization("s1", "k_slow", "hanging_job text");
+        summarizer.EnqueueSummarization("s1", "k_fast", "fast text");
 
         string? fastSummary = null;
         for (int i = 0; i < 40; i++)
@@ -622,7 +617,7 @@ public class OllamaSpeculativeSummarizerTests
             httpClient);
 
         var largeText = new string('A', 2000);
-        summarizer.EnqueueSummarization("s1", "k_large", SummarizationTarget.ToolResult, largeText);
+        summarizer.EnqueueSummarization("s1", "k_large", largeText);
 
         string? summary = null;
         for (int i = 0; i < 40; i++)
@@ -638,4 +633,117 @@ public class OllamaSpeculativeSummarizerTests
         Assert.NotNull(capturedBody);
         Assert.Contains("[truncated for summarization]", capturedBody);
     }
+
+    [Fact]
+    public async Task GetInstalledModelsAsync_SupportsBothNameAndModelProperties()
+    {
+        var handler = new MockHttpMessageHandler(req =>
+        {
+            Assert.Equal(HttpMethod.Get, req.Method);
+            Assert.EndsWith("/api/tags", req.RequestUri!.ToString());
+
+            var json = """
+            {
+                "models": [
+                    { "name": "gemma4:e2b" },
+                    { "model": "qwen2.5:3b" },
+                    { "name": "" }
+                ]
+            }
+            """;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            });
+        });
+
+        using var httpClient = new HttpClient(handler);
+        using var client = new OllamaApiClient(httpClient: httpClient);
+
+        var models = await client.GetInstalledModelsAsync();
+
+        Assert.Equal(2, models.Count);
+        Assert.Contains("gemma4:e2b", models);
+        Assert.Contains("qwen2.5:3b", models);
+    }
+
+    [Fact]
+    public async Task ChatAsync_SerializesNumThreadOption()
+    {
+        string? capturedBody = null;
+        var handler = new MockHttpMessageHandler(async req =>
+        {
+            capturedBody = await req.Content!.ReadAsStringAsync();
+            var json = """
+            {
+                "message": { "role": "assistant", "content": "Done" },
+                "done": true
+            }
+            """;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+        });
+
+        using var httpClient = new HttpClient(handler);
+        using var client = new OllamaApiClient(httpClient: httpClient);
+
+        var result = await client.ChatAsync("Hello", numThread: 4);
+
+        Assert.Equal("Done", result);
+        Assert.NotNull(capturedBody);
+        using var doc = JsonDocument.Parse(capturedBody);
+        Assert.True(doc.RootElement.TryGetProperty("options", out var optionsEl));
+        Assert.True(optionsEl.TryGetProperty("num_thread", out var threadEl));
+        Assert.Equal(4, threadEl.GetInt32());
+    }
+
+    [Fact]
+    public async Task OllamaSpeculativeSummarizer_PassesNumThreadOption()
+    {
+        string? capturedBody = null;
+        var handler = new MockHttpMessageHandler(async req =>
+        {
+            capturedBody = await req.Content!.ReadAsStringAsync();
+            var json = """
+            {
+                "message": { "role": "assistant", "content": "[THINKING_SUMMARY]\n- Finding: OK\n[/THINKING_SUMMARY]" },
+                "done": true
+            }
+            """;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+        });
+
+        using var httpClient = new HttpClient(handler);
+        await using var summarizer = new OllamaSpeculativeSummarizer(
+            new OllamaSpeculativeSummarizerOptions
+            {
+                NumThread = 6
+            },
+            httpClient);
+
+        summarizer.EnqueueSummarization("s1", "k1", "Long reasoning trace text...");
+
+        string? summary = null;
+        for (int i = 0; i < 40; i++)
+        {
+            if (summarizer.TryGetSummary("s1", "k1", out summary))
+            {
+                break;
+            }
+            await Task.Delay(50);
+        }
+
+        Assert.NotNull(summary);
+        Assert.NotNull(capturedBody);
+        using var doc = JsonDocument.Parse(capturedBody);
+        Assert.True(doc.RootElement.TryGetProperty("options", out var optionsEl));
+        Assert.True(optionsEl.TryGetProperty("num_thread", out var threadEl));
+        Assert.Equal(6, threadEl.GetInt32());
+    }
 }
+

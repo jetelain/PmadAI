@@ -10,8 +10,15 @@ public class ThinkingTraceCompactionOptions : CompactionOptionsBase
 {
     public ThinkingTraceCompactionOptions()
     {
-        KeepVerbatimCount = 10;
+        KeepVerbatimCount = 5;
+        FallbackCharacterLimit = 1500;
+        FallbackPrefixLength = 1000;
+        FallbackSuffixLength = 400;
     }
+
+    /// <summary>Optional background SLM summarizer.</summary>
+    public ISpeculativeSummarizer? Summarizer { get; set; }
+
 }
 
 /// <summary>
@@ -31,11 +38,11 @@ public class ThinkingTraceCompactor
     }
 
     public ThinkingTraceCompactor(
-        ISpeculativeSummarizer? summarizer,
-        int keepVerbatimCount = 10,
-        int fallbackCharacterLimit = 1750,
-        int fallbackPrefixLength = 1500,
-        int fallbackSuffixLength = 250)
+        ISpeculativeSummarizer? summarizer = null,
+        int keepVerbatimCount = 5,
+        int fallbackCharacterLimit = 1500,
+        int fallbackPrefixLength = 1000,
+        int fallbackSuffixLength = 400)
     {
         if (fallbackCharacterLimit < fallbackPrefixLength + fallbackSuffixLength)
         {
@@ -112,7 +119,7 @@ public class ThinkingTraceCompactor
         var rawReasoning = string.Concat(reasoningList.Select(r => r.Text));
         if (string.IsNullOrEmpty(rawReasoning) || rawReasoning.Length <= _options.FallbackCharacterLimit) return;
 
-        var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, SummarizationTarget.ThinkingMonologue, rawReasoning);
+        var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, CompactionTarget.ThinkingMonologue, rawReasoning);
 
         var compactedText = ResolveCompactedResult(rawReasoning, sessionId, itemKey);
 
@@ -136,7 +143,7 @@ public class ThinkingTraceCompactor
         var rawReasoning = string.Concat(reasoningList.Select(r => r.Text));
         if (string.IsNullOrEmpty(rawReasoning) || rawReasoning.Length <= _options.FallbackCharacterLimit) return message;
 
-        var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, SummarizationTarget.ThinkingMonologue, rawReasoning);
+        var itemKey = CompactionItemKeyResolver.ResolveItemKey(message, CompactionTarget.ThinkingMonologue, rawReasoning);
 
         var compactedText = ResolveCompactedResult(rawReasoning, sessionId, itemKey);
 
@@ -194,7 +201,7 @@ public class ThinkingTraceCompactor
         var evt = new CompactionEvent(
             DateTimeOffset.UtcNow,
             sessionId,
-            SummarizationTarget.ThinkingMonologue,
+            CompactionTarget.ThinkingMonologue,
             itemKey,
             origChars,
             compactedChars,
@@ -264,9 +271,29 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
 
         var effectiveMessages = _compactor.Compact(msgList, sessionId);
 
+        System.Text.StringBuilder? reasoningBuilder = null;
         await foreach (var update in base.GetStreamingResponseAsync(effectiveMessages, options, cancellationToken))
         {
+            if (_options.Summarizer != null && update.Contents != null)
+            {
+                foreach (var content in update.Contents)
+                {
+                    if (content is TextReasoningContent trc && !string.IsNullOrEmpty(trc.Text))
+                    {
+                        reasoningBuilder ??= new System.Text.StringBuilder();
+                        reasoningBuilder.Append(trc.Text);
+                    }
+                }
+            }
             yield return update;
+        }
+
+        if (reasoningBuilder != null && reasoningBuilder.Length > _options.FallbackCharacterLimit)
+        {
+            var raw = reasoningBuilder.ToString();
+            var syntheticMsg = new ChatMessage(ChatRole.Assistant, [new TextReasoningContent(raw)]);
+            var itemKey = CompactionItemKeyResolver.ResolveItemKey(syntheticMsg, CompactionTarget.ThinkingMonologue, raw);
+            _options.Summarizer!.EnqueueSummarization(sessionId, itemKey, raw);
         }
     }
 
@@ -284,8 +311,8 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
             var raw = string.Concat(msg.Contents.OfType<TextReasoningContent>().Select(r => r.Text));
             if (!string.IsNullOrEmpty(raw) && raw.Length > _options.FallbackCharacterLimit)
             {
-                var itemKey = CompactionItemKeyResolver.ResolveItemKey(msg, SummarizationTarget.ThinkingMonologue, raw);
-                _options.Summarizer.EnqueueSummarization(sessionId, itemKey, SummarizationTarget.ThinkingMonologue, raw);
+                var itemKey = CompactionItemKeyResolver.ResolveItemKey(msg, CompactionTarget.ThinkingMonologue, raw);
+                _options.Summarizer.EnqueueSummarization(sessionId, itemKey, raw);
             }
         }
     }
@@ -299,8 +326,8 @@ public class ThinkingTraceCompactionChatClient : DelegatingChatClient
             var raw = string.Concat(msg.Contents.OfType<TextReasoningContent>().Select(r => r.Text));
             if (!string.IsNullOrEmpty(raw) && raw.Length > _options.FallbackCharacterLimit)
             {
-                var itemKey = CompactionItemKeyResolver.ResolveItemKey(msg, SummarizationTarget.ThinkingMonologue, raw);
-                _options.Summarizer.EnqueueSummarization(sessionId, itemKey, SummarizationTarget.ThinkingMonologue, raw);
+                var itemKey = CompactionItemKeyResolver.ResolveItemKey(msg, CompactionTarget.ThinkingMonologue, raw);
+                _options.Summarizer.EnqueueSummarization(sessionId, itemKey, raw);
             }
         }
     }
