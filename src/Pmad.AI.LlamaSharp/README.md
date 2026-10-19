@@ -118,6 +118,25 @@ foreach (var content in response.Messages[0].Contents)
 }
 ```
 
+#### Resilient Tool Calling Pipeline with `UseRecommendedSlmPipeline`
+
+`LlamaSharpChatClient` serves as the raw, strict inference engine focusing on native model template formatting. For production SLM deployments, wrap `LlamaSharpChatClient` with `UseRecommendedSlmPipeline` (from `Pmad.AI`) to add automated tool call healing (repairing truncated arguments, malformed JSON, Markdown code blocks, and ReAct syntax), lenient tool dispatching, execution loop breakers, and deterministic context compaction:
+
+```csharp
+using Microsoft.Extensions.AI;
+using Pmad.AI;
+using Pmad.AI.LlamaSharp;
+
+using var rawClient = LlamaSharpChatClient.CreateFromFile("models/qwen3.5-2b-ud-q4_k_xl.gguf");
+
+// Wrap with recommended SLM resilience pipeline
+var client = new ChatClientBuilder(rawClient)
+    .UseRecommendedSlmPipeline()
+    .Build();
+
+var response = await client.GetResponseAsync("What's the weather in Paris?", options);
+```
+
 ### 4. Multimodal Vision Inference
 
 Pair a GGUF language model with a companion `mmproj` vision projector to analyze images:

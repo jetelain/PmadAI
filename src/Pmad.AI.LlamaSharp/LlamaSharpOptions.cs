@@ -12,6 +12,8 @@ public delegate (string Name, IDictionary<string, object?> Arguments)? FunctionC
 
 /// <summary>
 /// Configuration options for <see cref="LlamaSharpChatClient"/>.
+/// For resilient tool call healing, compaction, and argument repair pipelines, wrap the resulting client
+/// with <c>UseRecommendedSlmPipeline</c> from <c>Pmad.AI</c>.
 /// </summary>
 public sealed class LlamaSharpOptions
 {
@@ -141,13 +143,6 @@ public sealed class LlamaSharpOptions
     /// Separate from the static native llama.cpp logger to avoid mixing logs between concurrent chats.
     /// </summary>
     public ILogger? Logger { get; set; }
-
-    /// <summary>
-    /// Controls whether built-in tool call healing, JSON sanitization, and lenient fallback parsers are active.
-    /// Defaults to true for production resilience.
-    /// Set to false during benchmarking to evaluate raw, unassisted model outputs.
-    /// </summary>
-    public bool EnableBuiltInHealing { get; set; } = true;
 
     /// <summary>
     /// Optional <see cref="ILoggerFactory"/> used to create the per-chat-client logger when <see cref="Logger"/> is not specified.

@@ -100,6 +100,7 @@ Empirically proven on benchmarks to deliver maximum task success, token savings 
 using Microsoft.Extensions.AI;
 using Pmad.AI;
 
+// innerChatClient can be LlamaSharpChatClient, OllamaChatClient, or any IChatClient
 var client = new ChatClientBuilder(innerChatClient)
     .UseRecommendedSlmPipeline(dispatcher)
     .Build();

@@ -241,67 +241,7 @@ public class LocalModelChatFormatterTests
         Assert.Equal("Tokyo", calls[1].Arguments?["city"]?.ToString());
     }
 
-    [Fact]
-    public void ParseAssistantResponse_ParsesGemmaNativeToolCallSyntax()
-    {
-        var raw = "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|><|tool_call>call:get_weather{city:<|\"|>Tokyo<|\"|>}<tool_call|>";
 
-        var parsed = LocalModelChatFormatter.ParseAssistantResponse(raw);
-
-        var calls = parsed.Contents.OfType<FunctionCallContent>().ToList();
-        Assert.Equal(2, calls.Count);
-        Assert.Equal("get_weather", calls[0].Name);
-        Assert.Equal("Paris", calls[0].Arguments?["city"]?.ToString());
-        Assert.Equal("get_weather", calls[1].Name);
-        Assert.Equal("Tokyo", calls[1].Arguments?["city"]?.ToString());
-
-        // Make sure no stray tokens remained as text
-        var text = parsed.Contents.OfType<TextContent>().FirstOrDefault();
-        Assert.True(text == null || string.IsNullOrWhiteSpace(text.Text));
-    }
-
-    [Fact]
-    public void ParseAssistantResponse_ParsesRawCallSyntaxWithoutXmlTags()
-    {
-        var raw = "call:get_weather{city:<|\"|>London<|\"|>,unit:<|\"|>celsius<|\"|>}";
-
-        var parsed = LocalModelChatFormatter.ParseAssistantResponse(raw);
-
-        var call = parsed.Contents.OfType<FunctionCallContent>().FirstOrDefault();
-        Assert.NotNull(call);
-        Assert.Equal("get_weather", call.Name);
-        Assert.Equal("London", call.Arguments?["city"]?.ToString());
-        Assert.Equal("celsius", call.Arguments?["unit"]?.ToString());
-    }
-
-    [Fact]
-    public void ParseAssistantResponse_FallbackJsonCodeBlock_ParsesFunctionCall()
-    {
-        var raw = "Here is the call:\n```json\n{\n  \"name\": \"calculate\",\n  \"arguments\": {\"expr\": \"10 * 10\"}\n}\n```";
-
-        var parsed = LocalModelChatFormatter.ParseAssistantResponse(raw);
-
-        var call = parsed.Contents.OfType<FunctionCallContent>().FirstOrDefault();
-        Assert.NotNull(call);
-        Assert.Equal("calculate", call.Name);
-        Assert.Equal("10 * 10", call.Arguments?["expr"]?.ToString());
-
-        var text = parsed.Contents.OfType<TextContent>().FirstOrDefault();
-        Assert.NotNull(text);
-        Assert.Equal("Here is the call:", text.Text);
-    }
-
-    [Fact]
-    public void ParseAssistantResponse_FallbackToolCallCodeBlock_ParsesFunctionCall()
-    {
-        var raw = "```tool_call\n{\"name\": \"do_work\", \"arguments\": {\"item\": 1}}\n```";
-
-        var parsed = LocalModelChatFormatter.ParseAssistantResponse(raw);
-
-        var call = parsed.Contents.OfType<FunctionCallContent>().FirstOrDefault();
-        Assert.NotNull(call);
-        Assert.Equal("do_work", call.Name);
-    }
 
     [Fact]
     public void ParseAssistantResponse_WithNormalizer_AppliesCustomTransformations()
@@ -622,48 +562,10 @@ public class LocalModelChatFormatterTests
     }
 
     [Fact]
-    public void ParseAssistantResponse_WithTrailingCommas_RepairsAndParsesToolCall()
-    {
-        var raw = "<tool_call>{\"name\":\"fetch_weather\",\"arguments\":{\"city\":\"Rome\",},}</tool_call>";
-        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw);
-
-        var call = Assert.Single(msg.Contents.OfType<FunctionCallContent>());
-        Assert.Equal("fetch_weather", call.Name);
-        Assert.Equal("Rome", call.Arguments?["city"]);
-    }
-
-    [Fact]
-    public void ParseAssistantResponse_WithMarkdownFencesInArguments_StripsFencesAndParsesArguments()
-    {
-        var raw = "<tool_call>{\"name\":\"write_file\",\"arguments\":\"```json\\n{\\\"path\\\":\\\"app.cs\\\",\\\"lines\\\":10,}\\n```\"}</tool_call>";
-        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw);
-
-        var call = Assert.Single(msg.Contents.OfType<FunctionCallContent>());
-        Assert.Equal("write_file", call.Name);
-        Assert.Equal("app.cs", call.Arguments?["path"]);
-        Assert.Equal(10, call.Arguments?["lines"]);
-    }
-
-    [Fact]
-    public void ParseAssistantResponse_WithReActActionSyntax_ExtractsToolCall()
+    public void ParseAssistantResponse_RejectsReActActionSyntax()
     {
         var raw = "I will search now.\nAction: web_search\nAction Input: {\"query\":\"csharp 10\"}\nDone.";
         var msg = LocalModelChatFormatter.ParseAssistantResponse(raw);
-
-        var call = Assert.Single(msg.Contents.OfType<FunctionCallContent>());
-        Assert.Equal("web_search", call.Name);
-        Assert.Equal("csharp 10", call.Arguments?["query"]);
-
-        var text = msg.Contents.OfType<TextContent>().Single().Text;
-        Assert.DoesNotContain("Action:", text);
-        Assert.Contains("I will search now.", text);
-    }
-
-    [Fact]
-    public void ParseAssistantResponse_WithStrictMode_RejectsReActActionSyntax()
-    {
-        var raw = "I will search now.\nAction: web_search\nAction Input: {\"query\":\"csharp 10\"}\nDone.";
-        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw, dialect: null, normalizer: null, enableHealing: false);
 
         Assert.Empty(msg.Contents.OfType<FunctionCallContent>());
         var text = msg.Contents.OfType<TextContent>().Single().Text;
@@ -671,61 +573,32 @@ public class LocalModelChatFormatterTests
     }
 
     [Fact]
-    public void ParseAssistantResponse_WithStrictMode_RejectsMarkdownFencesFallback()
+    public void ParseAssistantResponse_RejectsMarkdownFencesFallback()
     {
         var raw = "```json\n{\"name\":\"web_search\",\"arguments\":{\"query\":\"csharp 10\"}}\n```";
-        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw, dialect: null, normalizer: null, enableHealing: false);
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw);
 
         Assert.Empty(msg.Contents.OfType<FunctionCallContent>());
     }
 
     [Fact]
-    public void ParseAssistantResponse_WithStrictMode_RejectsTrailingCommaMalformedJson()
+    public void ParseAssistantResponse_RejectsTrailingCommaMalformedJson()
     {
         var raw = "<tool_call>{\"name\":\"web_search\",\"arguments\":{\"query\":\"test\",}}</tool_call>";
-        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw, dialect: null, normalizer: null, enableHealing: false);
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw);
 
         Assert.Empty(msg.Contents.OfType<FunctionCallContent>());
     }
 
     [Fact]
-    public void ParseAssistantResponse_WithStrictMode_AcceptsValidXmlToolCall()
+    public void ParseAssistantResponse_AcceptsValidXmlToolCall()
     {
         var raw = "<tool_call>{\"name\":\"web_search\",\"arguments\":{\"query\":\"test\"}}</tool_call>";
-        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw, dialect: null, normalizer: null, enableHealing: false);
+        var msg = LocalModelChatFormatter.ParseAssistantResponse(raw);
 
         var call = Assert.Single(msg.Contents.OfType<FunctionCallContent>());
         Assert.Equal("web_search", call.Name);
         Assert.Equal("test", call.Arguments?["query"]);
-    }
-
-    [Fact]
-    public void ParseAssistantMessages_WithProseAndToolCalls_SplitsIntoSequentialMessages()
-    {
-        var raw = "I will search now.\nAction: web_search\nAction Input: {\"query\":\"csharp 10\"}\nDone.";
-        var messages = LocalModelChatFormatter.ParseAssistantMessages(raw);
-
-        Assert.Equal(3, messages.Count);
-        Assert.Equal("I will search now.", messages[0].Text);
-        Assert.Empty(messages[0].Contents.OfType<FunctionCallContent>());
-
-        var call = Assert.Single(messages[1].Contents.OfType<FunctionCallContent>());
-        Assert.Equal("web_search", call.Name);
-        Assert.Equal("csharp 10", call.Arguments?["query"]);
-
-        Assert.Equal("Done.", messages[2].Text);
-        Assert.Empty(messages[2].Contents.OfType<FunctionCallContent>());
-    }
-
-    [Fact]
-    public void ParseAssistantMessages_WithOnlyToolCalls_ReturnsSingleMessage()
-    {
-        var raw = "<tool_call>{\"name\":\"web_search\",\"arguments\":{\"query\":\"test\"}}</tool_call>";
-        var messages = LocalModelChatFormatter.ParseAssistantMessages(raw);
-
-        var msg = Assert.Single(messages);
-        var call = Assert.Single(msg.Contents.OfType<FunctionCallContent>());
-        Assert.Equal("web_search", call.Name);
     }
 }
 

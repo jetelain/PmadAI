@@ -327,8 +327,7 @@ public static class Program
                     PromptFormat = preset.PromptFormat,
                     EnableReasoning = plan.EnableReasoning,
                     ReasoningEffort = plan.ReasoningEffort,
-                    MtpPath = preset.GetMtpLocalPath(modelsDir),
-                    EnableBuiltInHealing = false // Strict parsing baseline; pipeline middleware manages healing
+                    MtpPath = preset.GetMtpLocalPath(modelsDir)
                 };
 
                 using var rawClient = LlamaSharpChatClient.CreateFromFile(
@@ -377,8 +376,7 @@ public static class Program
                     ContextSize = contextSize,
                     GpuLayerCount = plan.GpuLayers,
                     EnableReasoning = plan.EnableReasoning,
-                    ReasoningEffort = plan.ReasoningEffort,
-                    EnableBuiltInHealing = false
+                    ReasoningEffort = plan.ReasoningEffort
                 };
 
                 using var rawClient = LlamaSharpChatClient.CreateFromFile(

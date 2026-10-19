@@ -14,6 +14,8 @@ namespace Pmad.AI.LlamaSharp;
 /// <see cref="IChatClient"/> adapter for in-process local Small Language Models (SLMs)
 /// executed via LLamaSharp (llama.cpp) supporting GGUF models.
 /// Supports text-only generation and multimodal vision when paired with an <c>mmproj</c> projector.
+/// For resilient tool call healing, compaction, loop breaking, and argument repairs, wrap this raw client
+/// with <c>UseRecommendedSlmPipeline</c> on <see cref="ChatClientBuilder"/>.
 /// </summary>
 public sealed class LlamaSharpChatClient : IChatClient
 {
@@ -490,13 +492,13 @@ public sealed class LlamaSharpChatClient : IChatClient
                     }
 
                     var text = responseBuilder.ToString().Trim();
-                    var assistantMessages = LocalModelChatFormatter.ParseAssistantMessages(text, _dialect, _options.FunctionCallNormalizer, _options.EnableBuiltInHealing);
+                    var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(text, _dialect, _options.FunctionCallNormalizer);
 
                     LogOperation("Completed inference. Output tokens: {OutputTokens}, Total tokens: {TotalTokens}",
                         outputTokenCount, inputTokens + outputTokenCount);
 
                     ChatFinishReason finishReason;
-                    if (assistantMessages.Any(m => m.Contents.OfType<FunctionCallContent>().Any()))
+                    if (assistantMessage.Contents.OfType<FunctionCallContent>().Any())
                     {
                         finishReason = ChatFinishReason.ToolCalls;
                     }
@@ -509,7 +511,7 @@ public sealed class LlamaSharpChatClient : IChatClient
                         finishReason = ChatFinishReason.Stop;
                     }
 
-                    var chatResponse = new ChatResponse(assistantMessages)
+                    var chatResponse = new ChatResponse(assistantMessage)
                     {
                         FinishReason = finishReason,
                         Usage = new UsageDetails
@@ -632,20 +634,17 @@ public sealed class LlamaSharpChatClient : IChatClient
 
             if (hasTools)
             {
-                var assistantMessages = LocalModelChatFormatter.ParseAssistantMessages(responseBuilder.ToString().Trim(), _dialect, _options.FunctionCallNormalizer, _options.EnableBuiltInHealing);
-                foreach (var assistantMessage in assistantMessages)
-                {
-                    ChatFinishReason finishReason = assistantMessage.Contents.OfType<FunctionCallContent>().Any()
-                        ? ChatFinishReason.ToolCalls
-                        : (outputTokenCount >= maxOutputTokens ? ChatFinishReason.Length : ChatFinishReason.Stop);
+                var assistantMessage = LocalModelChatFormatter.ParseAssistantResponse(responseBuilder.ToString().Trim(), _dialect, _options.FunctionCallNormalizer);
+                ChatFinishReason finishReason = assistantMessage.Contents.OfType<FunctionCallContent>().Any()
+                    ? ChatFinishReason.ToolCalls
+                    : (outputTokenCount >= maxOutputTokens ? ChatFinishReason.Length : ChatFinishReason.Stop);
 
-                    yield return new ChatResponseUpdate
-                    {
-                        Role = ChatRole.Assistant,
-                        Contents = assistantMessage.Contents.ToList(),
-                        FinishReason = finishReason
-                    };
-                }
+                yield return new ChatResponseUpdate
+                {
+                    Role = ChatRole.Assistant,
+                    Contents = assistantMessage.Contents.ToList(),
+                    FinishReason = finishReason
+                };
             }
             else
             {
