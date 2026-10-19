@@ -36,6 +36,7 @@ public sealed class LlamaSharpChatClient : IChatClient
     private readonly bool _ownsContext;
     private readonly ILogger _logger;
     private readonly LlamaModelPreset? _preset;
+    private readonly Pmad.AI.Tokens.HeuristicTokenEstimator _tokenEstimator;
 
     /// <summary>
     /// Configures process-wide logging for native llama.cpp execution using an <see cref="ILogger"/>.
@@ -170,6 +171,9 @@ public sealed class LlamaSharpChatClient : IChatClient
         _clipModel = clipModel;
         _ownsWeights = ownsWeights;
         _preset = LlamaModelPreset.Find(Path.GetFileName(modelPath)) ?? LlamaModelPreset.Find(Path.GetFileNameWithoutExtension(modelPath));
+        _tokenEstimator = _options.TokenEstimator 
+            ?? _preset?.TokenEstimator 
+            ?? (_dialect is Gemma4Dialect ? Pmad.AI.Tokens.HeuristicTokenEstimator.Gemma : (_dialect is ChatMLDialect ? Pmad.AI.Tokens.HeuristicTokenEstimator.Qwen : Pmad.AI.Tokens.HeuristicTokenEstimator.Default));
         
         EnsureNativeLogHookInstalled();
 
@@ -356,6 +360,11 @@ public sealed class LlamaSharpChatClient : IChatClient
     /// Gets the detected preset metadata for this model, or null if unrecognized or custom.
     /// </summary>
     public LlamaModelPreset? Preset => _preset;
+
+    /// <summary>
+    /// Gets the token estimator configured for prompt budgeting and safe token counting with this model.
+    /// </summary>
+    public Pmad.AI.Tokens.HeuristicTokenEstimator TokenEstimator => _tokenEstimator;
 
     /// <summary>
     /// Gets the path to the companion Multi-Token Prediction (MTP) draft model, or null if not configured.
@@ -747,11 +756,11 @@ public sealed class LlamaSharpChatClient : IChatClient
         // llama.cpp native BPE tokenizer (llama_tokenize) is prone to native access violations (0xC0000005)
         // or std::regex stack overflows when invoked with large prompt buffers (e.g. multi-turn tool outputs > 8 KB).
         // Access violations in native code cannot be caught by managed try/catch in modern .NET and crash the process.
-        // For large prompts, use zero-allocation, fast HeuristicTokenEstimator.
+        // For large prompts, use zero-allocation, fast HeuristicTokenEstimator with safety margin headroom.
         // For smaller prompts, exact native tokenization is safe and fast.
         if (promptText.Length > 8192 || _disposed || _context.NativeHandle.IsClosed || _context.NativeHandle.IsInvalid)
         {
-            return Pmad.AI.Tokens.HeuristicTokenEstimator.Default.Estimate(promptText);
+            return ApplyEstimatedTokenSafetyMargin(_tokenEstimator.Estimate(promptText));
         }
 
         try
@@ -760,8 +769,18 @@ public sealed class LlamaSharpChatClient : IChatClient
         }
         catch
         {
-            return Pmad.AI.Tokens.HeuristicTokenEstimator.Default.Estimate(promptText);
+            return ApplyEstimatedTokenSafetyMargin(_tokenEstimator.Estimate(promptText));
         }
+    }
+
+    private int ApplyEstimatedTokenSafetyMargin(int rawEstimate)
+    {
+        if (rawEstimate <= 0 || _options.EstimatedTokenSafetyMargin <= 0 || _tokenEstimator.SafetyMargin > 0)
+        {
+            return rawEstimate;
+        }
+
+        return (int)Math.Ceiling(rawEstimate * (1.0 + _options.EstimatedTokenSafetyMargin));
     }
 
     /// <inheritdoc />

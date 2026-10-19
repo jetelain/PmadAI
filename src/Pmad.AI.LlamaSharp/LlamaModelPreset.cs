@@ -1,3 +1,5 @@
+using Pmad.AI.Tokens;
+
 namespace Pmad.AI.LlamaSharp;
 
 /// <summary>
@@ -17,7 +19,8 @@ public sealed record LlamaModelPreset(
     string? MmprojFileName = "mmproj-bf16.gguf",
     bool SupportsReasoning = false,
     bool SupportsReasoningEffort = false,
-    string? MtpFileName = null
+    string? MtpFileName = null,
+    HeuristicTokenEstimator? TokenEstimator = null
 )
 {
     /// <summary>
@@ -72,7 +75,8 @@ public sealed record LlamaModelPreset(
             ContextLength: 49152,
             Aliases: ["qwen3.5-2b-gguf", "qwen3.5-2b-q4", "qwen3.5"],
             SupportsReasoning: true,
-            SupportsReasoningEffort: false
+            SupportsReasoningEffort: false,
+            TokenEstimator: HeuristicTokenEstimator.Qwen
         ),
         new(
             Id: "qwen3.5-4b",
@@ -84,7 +88,8 @@ public sealed record LlamaModelPreset(
             ContextLength: 49152,
             Aliases: ["qwen3.5-4b-gguf", "qwen3.5-4b-q4"],
             SupportsReasoning: true,
-            SupportsReasoningEffort: false
+            SupportsReasoningEffort: false,
+            TokenEstimator: HeuristicTokenEstimator.Qwen
         ),
         new(
             Id: "qwen3.5-9b",
@@ -96,7 +101,8 @@ public sealed record LlamaModelPreset(
             ContextLength: 49152,
             Aliases: ["qwen3.5-9b-gguf", "qwen3.5-9b-q4", "qwen-9b", "qwen3.5-9b-it"],
             SupportsReasoning: true,
-            SupportsReasoningEffort: false
+            SupportsReasoningEffort: false,
+            TokenEstimator: HeuristicTokenEstimator.Qwen
         ),
         new(
             Id: "gemma-4-e2b",
@@ -109,7 +115,8 @@ public sealed record LlamaModelPreset(
             Aliases: ["gemma-4-e2b-gguf", "gemma-4-e2b-it", "gemma4-e2b", "gemma-4", "gemma-2b"],
             SupportsReasoning: true,
             SupportsReasoningEffort: false,
-            MtpFileName: "mtp-gemma-4-e2b-it.gguf"
+            MtpFileName: "mtp-gemma-4-e2b-it.gguf",
+            TokenEstimator: HeuristicTokenEstimator.Gemma
         ),
         new(
             Id: "gemma-4-e4b",
@@ -122,7 +129,8 @@ public sealed record LlamaModelPreset(
             Aliases: ["gemma-4-e4b-gguf", "gemma-4-e4b-it", "gemma4-e4b", "gemma-4b"],
             SupportsReasoning: true,
             SupportsReasoningEffort: false,
-            MtpFileName: "mtp-gemma-4-e4b-it.gguf"
+            MtpFileName: "mtp-gemma-4-e4b-it.gguf",
+            TokenEstimator: HeuristicTokenEstimator.Gemma
         ),
         new(
             Id: "gemma-4-12b",
@@ -135,7 +143,8 @@ public sealed record LlamaModelPreset(
             Aliases: ["gemma-4-12b-gguf", "gemma-4-12b-it", "gemma4-12b", "gemma-12b"],
             SupportsReasoning: true,
             SupportsReasoningEffort: false,
-            MtpFileName: "mtp-gemma-4-12b-it.gguf"
+            MtpFileName: "mtp-gemma-4-12b-it.gguf",
+            TokenEstimator: HeuristicTokenEstimator.Gemma
         )
     ];
 

@@ -34,6 +34,26 @@ public class HeuristicTokenEstimator
     public static HeuristicTokenEstimator Default { get; } = new();
 
     /// <summary>
+    /// Gets a preset fine-tuned for the Qwen model family (Qwen 3.5, Qwen 3.6, Qwen 3.8)
+    /// based on empirical tokenizer calibration (WordFactor=1.36, SymbolFactor=0.66, NonAsciiFactor=0.40, CharFloorFactor=3.8).
+    /// </summary>
+    public static HeuristicTokenEstimator Qwen { get; } = new(
+        wordFactor: 1.36,
+        symbolFactor: 0.66,
+        nonAsciiFactor: 0.40,
+        charFloorFactor: 3.8);
+
+    /// <summary>
+    /// Gets a preset fine-tuned for Google Gemma 4 models (E2B, E4B, 12B, 26B, 31B)
+    /// based on empirical tokenizer calibration (WordFactor=1.43, SymbolFactor=0.72, NonAsciiFactor=0.37, CharFloorFactor=3.6).
+    /// </summary>
+    public static HeuristicTokenEstimator Gemma { get; } = new(
+        wordFactor: 1.43,
+        symbolFactor: 0.72,
+        nonAsciiFactor: 0.37,
+        charFloorFactor: 3.6);
+
+    /// <summary>
     /// Gets the factor applied to word count.
     /// </summary>
     public double WordFactor { get; init; } = DefaultWordFactor;
@@ -55,6 +75,12 @@ public class HeuristicTokenEstimator
     public double CharFloorFactor { get; init; } = DefaultCharFloorFactor;
 
     /// <summary>
+    /// Gets the safety margin multiplier fraction applied to the final estimate (e.g. 0.05 for +5% headroom).
+    /// Defaults to 0.0 (no margin).
+    /// </summary>
+    public double SafetyMargin { get; init; } = 0.0;
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="HeuristicTokenEstimator"/> class with default factors.
     /// </summary>
     public HeuristicTokenEstimator()
@@ -68,16 +94,123 @@ public class HeuristicTokenEstimator
     /// <param name="symbolFactor">Factor applied to punctuation and symbols (default: 0.8).</param>
     /// <param name="nonAsciiFactor">Factor applied to non-ASCII / Unicode characters (default: 1.0).</param>
     /// <param name="charFloorFactor">Characters per token floor divisor (default: 3.8). When &lt;= 0, character floor is disabled.</param>
+    /// <param name="safetyMargin">Safety margin fraction applied to the final estimate (default: 0.0).</param>
     public HeuristicTokenEstimator(
         double wordFactor = DefaultWordFactor,
         double symbolFactor = DefaultSymbolFactor,
         double nonAsciiFactor = DefaultNonAsciiFactor,
-        double charFloorFactor = DefaultCharFloorFactor)
+        double charFloorFactor = DefaultCharFloorFactor,
+        double safetyMargin = 0.0)
     {
         WordFactor = wordFactor;
         SymbolFactor = symbolFactor;
         NonAsciiFactor = nonAsciiFactor;
         CharFloorFactor = charFloorFactor;
+        SafetyMargin = safetyMargin;
+    }
+
+    /// <summary>
+    /// Analyzes the character span to extract structural token metrics (words, symbols, non-ASCII characters, character count)
+    /// without any heap allocation.
+    /// </summary>
+    /// <param name="text">The character span to analyze.</param>
+    /// <returns>A <see cref="TokenMetrics"/> value containing the measured counts.</returns>
+    public static TokenMetrics Analyze(ReadOnlySpan<char> text)
+    {
+        if (text.IsEmpty || text.IsWhiteSpace())
+        {
+            return default;
+        }
+
+        int words = 0;
+        int symbols = 0;
+        int nonAscii = 0;
+        bool inWord = false;
+
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (c > 127)
+            {
+                nonAscii++;
+                inWord = false;
+            }
+            else if (char.IsLetterOrDigit(c))
+            {
+                if (!inWord)
+                {
+                    words++;
+                    inWord = true;
+                }
+            }
+            else
+            {
+                inWord = false;
+                if (!char.IsWhiteSpace(c))
+                {
+                    symbols++;
+                }
+            }
+        }
+
+        return new TokenMetrics(words, symbols, nonAscii, text.Length);
+    }
+
+    /// <summary>
+    /// Analyzes a collection of text strings to aggregate their structural token metrics.
+    /// </summary>
+    /// <param name="texts">The collection of text strings to analyze.</param>
+    /// <returns>A <see cref="TokenMetrics"/> value containing the aggregated counts.</returns>
+    public static TokenMetrics Analyze(IReadOnlyList<string>? texts)
+    {
+        if (texts == null || texts.Count == 0)
+        {
+            return default;
+        }
+
+        int words = 0;
+        int symbols = 0;
+        int nonAscii = 0;
+        int charCount = 0;
+
+        for (int i = 0; i < texts.Count; i++)
+        {
+            var text = texts[i];
+            if (!string.IsNullOrEmpty(text))
+            {
+                var m = Analyze(text.AsSpan());
+                words += m.Words;
+                symbols += m.Symbols;
+                nonAscii += m.NonAscii;
+                charCount += m.CharCount;
+            }
+        }
+
+        return new TokenMetrics(words, symbols, nonAscii, charCount);
+    }
+
+    /// <summary>
+    /// Estimates the token count from pre-computed structural metrics.
+    /// </summary>
+    /// <param name="metrics">The collected token metrics.</param>
+    /// <returns>The estimated token count.</returns>
+    public int Estimate(in TokenMetrics metrics)
+    {
+        if (metrics.Words == 0 && metrics.Symbols == 0 && metrics.NonAscii == 0)
+        {
+            return 0;
+        }
+
+        int tokenEstimate = (int)Math.Ceiling(metrics.Words * WordFactor + metrics.Symbols * SymbolFactor + metrics.NonAscii * NonAsciiFactor);
+        int charFloor = CharFloorFactor > 0 ? (int)Math.Ceiling(metrics.CharCount / CharFloorFactor) : 0;
+
+        int finalEstimate = Math.Max(1, Math.Max(tokenEstimate, charFloor));
+        if (SafetyMargin > 0)
+        {
+            finalEstimate = (int)Math.Ceiling(finalEstimate * (1.0 + SafetyMargin));
+        }
+
+        return finalEstimate;
     }
 
     /// <summary>
@@ -112,52 +245,29 @@ public class HeuristicTokenEstimator
     /// <returns>The estimated token count.</returns>
     public int Estimate(ReadOnlySpan<char> text)
     {
-        if (text.IsEmpty || text.IsWhiteSpace())
-        {
-            return 0;
-        }
-
-        int words = 0;
-        int symbols = 0;
-        int nonAscii = 0;
-        bool inWord = false;
-
-        for (int i = 0; i < text.Length; i++)
-        {
-            char c = text[i];
-            if (c > 127)
-            {
-                nonAscii++;
-                inWord = false;
-            }
-            else if (char.IsLetterOrDigit(c))
-            {
-                if (!inWord)
-                {
-                    words++;
-                    inWord = true;
-                }
-            }
-            else
-            {
-                inWord = false;
-                if (!char.IsWhiteSpace(c))
-                {
-                    symbols++;
-                }
-            }
-        }
-
-        if (words == 0 && symbols == 0 && nonAscii == 0)
-        {
-            return 0;
-        }
-
-        // Blended heuristic: words (~1.25 tokens/word), punctuation/symbols (0.8 tokens), and non-ASCII (1 token).
-        // Fall back to a standard ~3.8 chars/token floor for atypical dense formatting.
-        int tokenEstimate = (int)Math.Ceiling(words * WordFactor + symbols * SymbolFactor + nonAscii * NonAsciiFactor);
-        int charFloor = CharFloorFactor > 0 ? (int)Math.Ceiling(text.Length / CharFloorFactor) : 0;
-
-        return Math.Max(1, Math.Max(tokenEstimate, charFloor));
+        var metrics = Analyze(text);
+        return Estimate(in metrics);
     }
+}
+
+/// <summary>
+/// Represents the four primitive structural metrics measured by <see cref="HeuristicTokenEstimator"/>
+/// when profiling or estimating text tokens.
+/// </summary>
+/// <param name="Words">Count of ASCII alphanumeric words.</param>
+/// <param name="Symbols">Count of ASCII punctuation, symbol, and formatting characters.</param>
+/// <param name="NonAscii">Count of non-ASCII / Unicode code points.</param>
+/// <param name="CharCount">Total character length of the analyzed text.</param>
+public readonly record struct TokenMetrics(int Words, int Symbols, int NonAscii, int CharCount)
+{
+    /// <summary>
+    /// Gets whether all metric counts are zero.
+    /// </summary>
+    public bool IsEmpty => Words == 0 && Symbols == 0 && NonAscii == 0 && CharCount == 0;
+
+    /// <summary>
+    /// Combines two sets of token metrics by summing their individual components.
+    /// </summary>
+    public static TokenMetrics operator +(in TokenMetrics left, in TokenMetrics right) =>
+        new(left.Words + right.Words, left.Symbols + right.Symbols, left.NonAscii + right.NonAscii, left.CharCount + right.CharCount);
 }

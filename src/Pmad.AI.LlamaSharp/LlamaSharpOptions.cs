@@ -70,6 +70,19 @@ public sealed class LlamaSharpOptions
     public string PromptFormat { get; set; } = "chatml";
 
     /// <summary>
+    /// Optional custom token estimator used for prompt budget estimation and safe token counting.
+    /// When null, an estimator matched to the active preset or dialect is used, falling back to <see cref="Pmad.AI.Tokens.HeuristicTokenEstimator.Default"/>.
+    /// </summary>
+    public Pmad.AI.Tokens.HeuristicTokenEstimator? TokenEstimator { get; set; }
+
+    /// <summary>
+    /// Safety margin percentage applied when prompt tokens are estimated heuristically
+    /// by <see cref="LlamaSharpChatClient.SafeCountInputTokens"/> (for large prompts > 8 KB or tokenizer fallbacks).
+    /// Defaults to 0.05 (+5% headroom). Set to 0.0 to disable the margin.
+    /// </summary>
+    public double EstimatedTokenSafetyMargin { get; set; } = 0.05;
+
+    /// <summary>
     /// Optional chat prompt template dialect. When specified, overrides <see cref="PromptFormat"/>.
     /// </summary>
     public ChatDialect? Dialect { get; set; }

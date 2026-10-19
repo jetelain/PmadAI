@@ -16,6 +16,28 @@ public class HeuristicTokenEstimatorTests
     }
 
     [Fact]
+    public void Qwen_HasExpectedCalibratedFactors()
+    {
+        var qwenEstimator = HeuristicTokenEstimator.Qwen;
+        Assert.NotNull(qwenEstimator);
+        Assert.Equal(1.36, qwenEstimator.WordFactor);
+        Assert.Equal(0.66, qwenEstimator.SymbolFactor);
+        Assert.Equal(0.40, qwenEstimator.NonAsciiFactor);
+        Assert.Equal(3.8, qwenEstimator.CharFloorFactor);
+    }
+
+    [Fact]
+    public void Gemma_HasExpectedCalibratedFactors()
+    {
+        var gemmaEstimator = HeuristicTokenEstimator.Gemma;
+        Assert.NotNull(gemmaEstimator);
+        Assert.Equal(1.43, gemmaEstimator.WordFactor);
+        Assert.Equal(0.72, gemmaEstimator.SymbolFactor);
+        Assert.Equal(0.37, gemmaEstimator.NonAsciiFactor);
+        Assert.Equal(3.6, gemmaEstimator.CharFloorFactor);
+    }
+
+    [Fact]
     public void Constructor_CustomFactors_AssignedCorrectly()
     {
         var estimator = new HeuristicTokenEstimator(
@@ -78,6 +100,17 @@ public class HeuristicTokenEstimatorTests
     }
 
     [Fact]
+    public void CustomSafetyMargin_AppliesHeadroomMultiplier()
+    {
+        var rawEstimator = new HeuristicTokenEstimator(wordFactor: 1.0, charFloorFactor: 0, safetyMargin: 0.0);
+        var marginEstimator = new HeuristicTokenEstimator(wordFactor: 1.0, charFloorFactor: 0, safetyMargin: 0.10); // +10%
+
+        var text = "one two three four five six seven eight nine ten"; // 10 words => 10 raw tokens
+        Assert.Equal(10, rawEstimator.Estimate(text));
+        Assert.Equal(11, marginEstimator.Estimate(text)); // ceil(10 * 1.10) = 11
+    }
+
+    [Fact]
     public void Estimate_NullOrEmptyList_ReturnsZero()
     {
         Assert.Equal(0, HeuristicTokenEstimator.Default.Estimate((IReadOnlyList<string>)null!));
@@ -135,4 +168,62 @@ public class HeuristicTokenEstimatorTests
 
         Assert.True(count >= 8);
     }
+
+    [Fact]
+    public void Analyze_ExtractsAccurateMetrics()
+    {
+        // "Hello, world!" => 2 words ("Hello", "world"), 2 symbols (',', '!'), 0 non-ascii, length 13
+        var metrics = HeuristicTokenEstimator.Analyze("Hello, world!");
+        Assert.False(metrics.IsEmpty);
+        Assert.Equal(2, metrics.Words);
+        Assert.Equal(2, metrics.Symbols);
+        Assert.Equal(0, metrics.NonAscii);
+        Assert.Equal(13, metrics.CharCount);
+    }
+
+    [Fact]
+    public void Analyze_EmptyAndWhitespace_ReturnsEmptyMetrics()
+    {
+        var empty = HeuristicTokenEstimator.Analyze("");
+        Assert.True(empty.IsEmpty);
+
+        var whitespace = HeuristicTokenEstimator.Analyze("   \t\r\n  ");
+        Assert.True(whitespace.IsEmpty);
+    }
+
+    [Fact]
+    public void Analyze_NonAsciiCharacters_CountsProperly()
+    {
+        // "éèê" => 3 non-ascii characters
+        var metrics = HeuristicTokenEstimator.Analyze("café");
+        Assert.Equal(1, metrics.Words); // "caf"
+        Assert.Equal(1, metrics.NonAscii); // 'é'
+        Assert.Equal(0, metrics.Symbols);
+        Assert.Equal(4, metrics.CharCount);
+    }
+
+    [Fact]
+    public void Analyze_List_AggregatesMetricsAcrossStrings()
+    {
+        var list = new[] { "Hello world", "foo + bar = baz;" };
+        var aggregated = HeuristicTokenEstimator.Analyze(list);
+
+        var m1 = HeuristicTokenEstimator.Analyze(list[0]);
+        var m2 = HeuristicTokenEstimator.Analyze(list[1]);
+
+        Assert.Equal(m1 + m2, aggregated);
+    }
+
+    [Fact]
+    public void Estimate_InTokenMetrics_ProducesSameResultAsEstimateSpan()
+    {
+        var text = "public static void Main(string[] args) { Console.WriteLine(\"Hello, World!\"); }";
+        var metrics = HeuristicTokenEstimator.Analyze(text);
+
+        var fromMetrics = HeuristicTokenEstimator.Default.Estimate(in metrics);
+        var fromSpan = HeuristicTokenEstimator.Default.Estimate(text);
+
+        Assert.Equal(fromSpan, fromMetrics);
+    }
 }
+

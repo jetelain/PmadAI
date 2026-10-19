@@ -197,7 +197,9 @@ public class LlamaSharpOptionsAndLoggingTests
         var hugePrompt = new string('A', 100_000);
         var hugeTokens = client.SafeCountInputTokens(hugePrompt);
         Assert.True(hugeTokens > 0);
-        Assert.Equal(Pmad.AI.Tokens.HeuristicTokenEstimator.Default.Estimate(hugePrompt), hugeTokens);
+        var rawEstimate = client.TokenEstimator.Estimate(hugePrompt);
+        Assert.Equal((int)Math.Ceiling(rawEstimate * 1.05), hugeTokens);
+        Assert.Same(Pmad.AI.Tokens.HeuristicTokenEstimator.Qwen, client.TokenEstimator);
     }
 
     [Fact]

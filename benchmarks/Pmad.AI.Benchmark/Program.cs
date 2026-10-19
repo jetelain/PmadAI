@@ -27,6 +27,12 @@ public static class Program
             return 0;
         }
 
+        if (options.CalibrateTokens)
+        {
+            Tools.TokenCalibrationRunner.Run();
+            return 0;
+        }
+
         Console.ForegroundColor = ConsoleColor.White;
         Console.WriteLine(@"
 ╔═══════════════════════════════════════════════════════════════════╗

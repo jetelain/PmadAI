@@ -12,6 +12,23 @@ public class LlamaModelPresetTests
         Assert.Equal("qwen3.5-2b", LlamaModelPreset.Default.Id);
     }
 
+    [Fact]
+    public void Presets_HaveConfiguredTokenEstimators()
+    {
+        foreach (var preset in LlamaModelPreset.Presets)
+        {
+            Assert.NotNull(preset.TokenEstimator);
+            if (preset.Id.StartsWith("qwen"))
+            {
+                Assert.Same(Pmad.AI.Tokens.HeuristicTokenEstimator.Qwen, preset.TokenEstimator);
+            }
+            else if (preset.Id.StartsWith("gemma"))
+            {
+                Assert.Same(Pmad.AI.Tokens.HeuristicTokenEstimator.Gemma, preset.TokenEstimator);
+            }
+        }
+    }
+
     [Theory]
     [InlineData("qwen3.5-2b", "qwen3.5-2b")]
     [InlineData("QWEN3.5-2B", "qwen3.5-2b")]

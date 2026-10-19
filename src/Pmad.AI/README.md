@@ -343,6 +343,28 @@ The source generator emits `GeneratedToolMappings.Create()`, which can be passed
 
 ---
 
+### 6. Zero-Allocation Token Estimation & Model Presets
+
+Estimate tokens instantly over `ReadOnlySpan<char>` without loading vocabulary tables into memory:
+
+```csharp
+using Pmad.AI.Tokens;
+
+// General-purpose balanced default
+int tokens = HeuristicTokenEstimator.Default.Estimate("Hello world".AsSpan());
+
+// Fine-tuned presets for specific tokenizer families
+int qwenTokens = HeuristicTokenEstimator.Qwen.Estimate(prompt.AsSpan());
+int gemmaTokens = HeuristicTokenEstimator.Gemma.Estimate(prompt.AsSpan());
+
+// Extract the 4 primitive structural metrics for profiling/diagnostics
+TokenMetrics metrics = HeuristicTokenEstimator.Analyze(prompt.AsSpan());
+Console.WriteLine($"Words: {metrics.Words}, Symbols: {metrics.Symbols}, Non-ASCII: {metrics.NonAscii}, Chars: {metrics.CharCount}");
+int estFromMetrics = HeuristicTokenEstimator.Qwen.Estimate(in metrics);
+```
+
+---
+
 ## Target Frameworks & AOT Compatibility
 
 - Target Framework: `.NET 10.0`

@@ -57,8 +57,9 @@ using Pmad.AI.Tokens;
 // Sanitize malformed tool argument JSON
 string cleanJson = ToolCallHealingTransform.SanitizeArgumentsJson("```json\n{\"city\": \"Paris\",}\n```");
 
-// Estimate tokens with 0 MB allocations
+// Estimate tokens with 0 MB allocations (Default, Qwen, or Gemma presets)
 int tokens = HeuristicTokenEstimator.Default.Estimate("Summarize this document...".AsSpan());
+int qwenTokens = HeuristicTokenEstimator.Qwen.Estimate("Summarize this document...".AsSpan());
 ```
 
 👉 *See the full [Pmad.AI Documentation](src/Pmad.AI/README.md) for details.*
