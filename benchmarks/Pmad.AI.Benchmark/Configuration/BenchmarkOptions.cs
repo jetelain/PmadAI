@@ -114,6 +114,11 @@ public sealed class BenchmarkOptions
     public bool RunUtilities { get; set; }
 
     /// <summary>
+    /// When true, collects token estimation metrics across local GGUF models and exports diagnostic data for calibration.
+    /// </summary>
+    public bool CalibrateTokens { get; set; }
+
+    /// <summary>
     /// When true, executes the systematic optimization matrix (Baseline, individual utilities, and all combined).
     /// </summary>
     public bool OptMatrix { get; set; }
@@ -331,6 +336,10 @@ public sealed class BenchmarkOptions
             else if (arg is "-u" or "--utilities" or "--utility-benchmarks")
             {
                 options.RunUtilities = true;
+            }
+            else if (arg is "--calibrate-tokens" or "--token-calibration" or "-ct")
+            {
+                options.CalibrateTokens = true;
             }
             else if (arg is "--slm-threads" or "--speculative-threads" && i + 1 < args.Length && int.TryParse(args[++i], out var slmThreads))
             {

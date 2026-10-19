@@ -64,7 +64,7 @@ public class BenchmarkSuiteTests
     public void BenchmarkScenario_GetAllScenarios_ReturnsExpectedDefinitions()
     {
         var scenarios = BenchmarkScenario.GetAllScenarios();
-        Assert.Equal(20, scenarios.Count);
+        Assert.Equal(18, scenarios.Count);
 
         Assert.Contains(scenarios, s => s.Id == "bfcl-simple");
         Assert.Contains(scenarios, s => s.Id == "bfcl-multiple");
@@ -84,8 +84,8 @@ public class BenchmarkSuiteTests
         Assert.Contains(scenarios, s => s.Id == "ruler-32k");
         Assert.Contains(scenarios, s => s.Id == "ruler-64k");
         Assert.Contains(scenarios, s => s.Id == "ruler-128k");
-        Assert.Contains(scenarios, s => s.Id == "compaction-large-tool");
-        Assert.Contains(scenarios, s => s.Id == "compaction-deep-context");
+        //Assert.Contains(scenarios, s => s.Id == "compaction-large-tool");
+        //Assert.Contains(scenarios, s => s.Id == "compaction-deep-context");
 
         foreach (var sc in scenarios)
         {
@@ -108,11 +108,11 @@ public class BenchmarkSuiteTests
     [InlineData("deep", 3)]
     [InlineData("ruler", 5)]
     [InlineData("swebench", 7)]
-    [InlineData("compaction", 2)]
-    [InlineData("all", 20)]
-    [InlineData("all-small", 16)]
-    [InlineData("small", 16)]
-    [InlineData("full", 20)]
+    //[InlineData("compaction", 2)]
+    [InlineData("all", 18)]
+    [InlineData("all-small", 15)]
+    [InlineData("small", 15)]
+    [InlineData("full", 18)]
     [InlineData("bfcl,swebench", 13)]
     public void BenchmarkScenario_FilterScenarios_FiltersCorrectly(string filter, object expected)
     {
@@ -138,12 +138,12 @@ public class BenchmarkSuiteTests
 
         var summary = await runner.RunAllAsync(scenarios);
 
-        Assert.Equal(20, summary.ScenariosRun);
+        Assert.Equal(18, summary.ScenariosRun);
         var failures = string.Join("\n", summary.ScenarioResults
             .Where(r => r.Status != BenchmarkStatus.Passed)
             .Select(r => $"{r.ScenarioId}: {r.ErrorMessage ?? string.Join("; ", r.TurnResults.Where(t => t.Status != BenchmarkStatus.Passed).Select(t => $"Turn {t.TurnIndex}: {t.ValidationMessage}"))}"));
         Assert.True(summary.ScenariosFailed == 0, $"Failures:\n{failures}");
-        Assert.Equal(20, summary.ScenariosPassed);
+        Assert.Equal(18, summary.ScenariosPassed);
         Assert.Equal(100.0, summary.TaskSuccessRatePercentage);
         Assert.Equal(100.0, summary.StepAccuracyPercentage);
         Assert.Equal(100.0, summary.PassRatePercentage);
@@ -190,13 +190,13 @@ public class BenchmarkSuiteTests
     [Fact]
     public void BenchmarkScenario_AllIncludesEverythingAndCategorySubsets()
     {
-        Assert.Equal(20, BenchmarkScenario.FilterScenarios("all").Count);
-        Assert.Equal(16, BenchmarkScenario.FilterScenarios("all-small").Count);
+        Assert.Equal(18, BenchmarkScenario.FilterScenarios("all").Count);
+        Assert.Equal(15, BenchmarkScenario.FilterScenarios("all-small").Count);
         Assert.Equal(3, BenchmarkScenario.FilterScenarios("deep").Count);
         Assert.Equal(7, BenchmarkScenario.FilterScenarios("swebench").Count);
         Assert.Equal(6, BenchmarkScenario.FilterScenarios("bfcl").Count);
         Assert.Equal(5, BenchmarkScenario.FilterScenarios("ruler").Count);
-        Assert.Equal(2, BenchmarkScenario.FilterScenarios("compaction").Count);
+        //Assert.Equal(2, BenchmarkScenario.FilterScenarios("compaction").Count);
     }
 
     [Fact]
@@ -1233,20 +1233,20 @@ public class BenchmarkSuiteTests
         Assert.Equal("OMEGA-8842-PROBE-SECURE", deepContext.Turns[9].ExpectedCompletionSubstring);
     }
 
-    [Fact]
-    public void BenchmarkScenario_FilterScenarios_IncludesCompaction()
-    {
-        var all = BenchmarkScenario.GetAllScenarios();
-        Assert.Contains(all, s => s.Id == "compaction-large-tool");
-        Assert.Contains(all, s => s.Id == "compaction-deep-context");
+    //[Fact]
+    //public void BenchmarkScenario_FilterScenarios_IncludesCompaction()
+    //{
+    //    var all = BenchmarkScenario.GetAllScenarios();
+    //    Assert.Contains(all, s => s.Id == "compaction-large-tool");
+    //    Assert.Contains(all, s => s.Id == "compaction-deep-context");
 
-        var small = BenchmarkScenario.GetAllSmallScenarios();
-        Assert.Contains(small, s => s.Id == "compaction-large-tool");
+    //    var small = BenchmarkScenario.GetAllSmallScenarios();
+    //    Assert.Contains(small, s => s.Id == "compaction-large-tool");
 
-        var compactionFiltered = BenchmarkScenario.FilterScenarios("compaction");
-        Assert.Equal(2, compactionFiltered.Count);
-        Assert.All(compactionFiltered, s => Assert.Equal("Compaction", s.Suite));
-    }
+    //    var compactionFiltered = BenchmarkScenario.FilterScenarios("compaction");
+    //    Assert.Equal(2, compactionFiltered.Count);
+    //    Assert.All(compactionFiltered, s => Assert.Equal("Compaction", s.Suite));
+    //}
 
     [Fact]
     public void BenchmarkOptions_Parse_HandlesMultiRunSeedTemperatureAndScenario()

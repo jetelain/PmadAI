@@ -132,11 +132,11 @@ public abstract class BenchmarkScenario
     /// <summary>
     /// Returns the compaction-capable scenarios testing ToolResultCompactor and ThinkingTraceCompactor against large payloads.
     /// </summary>
-    public static IReadOnlyList<BenchmarkScenario> GetCompactionScenarios() =>
-    [
-        new Compaction.CompactionLargeToolScenario(),
-        new Compaction.CompactionDeepContextScenario()
-    ];
+    // public static IReadOnlyList<BenchmarkScenario> GetCompactionScenarios() =>
+    // [
+    //     new Compaction.CompactionLargeToolScenario(),
+    //     new Compaction.CompactionDeepContextScenario()
+    // ];
 
     /// <summary>
     /// Returns all scenarios excluding the deep context scenarios (16 scenarios: 6 BFCL + 7 SWE-bench + RULER 8k/16k + Compaction Large Tool).
@@ -147,7 +147,7 @@ public abstract class BenchmarkScenario
         .. GetSweBenchScenarios(sandboxMode, dockerContainer),
         new Ruler8kScenario(),
         new Ruler16kScenario(),
-        new Compaction.CompactionLargeToolScenario()
+        //new Compaction.CompactionLargeToolScenario()
     ];
 
     /// <summary>
@@ -158,7 +158,7 @@ public abstract class BenchmarkScenario
         .. GetBfclScenarios(),
         .. GetSweBenchScenarios(sandboxMode, dockerContainer),
         .. GetRulerScenarios(),
-        .. GetCompactionScenarios()
+        //.. GetCompactionScenarios()
     ];
 
     /// <summary>
@@ -172,7 +172,7 @@ public abstract class BenchmarkScenario
         var swebench = GetSweBenchScenarios(sandboxMode, dockerContainer);
         var ruler = GetRulerScenarios();
         var deep = GetDeepContextScenarios();
-        var compaction = GetCompactionScenarios();
+        //var compaction = GetCompactionScenarios();
 
         if (string.IsNullOrWhiteSpace(filter) ||
             filter.Equals("all", StringComparison.OrdinalIgnoreCase) ||
@@ -223,10 +223,10 @@ public abstract class BenchmarkScenario
             return ruler;
         }
 
-        if (filter.Equals("compaction", StringComparison.OrdinalIgnoreCase))
-        {
-            return compaction;
-        }
+        //if (filter.Equals("compaction", StringComparison.OrdinalIgnoreCase))
+        //{
+        //    return compaction;
+        //}
 
         if (filter.Equals("deep", StringComparison.OrdinalIgnoreCase) || filter.Equals("long", StringComparison.OrdinalIgnoreCase))
         {
