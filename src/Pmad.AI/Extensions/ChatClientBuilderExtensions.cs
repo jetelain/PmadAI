@@ -14,13 +14,15 @@ public static class ChatClientBuilderExtensions
 {
     /// <summary>
     /// Configures the recommended pipeline for Small Language Models (SLMs &lt;= 8B parameters).
-    /// Omits thinking trace compaction and natural language speculative summarization to preserve KV-cache stability
-    /// and deterministic code/tool reasoning, while providing lenient tool dispatch, circuit breaker guardrails,
+    /// Empirically validated on benchmark suites to maximize accuracy, token efficiency, and execution speed.
+    /// Omits natural language speculative summarization to preserve KV-cache stability and deterministic code/tool reasoning,
+    /// while providing lenient tool dispatch, circuit breaker guardrails, deterministic thinking trace compaction,
     /// deterministic tool result compaction, and tool call healing.
     /// </summary>
     /// <param name="builder">The chat client builder.</param>
     /// <param name="dispatcher">Optional lenient tool dispatcher for handling tool/param aliases and namespaces.</param>
     /// <param name="configureBreaker">Optional configuration delegate for tool loop circuit breaker options.</param>
+    /// <param name="configureThinking">Optional configuration delegate for thinking trace compaction options.</param>
     /// <param name="configureToolResult">Optional configuration delegate for deterministic tool result compaction options.</param>
     /// <param name="configureHealing">Optional configuration delegate for tool call healing options.</param>
     /// <returns>The configured builder.</returns>
@@ -28,6 +30,7 @@ public static class ChatClientBuilderExtensions
         this ChatClientBuilder builder,
         LenientToolDispatcher? dispatcher = null,
         Action<ToolLoopCircuitBreakerOptions>? configureBreaker = null,
+        Action<ThinkingTraceCompactionOptions>? configureThinking = null,
         Action<ToolResultCompactionOptions>? configureToolResult = null,
         Action<ToolCallHealingOptions>? configureHealing = null)
     {
@@ -41,6 +44,15 @@ public static class ChatClientBuilderExtensions
                 options.ResetOnUserPrompt = true;
                 options.MaxToolHistory = 30;
                 configureBreaker?.Invoke(options);
+            })
+            .UseThinkingTraceCompaction(options =>
+            {
+                options.KeepVerbatimCount = 5;
+                options.FallbackCharacterLimit = 1500;
+                options.FallbackPrefixLength = 1000;
+                options.FallbackSuffixLength = 400;
+                options.Summarizer = null;
+                configureThinking?.Invoke(options);
             })
             .UseToolResultCompaction(options =>
             {

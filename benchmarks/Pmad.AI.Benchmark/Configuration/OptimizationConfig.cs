@@ -42,7 +42,7 @@ public sealed record OptimizationConfig(
     public static readonly OptimizationConfig RecommendedSlm = new(
         "opt-recommended-slm",
         "Recommended SLM Pipeline",
-        "Lenient Dispatch + Breaker + Deterministic Tool Compaction + Healing (no thinking compaction or SLM summarizer).");
+        "Full SLM pipeline: Lenient Dispatch + Breaker + Deterministic Thinking Compaction + Deterministic Tool Compaction + Healing (no SLM summarizer).");
 
     public static readonly OptimizationConfig AllLocalLlmWithoutSlm = new(
         "opt-all-local-llm-without-slm",

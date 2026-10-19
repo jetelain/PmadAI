@@ -56,6 +56,7 @@ public class PipelinePresetsTests
         });
 
         bool breakerConfigured = false;
+        bool thinkingConfigured = false;
         bool toolResultConfigured = false;
         bool healingConfigured = false;
 
@@ -68,6 +69,13 @@ public class PipelinePresetsTests
                 Assert.Equal(3, opts.PingPongThreshold);
                 Assert.True(opts.ResetOnUserPrompt);
                 Assert.Equal(30, opts.MaxToolHistory);
+            },
+            configureThinking: opts =>
+            {
+                thinkingConfigured = true;
+                Assert.Equal(5, opts.KeepVerbatimCount);
+                Assert.Equal(1500, opts.FallbackCharacterLimit);
+                Assert.Null(opts.Summarizer);
             },
             configureToolResult: opts =>
             {
@@ -84,6 +92,7 @@ public class PipelinePresetsTests
         var client = builder.Build();
 
         Assert.True(breakerConfigured);
+        Assert.True(thinkingConfigured);
         Assert.True(toolResultConfigured);
         Assert.True(healingConfigured);
 
@@ -94,6 +103,27 @@ public class PipelinePresetsTests
         var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "What is the weather in Paris?")]);
         var call = Assert.Single(response.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
         Assert.Equal("get_weather", call.Name);
+    }
+
+    [Fact]
+    public void UseRecommendedSlmPipeline_WithPartialOptions_Works()
+    {
+        var inner = new DummyChatClient();
+        var dispatcher = new LenientToolDispatcher();
+        var builder = new ChatClientBuilder(inner);
+
+        bool breakerConfigured = false;
+        bool toolResultConfigured = false;
+
+        builder.UseRecommendedSlmPipeline(
+            dispatcher: dispatcher,
+            configureBreaker: opts => breakerConfigured = true,
+            configureToolResult: opts => toolResultConfigured = true);
+
+        var client = builder.Build();
+        Assert.True(breakerConfigured);
+        Assert.True(toolResultConfigured);
+        Assert.NotNull(client.GetService<ToolLoopCircuitBreaker>());
     }
 
     [Fact]

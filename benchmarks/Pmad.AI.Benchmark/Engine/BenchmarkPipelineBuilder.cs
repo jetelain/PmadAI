@@ -152,6 +152,10 @@ public static class BenchmarkPipelineBuilder
             {
                 opts.Telemetry = breakerTelemetry;
             },
+            configureThinking: opts =>
+            {
+                opts.Telemetry = telemetry;
+            },
             configureToolResult: opts =>
             {
                 opts.Telemetry = telemetry;

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Pmad.AI.Benchmark.Configuration;
 using Pmad.AI.Benchmark.Engine;
@@ -188,6 +189,11 @@ public static class Program
             Func<BenchmarkScenarioResult, ModelBenchmarkSummary, Task> onScenarioCheckpoint = async (scenarioRes, currentSummary) =>
             {
                 currentSummary.TranscriptPath = planTranscriptRelativePath;
+                if (currentSummary.TotalTimeMs > 0 && currentSummary.AverageGenerationTokensPerSecond == 0)
+                {
+                    currentSummary.AverageGenerationTokensPerSecond = currentSummary.TotalOutputTokens / (currentSummary.TotalTimeMs / 1000.0);
+                }
+
                 var existingIdx = completedSummaries.FindIndex(s =>
                     string.Equals(
                         BenchmarkCheckpointManager.GetPlanKey(
@@ -406,22 +412,28 @@ public static class Program
             {
                 var contextSize = ResolveContextSize(plan.Target, options);
                 Console.WriteLine($"\n[Ollama] Preloading weights for '{ollamaTarget.ModelName}' into VRAM (keep_alive: 1h)...");
-                await OllamaBenchmarkChatClient.PreloadModelAsync(ollamaTarget.ModelName, ollamaTarget.BaseUrl, keepAlive: "1h");
+                await OllamaChatClientFactory.PreloadModelAsync(ollamaTarget.ModelName, ollamaTarget.BaseUrl, keepAlive: "1h");
 
                 try
                 {
                     Console.WriteLine($"Connecting to Ollama model '{ollamaTarget.ModelName}' at '{ollamaTarget.BaseUrl}' (Context: {contextSize}, Reasoning: {plan.EnableReasoning?.ToString() ?? "Default"})...");
 
-                    using var rawClient = new OllamaBenchmarkChatClient(
-                        modelId: ollamaTarget.ModelName,
+                    using var rawClient = OllamaChatClientFactory.CreateOllama(
                         baseUrl: ollamaTarget.BaseUrl,
-                        contextSize: contextSize);
+                        modelId: ollamaTarget.ModelName,
+                        contextSize: contextSize,
+                        enableReasoning: plan.EnableReasoning,
+                        timeout: TimeSpan.FromHours(2));
 
                     var pipeline = BenchmarkPipelineBuilder.BuildPipeline(
                         rawClient,
                         plan.OptConfig,
                         speculativeSummarizer,
                         transcriptOptions: transcriptOptions);
+
+                    var turnTimeout = options.TurnTimeoutMinutes.HasValue
+                        ? TimeSpan.FromMinutes(options.TurnTimeoutMinutes.Value)
+                        : TimeSpan.FromMinutes(15);
 
                     var runner = new BenchmarkRunner(
                         client: pipeline,
@@ -436,14 +448,15 @@ public static class Program
                         optimizationConfigLabel: plan.OptConfig.Label,
                         transcriptPath: planTranscriptRelativePath,
                         temperature: options.Temperature,
-                        seed: options.Seed);
+                        seed: options.Seed,
+                        turnTimeout: turnTimeout);
 
                     summary = await executePlanRuns(runner);
                 }
                 finally
                 {
                     Console.WriteLine($"[Ollama] Offloading model '{ollamaTarget.ModelName}' from VRAM (freeing GPU memory)...");
-                    await OllamaBenchmarkChatClient.OffloadModelAsync(ollamaTarget.ModelName, ollamaTarget.BaseUrl);
+                    await OllamaChatClientFactory.OffloadModelAsync(ollamaTarget.ModelName, ollamaTarget.BaseUrl);
                 }
             }
             else
@@ -862,7 +875,7 @@ public static class Program
             ModelTarget.Mock m => m.Name,
             ModelTarget.PresetTarget p => p.Preset.Name,
             ModelTarget.CustomPath c => Path.GetFileNameWithoutExtension(c.FilePath),
-            ModelTarget.Ollama o => $"Ollama:{o.ModelName}",
+            ModelTarget.Ollama o => o.ModelName,
             _ => "Unknown"
         };
 

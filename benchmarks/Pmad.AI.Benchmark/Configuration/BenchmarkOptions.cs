@@ -185,6 +185,11 @@ public sealed class BenchmarkOptions
     public float? Temperature { get; set; }
 
     /// <summary>
+    /// Per-turn timeout in minutes (optional, defaults to 5 minutes for local models, 15 minutes for Ollama/reasoning models).
+    /// </summary>
+    public int? TurnTimeoutMinutes { get; set; }
+
+    /// <summary>
     /// Whether help was requested.
     /// </summary>
     public bool ShowHelp { get; set; }
@@ -365,6 +370,10 @@ public sealed class BenchmarkOptions
             else if (arg is "--temperature" or "--temp" && i + 1 < args.Length && float.TryParse(args[++i], System.Globalization.CultureInfo.InvariantCulture, out var temp))
             {
                 options.Temperature = temp;
+            }
+            else if (arg is "--timeout" or "--turn-timeout" && i + 1 < args.Length && int.TryParse(args[++i], out var timeoutMins))
+            {
+                options.TurnTimeoutMinutes = timeoutMins;
             }
             else if (arg is "-v" or "--verbose")
             {
