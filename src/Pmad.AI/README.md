@@ -41,6 +41,13 @@ Targeting `.NET 10.0` with `<IsAotCompatible>true</IsAotCompatible>`, `Pmad.AI` 
   - Coalesces streaming chunks in real time.
   - Optional `FlushAfterEachTurn` to protect against process crashes.
 
+- **OpenAI JSONL Verbatim Transcripts (`OpenAiJsonlTranscriptChatClient`)**:
+  - Emits full verbatim multi-turn conversation sessions formatted strictly as single-line JSONL adhering to the OpenAI chat completions & fine-tuning schema (`{"messages": [{"role": "user", ...}, {"role": "assistant", "content": null, "tool_calls": [...]}, {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}]}`).
+  - Uses write-ahead temp-file staging (`TempFilePath`): on each turn, input messages are streamed and flushed to disk before invoking the inner client, enabling instant crash forensics if an unhandled runtime failure occurs.
+  - Flushes the complete conversation as a single atomic JSON line upon conversation completion or disposal (`DisposeAsync` / `Dispose`), ensuring concurrency-safe dataset building without line interleaving or partial/corrupted lines, and cleans up the staging file (`DeleteTempFileOnSuccess`).
+  - Flat $O(1)$ memory consumption: zero in-memory message caching, handling massive payloads with Native AOT trim-safety.
+  - Supports configurable `ReasoningMode` (`None`, `ReasoningContent`, `ThinkTags`), tool schema definitions (`IncludeTools`), and `Redactor`.
+
 - **Conversation History Compaction (`ThinkingTraceCompactor` & `ToolResultCompactor`)**:
   - Unified compaction architecture sharing `ICompactionOptions`: deterministic threshold (`FallbackCharacterLimit`), prefix preservation (`FallbackPrefixLength`), suffix preservation (`FallbackSuffixLength`), and optional background speculative summarizer (`ISpeculativeSummarizer`).
   - `ThinkingTraceCompactor` & `ThinkingTraceCompactionChatClient`: collapses verbose reasoning traces (`TextReasoningContent`) outside the active turn window (`KeepVerbatimCount`) exceeding `FallbackCharacterLimit` (default: 1,750), replacing them with precomputed summaries or deterministic prefix-suffix truncated monologues while preserving short traces verbatim to maximize KV-cache reuse.

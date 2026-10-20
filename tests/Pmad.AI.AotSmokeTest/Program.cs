@@ -196,6 +196,38 @@ public static class Program
             }
         }
 
+        // 6b. OpenAiJsonlTranscriptChatClient with mock inner client
+        var jsonlFile = Path.Combine(Path.GetTempPath(), $"aot_smoke_jsonl_{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            await using (var jsonlClient = new OpenAiJsonlTranscriptChatClient(mockInner, jsonlFile))
+            {
+                var resp = await jsonlClient.GetResponseAsync([new ChatMessage(ChatRole.User, "Echo this")]);
+                if (resp.Messages.Count == 0)
+                {
+                    throw new InvalidOperationException("OpenAiJsonlTranscriptChatClient returned empty response");
+                }
+            }
+
+            if (!File.Exists(jsonlFile))
+            {
+                throw new InvalidOperationException("OpenAiJsonlTranscriptChatClient did not create transcript file on dispose");
+            }
+            var jsonl = await File.ReadAllTextAsync(jsonlFile);
+            if (!jsonl.Contains("\"messages\""))
+            {
+                throw new InvalidOperationException("OpenAiJsonlTranscriptChatClient did not produce messages array");
+            }
+            Console.WriteLine("✓ OpenAiJsonlTranscriptChatClient verified");
+        }
+        finally
+        {
+            if (File.Exists(jsonlFile))
+            {
+                File.Delete(jsonlFile);
+            }
+        }
+
         // 7. OllamaSpeculativeSummarizer and OllamaApiClient AOT check
         await using var summarizer = new OllamaSpeculativeSummarizer(new OllamaSpeculativeSummarizerOptions
         {
