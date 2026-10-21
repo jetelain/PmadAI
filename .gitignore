@@ -429,3 +429,4 @@ FodyWeavers.xsd
 /*.json
 /transcripts
 /docs/transcripts
+/docs/*/transcripts

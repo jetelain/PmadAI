@@ -7,6 +7,8 @@
 
 Targeting `.NET 10.0` with `<IsAotCompatible>true</IsAotCompatible>`, `Pmad.AI` contains zero heavy runtime dependencies, zero runtime reflection, and strict trim safety.
 
+> WARNING: This is an early release, API or behavior may change before 1.0.0.
+
 ---
 
 ## Features

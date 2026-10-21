@@ -13,6 +13,8 @@ Designed for seamless integration into modern .NET applications with support for
 - Built-in curated presets and automated model downloads via `ModelDownloader`
 - Native AOT trimming and single-file deployment compatibility
 
+> WARNING: This is an early release, API or behavior may change before 1.0.0.
+
 ---
 
 ## Installation
