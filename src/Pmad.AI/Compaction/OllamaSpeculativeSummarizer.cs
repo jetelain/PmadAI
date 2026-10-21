@@ -248,7 +248,7 @@ public class OllamaSpeculativeSummarizer : ISpeculativeSummarizer
             {
                 using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
                 jobCts.CancelAfter(_options.JobTimeout);
-                var summary = await GenerateSummaryAsync(job, jobCts.Token).ConfigureAwait(false);
+                var summary = await GenerateSummaryAsync(job, jobCts.Token).WaitAsync(jobCts.Token).ConfigureAwait(false);
                 if (!string.IsNullOrWhiteSpace(summary))
                 {
                     _cache[(job.SessionId, job.ItemKey)] = summary;

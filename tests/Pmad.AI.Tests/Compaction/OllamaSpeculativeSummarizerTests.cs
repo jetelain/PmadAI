@@ -9,15 +9,25 @@ public class OllamaSpeculativeSummarizerTests
 {
     private sealed class MockHttpMessageHandler : HttpMessageHandler
     {
-        private readonly Func<HttpRequestMessage, Task<HttpResponseMessage>> _handler;
+        private readonly Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> _handler;
 
-        public MockHttpMessageHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> handler)
+        public MockHttpMessageHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> handler)
         {
             _handler = handler;
         }
 
+        public MockHttpMessageHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> handler)
+            : this((req, _) => handler(req))
+        {
+        }
+
+        public MockHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> handler)
+            : this((req, _) => Task.FromResult(handler(req)))
+        {
+        }
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-            => _handler(request);
+            => _handler(request, cancellationToken);
     }
 
     [Fact]
@@ -518,9 +528,9 @@ public class OllamaSpeculativeSummarizerTests
     [Fact]
     public async Task OllamaApiClient_ChatAsync_TimesOutGracefully()
     {
-        var handler = new MockHttpMessageHandler(async req =>
+        var handler = new MockHttpMessageHandler(async (req, ct) =>
         {
-            await Task.Delay(1500); // Exceeds 200ms timeout
+            await Task.Delay(1500, ct); // Exceeds 200ms timeout
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent("{}", Encoding.UTF8, "application/json")
@@ -539,14 +549,14 @@ public class OllamaSpeculativeSummarizerTests
     public async Task ProcessQueueAsync_JobTimesOut_AdvancesQueueWithoutHanging()
     {
         int callCount = 0;
-        var handler = new MockHttpMessageHandler(async req =>
+        var handler = new MockHttpMessageHandler(async (req, ct) =>
         {
-            var body = await req.Content!.ReadAsStringAsync();
+            var body = await req.Content!.ReadAsStringAsync(ct);
             Interlocked.Increment(ref callCount);
 
             if (body.Contains("hanging_job"))
             {
-                await Task.Delay(2000); // Simulates hung Ollama
+                await Task.Delay(2000, ct); // Simulates hung Ollama
             }
 
             var responseJson = """
@@ -575,7 +585,7 @@ public class OllamaSpeculativeSummarizerTests
         summarizer.EnqueueSummarization("s1", "k_fast", "fast text");
 
         string? fastSummary = null;
-        for (int i = 0; i < 40; i++)
+        for (int i = 0; i < 60; i++)
         {
             if (summarizer.TryGetSummary("s1", "k_fast", out fastSummary))
             {

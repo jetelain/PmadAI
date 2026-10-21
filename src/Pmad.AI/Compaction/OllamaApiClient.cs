@@ -168,7 +168,7 @@ public class OllamaApiClient : IDisposable
 
         try
         {
-            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
+            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, ct).WaitAsync(ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
                 var errBody = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
