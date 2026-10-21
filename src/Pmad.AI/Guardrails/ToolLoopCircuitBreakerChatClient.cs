@@ -15,6 +15,8 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
 {
     private readonly ToolLoopCircuitBreaker _breaker;
     private readonly LenientToolDispatcher? _dispatcher;
+    private ChatMessage? _lastProcessedToolEndMessage;
+    private string? _lastProcessedSessionId;
 
     public ToolLoopCircuitBreakerChatClient(
         IChatClient innerClient,
@@ -24,6 +26,10 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
     {
         _breaker = breaker ?? new ToolLoopCircuitBreaker();
         _dispatcher = dispatcher;
+        _breaker.OnReset += () =>
+        {
+            _lastProcessedToolEndMessage = null;
+        };
     }
 
     public ToolLoopCircuitBreaker Breaker => _breaker;
@@ -35,12 +41,17 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
     {
         if (options?.ConversationId != null)
         {
+            if (!string.Equals(_lastProcessedSessionId, options.ConversationId, StringComparison.Ordinal))
+            {
+                _lastProcessedSessionId = options.ConversationId;
+                _lastProcessedToolEndMessage = null;
+            }
             _breaker.Options.SessionId = options.ConversationId;
         }
 
-        InspectChatMessages(chatMessages);
-
         var dispatcher = _dispatcher ?? options.GetToolDispatcher() ?? (GetService(typeof(LenientToolDispatcher)) as LenientToolDispatcher);
+
+        InspectChatMessages(chatMessages, dispatcher);
 
         var response = await base.GetResponseAsync(chatMessages, options, cancellationToken);
         if (response?.Messages != null)
@@ -98,10 +109,17 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
     {
         if (options?.ConversationId != null)
         {
+            if (!string.Equals(_lastProcessedSessionId, options.ConversationId, StringComparison.Ordinal))
+            {
+                _lastProcessedSessionId = options.ConversationId;
+                _lastProcessedToolEndMessage = null;
+            }
             _breaker.Options.SessionId = options.ConversationId;
         }
 
-        InspectChatMessages(chatMessages);
+        var dispatcher = _dispatcher ?? options.GetToolDispatcher() ?? (GetService(typeof(LenientToolDispatcher)) as LenientToolDispatcher);
+
+        InspectChatMessages(chatMessages, dispatcher);
 
         var sb = new StringBuilder();
         await foreach (var update in base.GetStreamingResponseAsync(chatMessages, options, cancellationToken))
@@ -131,11 +149,12 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
         }
     }
 
-    private void InspectChatMessages(IEnumerable<ChatMessage>? chatMessages)
+    private void InspectChatMessages(IEnumerable<ChatMessage>? chatMessages, LenientToolDispatcher? dispatcher)
     {
         if (chatMessages == null) return;
 
         var messagesList = chatMessages as IList<ChatMessage> ?? chatMessages.ToList();
+        if (messagesList.Count == 0) return;
 
         // 1. Inspect for new guiding prompt from user
         var lastUserMsg = messagesList.LastOrDefault(m => m.Role == ChatRole.User);
@@ -144,37 +163,108 @@ public class ToolLoopCircuitBreakerChatClient : DelegatingChatClient
             _breaker.RecordUserPrompt(lastUserMsg.Text);
         }
 
-        // 2. Inspect for tool observation in message history (aggregate all trailing Tool messages)
-        var sb = new StringBuilder();
-        for (int i = messagesList.Count - 1; i >= 0; i--)
+        // 2. Locate the latest contiguous block of Tool messages (skipping trailing User or System messages)
+        int endIdx = messagesList.Count - 1;
+        while (endIdx >= 0 && (messagesList[endIdx].Role == ChatRole.User || messagesList[endIdx].Role == ChatRole.System))
+        {
+            endIdx--;
+        }
+
+        if (endIdx < 0 || messagesList[endIdx].Role != ChatRole.Tool)
+        {
+            return;
+        }
+
+        // If this exact tool block end message was already processed in this session, skip re-processing
+        if (ReferenceEquals(_lastProcessedToolEndMessage, messagesList[endIdx]))
+        {
+            return;
+        }
+
+        int startIdx = endIdx;
+        while (startIdx > 0 && messagesList[startIdx - 1].Role == ChatRole.Tool)
+        {
+            startIdx--;
+        }
+
+        // Build mapping of CallId -> ToolName from preceding Assistant message(s)
+        var callIdToToolName = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (int i = 0; i < startIdx; i++)
         {
             var msg = messagesList[i];
-            if (msg.Role == ChatRole.Tool)
+            if (msg.Role == ChatRole.Assistant && msg.Contents != null)
             {
-                if (msg.Contents != null)
+                foreach (var call in msg.Contents.OfType<FunctionCallContent>())
                 {
-                    foreach (var content in msg.Contents)
+                    if (!string.IsNullOrWhiteSpace(call.CallId) && !string.IsNullOrWhiteSpace(call.Name))
                     {
-                        if (content is FunctionResultContent frc && frc.Result != null)
+                        var canonicalName = call.Name;
+                        if (dispatcher != null)
                         {
-                            sb.Append(frc.Result);
+                            try
+                            {
+                                var dispatched = dispatcher.NormalizeCall(call.Name, call.Arguments ?? new Dictionary<string, object?>());
+                                canonicalName = dispatched.CanonicalToolName;
+                            }
+                            catch
+                            {
+                                // Keep raw name if normalization fails
+                            }
                         }
-                        else if (content is TextContent tc && !string.IsNullOrEmpty(tc.Text))
-                        {
-                            sb.Append(tc.Text);
-                        }
+                        callIdToToolName[call.CallId] = canonicalName;
                     }
                 }
             }
-            else
+        }
+
+        // Process each tool message in the contiguous block
+        bool recordedAny = false;
+        var aggregatedFallback = new StringBuilder();
+        var seenNonErrorObservationsInBlock = new HashSet<string>(StringComparer.Ordinal);
+
+        for (int i = startIdx; i <= endIdx; i++)
+        {
+            var msg = messagesList[i];
+            if (msg.Contents != null)
             {
-                break;
+                foreach (var content in msg.Contents)
+                {
+                    if (content is FunctionResultContent frc)
+                    {
+                        string? toolName = null;
+                        if (frc.CallId != null && callIdToToolName.TryGetValue(frc.CallId, out var tn))
+                        {
+                            toolName = tn;
+                        }
+
+                        var resultStr = frc.Result?.ToString() ?? string.Empty;
+                        bool? isError = frc.Exception != null ? true : (bool?)null;
+                        bool treatedAsError = isError ?? ToolLoopCircuitBreaker.IsErrorObservation(resultStr);
+
+                        // If multiple parallel calls within the same turn block return identical successful (non-error) observations,
+                        // only record the first one so parallel executions are not misattributed as temporal retry streaks.
+                        if (!treatedAsError && !seenNonErrorObservationsInBlock.Add(resultStr))
+                        {
+                            continue;
+                        }
+
+                        _breaker.RecordObservation(resultStr, toolName, treatedAsError);
+                        recordedAny = true;
+                    }
+                    else if (content is TextContent tc && !string.IsNullOrEmpty(tc.Text))
+                    {
+                        aggregatedFallback.Append(tc.Text);
+                    }
+                }
             }
         }
-        if (sb.Length > 0)
+
+        if (!recordedAny && aggregatedFallback.Length > 0)
         {
-            _breaker.RecordObservation(sb.ToString());
+            _breaker.RecordObservation(aggregatedFallback.ToString());
         }
+
+        _lastProcessedToolEndMessage = messagesList[endIdx];
     }
 
     public override object? GetService(Type serviceType, object? serviceKey = null)

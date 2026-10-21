@@ -574,5 +574,177 @@ public class ToolLoopCircuitBreakerChatClientTests
         var call = Assert.Single(response.Messages.First().Contents.OfType<FunctionCallContent>());
         Assert.Equal("cat", call.Name);
     }
+
+    [Fact]
+    public async Task GetResponseAsync_JitteredArgumentsIdenticalObservationStreak_TripsOnTurn4()
+    {
+        int turn = 0;
+        var inner = new TestChatClient(getResponse: (_, _, _) =>
+        {
+            turn++;
+            // Jittered arguments per turn
+            var args = new Dictionary<string, object?>
+            {
+                ["query"] = $"slots_variation_{turn}",
+                ["path"] = $"sympy/core/symbol_{turn}.py"
+            };
+            return Task.FromResult(new ChatResponse([
+                new ChatMessage(ChatRole.Assistant, [new FunctionCallContent($"c{turn}", "search_code", args)])
+            ]));
+        });
+
+        var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
+        {
+            MaxIdenticalObservationStreak = 3
+        });
+        var client = new ToolLoopCircuitBreakerChatClient(inner, breaker);
+
+        const string staticObservation = "# sympy/core/symbol.py\n# File empty of direct string literal '__slots__'\n";
+
+        // Turn 1
+        var r1 = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "[SWE-bench: sympy-20590] Locate where __slots__ is defined.")
+        ]);
+        Assert.Single(r1.Messages.First().Contents.OfType<FunctionCallContent>());
+
+        // Turn 2: observation from turn 1 fed back + user continuation prompt
+        var r2 = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "[SWE-bench: sympy-20590] Locate where __slots__ is defined."),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c1", "search_code", new Dictionary<string, object?> { ["query"] = "slots_variation_1" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", staticObservation)]),
+            new ChatMessage(ChatRole.User, "Try searching for __slots__ again in sympy/core/symbol.py.")
+        ]);
+        Assert.Single(r2.Messages.First().Contents.OfType<FunctionCallContent>());
+
+        // Turn 3: observation from turn 2 fed back + user retry prompt
+        var r3 = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "[SWE-bench: sympy-20590] Locate where __slots__ is defined."),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c1", "search_code", new Dictionary<string, object?> { ["query"] = "slots_variation_1" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", staticObservation)]),
+            new ChatMessage(ChatRole.User, "Try searching for __slots__ again in sympy/core/symbol.py."),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c2", "search_code", new Dictionary<string, object?> { ["query"] = "slots_variation_2" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c2", staticObservation)]),
+            new ChatMessage(ChatRole.User, "Please search for __slots__ one more time in sympy/core/symbol.py.")
+        ]);
+        Assert.Single(r3.Messages.First().Contents.OfType<FunctionCallContent>());
+
+        // Turn 4: observation from turn 3 fed back + user retry prompt -> trips circuit breaker!
+        var r4 = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "[SWE-bench: sympy-20590] Locate where __slots__ is defined."),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c1", "search_code", new Dictionary<string, object?> { ["query"] = "slots_variation_1" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", staticObservation)]),
+            new ChatMessage(ChatRole.User, "Try searching for __slots__ again in sympy/core/symbol.py."),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c2", "search_code", new Dictionary<string, object?> { ["query"] = "slots_variation_2" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c2", staticObservation)]),
+            new ChatMessage(ChatRole.User, "Please search for __slots__ one more time in sympy/core/symbol.py."),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c3", "search_code", new Dictionary<string, object?> { ["query"] = "slots_variation_3" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c3", staticObservation)]),
+            new ChatMessage(ChatRole.User, "Search for __slots__ in sympy/core/symbol.py again.")
+        ]);
+
+        Assert.Empty(r4.Messages.First().Contents.OfType<FunctionCallContent>());
+        Assert.Contains("[Circuit Breaker Tripped]", r4.Messages.First().Text);
+        Assert.Contains("Identical tool observation streak detected", r4.Messages.First().Text);
+    }
+
+    [Fact]
+    public async Task GetResponseAsync_ConsecutiveToolErrorsWithContinuationPrompts_TripsAndReplacesWithDiagnostic()
+    {
+        int turn = 0;
+        var inner = new TestChatClient(getResponse: (_, _, _) =>
+        {
+            turn++;
+            return Task.FromResult(new ChatResponse([
+                new ChatMessage(ChatRole.Assistant, [
+                    new FunctionCallContent($"c{turn}", "read_file", new Dictionary<string, object?> { ["path"] = $"file_{turn}.py" })
+                ])
+            ]));
+        });
+
+        var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
+        {
+            MaxConsecutiveToolErrors = 3
+        });
+        var client = new ToolLoopCircuitBreakerChatClient(inner, breaker);
+
+        // Turn 1: Initial call
+        await client.GetResponseAsync([new ChatMessage(ChatRole.User, "step 1")]);
+
+        // Turn 2: Error 1 recorded
+        await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "step 1"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c1", "read_file", new Dictionary<string, object?> { ["path"] = "file_1.py" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", "Error: File 'file_1.py' not found")]),
+            new ChatMessage(ChatRole.User, "retry")
+        ]);
+
+        // Turn 3: Error 2 recorded
+        await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "step 1"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c1", "read_file", new Dictionary<string, object?> { ["path"] = "file_1.py" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", "Error: File 'file_1.py' not found")]),
+            new ChatMessage(ChatRole.User, "retry"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c2", "read_file", new Dictionary<string, object?> { ["path"] = "file_2.py" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c2", "Error: File 'file_2.py' not found")]),
+            new ChatMessage(ChatRole.User, "retry")
+        ]);
+
+        // Turn 4: Error 3 recorded -> trips!
+        var r4 = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "step 1"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c1", "read_file", new Dictionary<string, object?> { ["path"] = "file_1.py" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", "Error: File 'file_1.py' not found")]),
+            new ChatMessage(ChatRole.User, "retry"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c2", "read_file", new Dictionary<string, object?> { ["path"] = "file_2.py" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c2", "Error: File 'file_2.py' not found")]),
+            new ChatMessage(ChatRole.User, "retry"),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c3", "read_file", new Dictionary<string, object?> { ["path"] = "file_3.py" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c3", "Error: File 'file_3.py' not found")]),
+            new ChatMessage(ChatRole.User, "retry")
+        ]);
+
+        Assert.Empty(r4.Messages.First().Contents.OfType<FunctionCallContent>());
+        Assert.Contains("[Circuit Breaker Tripped]", r4.Messages.First().Text);
+        Assert.Contains("Tool failure streak detected: tool 'read_file'", r4.Messages.First().Text);
+    }
+
+    [Fact]
+    public async Task InspectChatMessages_ParallelIdenticalNonErrorObservations_DoNotPrematurelyTripStreak()
+    {
+        var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
+        {
+            MaxIdenticalObservationStreak = 3
+        });
+
+        var client = new ToolLoopCircuitBreakerChatClient(
+            new TestChatClient((messages, options, ct) =>
+            {
+                var msg = new ChatMessage(ChatRole.Assistant, [
+                    new FunctionCallContent("next_call", "get_weather", new Dictionary<string, object?> { ["city"] = "Rome" })
+                ]);
+                return Task.FromResult(new ChatResponse(msg));
+            }),
+            breaker);
+
+        // Turn 1: 3 parallel calls that all return identical success results
+        var r = await client.GetResponseAsync([
+            new ChatMessage(ChatRole.User, "Check weather in 3 cities"),
+            new ChatMessage(ChatRole.Assistant, [
+                new FunctionCallContent("c1", "get_weather", new Dictionary<string, object?> { ["city"] = "Paris" }),
+                new FunctionCallContent("c2", "get_weather", new Dictionary<string, object?> { ["city"] = "Tokyo" }),
+                new FunctionCallContent("c3", "get_weather", new Dictionary<string, object?> { ["city"] = "New York" })
+            ]),
+            new ChatMessage(ChatRole.Tool, [
+                new FunctionResultContent("c1", "Executed get_weather successfully."),
+                new FunctionResultContent("c2", "Executed get_weather successfully."),
+                new FunctionResultContent("c3", "Executed get_weather successfully.")
+            ])
+        ]);
+
+        // Should NOT be tripped because parallel identical successes in the same turn do not count as a temporal retry streak
+        Assert.False(breaker.IsTripped);
+        Assert.NotEmpty(r.Messages.First().Contents.OfType<FunctionCallContent>());
+        Assert.DoesNotContain("[Circuit Breaker Tripped]", r.Messages.First().Text ?? string.Empty);
+    }
 }
 

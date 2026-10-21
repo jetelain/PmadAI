@@ -41,16 +41,19 @@ public class UtilityTelemetryTests
         var telemetry = new CircuitBreakerTelemetry();
         telemetry.Record(CircuitBreakerEventType.ToolPingPong, "search_code", "Ping pong detected", "s1");
         telemetry.Record(CircuitBreakerEventType.StreamingRepetition, null, "Streaming repetition", "s2");
+        telemetry.Record(CircuitBreakerEventType.NoProgress, "search_code", "Identical observation streak", "s1");
 
         var globalSnapshot = telemetry.CreateSnapshot();
-        Assert.Equal(2, globalSnapshot.TotalTrips);
+        Assert.Equal(3, globalSnapshot.TotalTrips);
         Assert.Equal(1, globalSnapshot.ToolPingPongTrips);
         Assert.Equal(1, globalSnapshot.StreamingRepetitionTrips);
+        Assert.Equal(1, globalSnapshot.NoProgressTrips);
 
         var s1Snapshot = telemetry.CreateSnapshot("s1");
-        Assert.Equal(1, s1Snapshot.TotalTrips);
+        Assert.Equal(2, s1Snapshot.TotalTrips);
         Assert.Equal(1, s1Snapshot.ToolPingPongTrips);
         Assert.Equal(0, s1Snapshot.StreamingRepetitionTrips);
+        Assert.Equal(1, s1Snapshot.NoProgressTrips);
     }
 
     [Fact]
@@ -61,18 +64,24 @@ public class UtilityTelemetryTests
         telemetry.Record(LenientDispatchEventType.ParameterAliasResolved, "city", "location", "s1");
         telemetry.Record(LenientDispatchEventType.NamespaceStripped, "functions.calc", "calc", "s2");
         telemetry.Record(LenientDispatchEventType.CasingNormalized, "GET_WEATHER", "get_weather", "s2");
+        telemetry.Record(LenientDispatchEventType.EnumValueSnapped, "staging", "Staging", "s1");
+        telemetry.Record(LenientDispatchEventType.EnumValueUnmatched, "unknown_cluster", "unknown_cluster", "s2");
 
         var globalSnapshot = telemetry.CreateSnapshot();
-        Assert.Equal(4, globalSnapshot.TotalHits);
+        Assert.Equal(5, globalSnapshot.TotalHits);
         Assert.Equal(1, globalSnapshot.ToolAliasesResolved);
         Assert.Equal(1, globalSnapshot.ParameterAliasesResolved);
         Assert.Equal(1, globalSnapshot.NamespacesStripped);
         Assert.Equal(1, globalSnapshot.CasingNormalized);
+        Assert.Equal(1, globalSnapshot.EnumValuesSnapped);
+        Assert.Equal(1, globalSnapshot.EnumValuesUnmatched);
 
         var s1Snapshot = telemetry.CreateSnapshot("s1");
-        Assert.Equal(2, s1Snapshot.TotalHits);
+        Assert.Equal(3, s1Snapshot.TotalHits);
         Assert.Equal(1, s1Snapshot.ToolAliasesResolved);
         Assert.Equal(1, s1Snapshot.ParameterAliasesResolved);
+        Assert.Equal(1, s1Snapshot.EnumValuesSnapped);
+        Assert.Equal(0, s1Snapshot.EnumValuesUnmatched);
     }
 
     [Fact]

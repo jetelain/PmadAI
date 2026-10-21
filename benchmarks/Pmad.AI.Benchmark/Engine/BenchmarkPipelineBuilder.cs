@@ -125,7 +125,9 @@ public static class BenchmarkPipelineBuilder
 
         var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
         {
-            Telemetry = breakerTelemetry
+            Telemetry = breakerTelemetry,
+            MaxIdenticalObservationStreak = 4,
+            MaxConsecutiveToolErrors = 5
         });
         var dispatcher = CreateConfiguredDispatcher();
         dispatcher.Telemetry = dispatchTelemetry;
@@ -250,6 +252,8 @@ public static class BenchmarkPipelineBuilder
             .UseToolLoopCircuitBreaker(dispatcher, opts =>
             {
                 opts.Telemetry = breakerTelemetry;
+                opts.MaxIdenticalObservationStreak = 4;
+                opts.MaxConsecutiveToolErrors = 5;
             })
             .UseToolCallHealing(dispatcher, opts =>
             {
@@ -314,7 +318,9 @@ public static class BenchmarkPipelineBuilder
         // 4. Circuit breaker & lenient dispatch
         var breaker = new ToolLoopCircuitBreaker(new ToolLoopCircuitBreakerOptions
         {
-            Telemetry = breakerTelemetry
+            Telemetry = breakerTelemetry,
+            MaxIdenticalObservationStreak = 4,
+            MaxConsecutiveToolErrors = 5
         });
         current = new ToolLoopCircuitBreakerChatClient(current, breaker, dispatcher);
         current = new LenientToolDispatchChatClient(current, dispatcher);

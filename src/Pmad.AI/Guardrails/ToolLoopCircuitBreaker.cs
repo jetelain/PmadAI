@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Pmad.AI.Guardrails;
 
@@ -11,7 +12,8 @@ public enum LoopType
 {
     None,
     StreamingRepetition,
-    ToolPingPong
+    ToolPingPong,
+    NoProgress
 }
 
 /// <summary>
@@ -51,6 +53,21 @@ public class ToolLoopCircuitBreakerOptions
     public int PingPongThreshold { get; set; } = 3;
 
     /// <summary>
+    /// Maximum consecutive identical tool observation streak across turns before tripping the circuit breaker with
+    /// <see cref="LoopType.NoProgress"/>, regardless of argument variations. Default: 0 (disabled).
+    /// Recommended presets configure this to 3.
+    /// </summary>
+    public int MaxIdenticalObservationStreak { get; set; } = 0;
+
+    /// <summary>
+    /// Maximum consecutive tool errors from the same tool before tripping the circuit breaker with
+    /// <see cref="LoopType.NoProgress"/>, regardless of argument variations. Default: 0 (disabled).
+    /// An observation is treated as an error when it represents an exception or begins with 'Error:' or 'File ... not found'.
+    /// Recommended presets configure this to 5.
+    /// </summary>
+    public int MaxConsecutiveToolErrors { get; set; } = 0;
+
+    /// <summary>
     /// When true, resetting ping-pong tracking occurs when a distinct user prompt is observed.
     /// Default: true (distinct user messages allow fresh tool exploration).
     /// </summary>
@@ -86,8 +103,48 @@ public sealed class ToolLoopCircuitBreaker
     private int _consecutiveIdenticalCount;
     private string? _lastObservationHash;
     private string? _lastUserPromptHash;
+    private int _identicalObservationStreak;
+    private readonly Dictionary<string, int> _consecutiveToolErrors = new(StringComparer.OrdinalIgnoreCase);
+    private LoopCheckResult? _trippedStreakResult;
+
+    /// <summary>
+    /// Event fired when the circuit breaker is reset.
+    /// </summary>
+    public event Action? OnReset;
 
     public ToolLoopCircuitBreakerOptions Options => _options;
+
+    /// <summary>
+    /// Gets a value indicating whether a semantic observation or error streak has tripped the circuit breaker.
+    /// </summary>
+    public bool IsTripped => _trippedStreakResult != null;
+
+    /// <summary>
+    /// Checks whether the circuit breaker has tripped from an observation streak or consecutive error streak.
+    /// Optionally checks for a specific tool.
+    /// </summary>
+    public bool TryGetTrippedResult([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out LoopCheckResult? result, string? toolName = null)
+    {
+        if (_trippedStreakResult != null)
+        {
+            if (toolName == null || _trippedStreakResult.ToolName == null || string.Equals(_trippedStreakResult.ToolName, toolName, StringComparison.OrdinalIgnoreCase))
+            {
+                result = _trippedStreakResult;
+                return true;
+            }
+        }
+
+        if (toolName != null && _options.MaxConsecutiveToolErrors > 0 &&
+            _consecutiveToolErrors.TryGetValue(toolName, out var errCount) && errCount >= _options.MaxConsecutiveToolErrors)
+        {
+            var diag = $"Tool failure streak detected: tool '{toolName}' failed with {errCount} consecutive errors (threshold: {_options.MaxConsecutiveToolErrors}). Cease repetitive failing tool calls.";
+            result = new LoopCheckResult(true, LoopType.NoProgress, diag, toolName);
+            return true;
+        }
+
+        result = null;
+        return false;
+    }
 
     public ToolLoopCircuitBreaker(ToolLoopCircuitBreakerOptions? options = null)
     {
@@ -121,6 +178,10 @@ public sealed class ToolLoopCircuitBreaker
         _consecutiveIdenticalCount = 0;
         _lastObservationHash = null;
         _lastUserPromptHash = null;
+        _identicalObservationStreak = 0;
+        _consecutiveToolErrors.Clear();
+        _trippedStreakResult = null;
+        OnReset?.Invoke();
     }
 
     /// <summary>
@@ -134,19 +195,116 @@ public sealed class ToolLoopCircuitBreaker
         _lastStateSignature = null;
     }
 
+    private static readonly Regex JsonErrorRegex = new(@"^\{\s*""(?:error|errors)""", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Determines whether an observation text represents an error or exception result from a tool.
+    /// Recognizes standard patterns including 'Error:', '[ERROR]', 'Exception:', 'Fatal:', JSON error objects,
+    /// 'File ... not found', and 'Hunk context mismatch'.
+    /// </summary>
+    public static bool IsErrorObservation(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        var trimmed = text.TrimStart();
+        return trimmed.StartsWith("Error:", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("[ERROR]", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("Exception:", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("Fatal:", StringComparison.OrdinalIgnoreCase)
+            || JsonErrorRegex.IsMatch(trimmed)
+            || (trimmed.StartsWith("File ", StringComparison.OrdinalIgnoreCase) && trimmed.Contains("not found", StringComparison.OrdinalIgnoreCase))
+            || trimmed.StartsWith("Hunk context mismatch", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Records a tool execution observation or result. Tracks observation hashes and error streaks across tools.
+    /// Resets the exact-hash ping-pong counter upon receiving a distinct observation, and resets streak counters
+    /// upon receiving a successful, non-error, non-repeated observation.
+    /// </summary>
+    public void RecordObservation(string? observation, string? toolName = null, bool? isError = null)
+    {
+        if (observation == null) return;
+        var obsHash = ComputeHash(observation);
+        bool error = isError ?? IsErrorObservation(observation);
+
+        if (error)
+        {
+            if (!string.IsNullOrWhiteSpace(toolName))
+            {
+                int errCount = _consecutiveToolErrors.GetValueOrDefault(toolName, 0) + 1;
+                _consecutiveToolErrors[toolName] = errCount;
+                if (_options.MaxConsecutiveToolErrors > 0 && errCount >= _options.MaxConsecutiveToolErrors)
+                {
+                    var diag = $"Tool failure streak detected: tool '{toolName}' failed with {errCount} consecutive errors (threshold: {_options.MaxConsecutiveToolErrors}). Cease repetitive failing tool calls.";
+                    _trippedStreakResult = new LoopCheckResult(true, LoopType.NoProgress, diag, toolName);
+                }
+            }
+
+            if (_lastObservationHash != null && string.Equals(_lastObservationHash, obsHash, StringComparison.Ordinal))
+            {
+                _identicalObservationStreak++;
+            }
+            else
+            {
+                _identicalObservationStreak = 1;
+            }
+
+            if (_options.MaxIdenticalObservationStreak > 0 && _identicalObservationStreak >= _options.MaxIdenticalObservationStreak)
+            {
+                var diag = $"Identical tool observation streak detected: tool execution produced {_identicalObservationStreak} consecutive identical observations (threshold: {_options.MaxIdenticalObservationStreak}). Cease repetitive tool invocation.";
+                _trippedStreakResult = new LoopCheckResult(true, LoopType.NoProgress, diag, null);
+            }
+
+            // Per Recommendation 3 Point 3:
+            // A changed observation hash only resets the exact-hash ping-pong counter.
+            if (_lastObservationHash == null || !string.Equals(_lastObservationHash, obsHash, StringComparison.Ordinal))
+            {
+                ResetPingPong();
+            }
+            _lastObservationHash = obsHash;
+        }
+        else
+        {
+            // Observation is NOT an error.
+            if (_lastObservationHash != null && string.Equals(_lastObservationHash, obsHash, StringComparison.Ordinal))
+            {
+                // Repeated identical observation
+                _identicalObservationStreak++;
+                if (_options.MaxIdenticalObservationStreak > 0 && _identicalObservationStreak >= _options.MaxIdenticalObservationStreak)
+                {
+                    var diag = $"Identical tool observation streak detected: tool execution produced {_identicalObservationStreak} consecutive identical observations (threshold: {_options.MaxIdenticalObservationStreak}). Cease repetitive tool invocation.";
+                    _trippedStreakResult = new LoopCheckResult(true, LoopType.NoProgress, diag, null);
+                }
+            }
+            else
+            {
+                // Successful, non-error, non-repeated observation!
+                // Streak counters reset ONLY upon receiving a successful, non-error, non-repeated observation.
+                ResetPingPong();
+                _identicalObservationStreak = 1;
+                _consecutiveToolErrors.Clear();
+                _trippedStreakResult = null;
+            }
+
+            _lastObservationHash = obsHash;
+        }
+    }
+
+    /// <summary>
+    /// Records a tool execution observation or result object.
+    /// </summary>
+    public void RecordObservation(object? observation, string? toolName = null, bool? isError = null)
+    {
+        if (observation == null) return;
+        RecordObservation(observation.ToString(), toolName, isError);
+    }
+
     /// <summary>
     /// Records a tool execution observation or result. If the observation is distinct from the prior observation,
     /// resets the ping-pong counter to signal that the agent has received new information and is making forward progress.
     /// </summary>
     public void RecordObservation(string? observation)
     {
-        if (observation == null) return;
-        var obsHash = ComputeHash(observation);
-        if (_lastObservationHash == null || !string.Equals(_lastObservationHash, obsHash, StringComparison.Ordinal))
-        {
-            ResetPingPong();
-        }
-        _lastObservationHash = obsHash;
+        RecordObservation(observation, null, null);
     }
 
     /// <summary>
@@ -154,9 +312,11 @@ public sealed class ToolLoopCircuitBreaker
     /// </summary>
     public void RecordObservation(object? observation)
     {
-        if (observation == null) return;
-        RecordObservation(observation.ToString());
+        RecordObservation(observation, null, null);
     }
+
+    private static readonly Regex ContinuationPrefixRegex = new(@"^(?:proceed\s+with\s+)?(?:step|turn)\s*[:#]?\s*\d+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex RetryKeywordRegex = new(@"\b(?:again|one\s+more\s+time|retry|retries|try\s+again|repeat)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>
     /// Determines whether the prompt is an automated step continuation or retry instruction rather than a new guiding user prompt.
@@ -166,27 +326,21 @@ public sealed class ToolLoopCircuitBreaker
         if (string.IsNullOrWhiteSpace(text)) return true;
         var trimmed = text.Trim();
         return int.TryParse(trimmed, out _)
-            || trimmed.StartsWith("Proceed with step", StringComparison.OrdinalIgnoreCase)
-            || trimmed.StartsWith("Step ", StringComparison.OrdinalIgnoreCase)
-            || trimmed.StartsWith("Step", StringComparison.OrdinalIgnoreCase)
-            || trimmed.StartsWith("Turn ", StringComparison.OrdinalIgnoreCase)
-            || trimmed.StartsWith("Turn", StringComparison.OrdinalIgnoreCase)
             || string.Equals(trimmed, "continue", StringComparison.OrdinalIgnoreCase)
             || string.Equals(trimmed, "next", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(trimmed, "step", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(trimmed, "turn", StringComparison.OrdinalIgnoreCase)
             || string.Equals(trimmed, "again", StringComparison.OrdinalIgnoreCase)
             || string.Equals(trimmed, "retry", StringComparison.OrdinalIgnoreCase)
-            || trimmed.Contains("again", StringComparison.OrdinalIgnoreCase)
-            || trimmed.Contains("one more time", StringComparison.OrdinalIgnoreCase)
-            || trimmed.Contains("retry", StringComparison.OrdinalIgnoreCase)
-            || trimmed.Contains("try again", StringComparison.OrdinalIgnoreCase)
-            || trimmed.Contains("repeat", StringComparison.OrdinalIgnoreCase);
+            || ContinuationPrefixRegex.IsMatch(trimmed)
+            || RetryKeywordRegex.IsMatch(trimmed);
     }
 
     /// <summary>
-    /// Records a user prompt. When <see cref="ToolLoopCircuitBreakerOptions.ResetOnUserPrompt"/> is enabled and the prompt represents
+    /// Records a user prompt. When <see cref="ToolLoopCircuitBreakerOptions.ResetOnUserPrompt"/> is enabled (the default) and the prompt represents
     /// a new guiding instruction from the user (different from the previous prompt and not a continuation/retry instruction),
-    /// resets the ping-pong counter to allow fresh exploration.
-    /// By default (<see cref="ToolLoopCircuitBreakerOptions.ResetOnUserPrompt"/> = false), ping-pong resets are state-driven
+    /// resets the ping-pong counter, observation streak, and per-tool error counters to allow fresh exploration.
+    /// When disabled (<see cref="ToolLoopCircuitBreakerOptions.ResetOnUserPrompt"/> = false), resets are state-driven
     /// (triggering only when tool signatures or observation hashes change).
     /// </summary>
     public void RecordUserPrompt(string? userPrompt)
@@ -196,6 +350,10 @@ public sealed class ToolLoopCircuitBreaker
         if (_options.ResetOnUserPrompt && _lastUserPromptHash != null && !string.Equals(_lastUserPromptHash, promptHash, StringComparison.Ordinal))
         {
             ResetPingPong();
+            _identicalObservationStreak = 0;
+            _consecutiveToolErrors.Clear();
+            _trippedStreakResult = null;
+            _lastObservationHash = null;
         }
         _lastUserPromptHash = promptHash;
     }
@@ -256,7 +414,7 @@ public sealed class ToolLoopCircuitBreaker
     {
         if (observation != null)
         {
-            RecordObservation(observation);
+            RecordObservation(observation, toolName);
         }
         return EvaluateToolInvocation(toolName, arguments, stateSignature);
     }
@@ -268,7 +426,7 @@ public sealed class ToolLoopCircuitBreaker
     {
         if (observation != null)
         {
-            RecordObservation(observation);
+            RecordObservation(observation, toolName);
         }
         return EvaluateToolInvocation(toolName, argumentsJson, stateSignature);
     }
@@ -281,6 +439,26 @@ public sealed class ToolLoopCircuitBreaker
     public LoopCheckResult EvaluateToolInvocation(string toolName, string argumentsJson, string? stateSignature = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(toolName);
+
+        if (_trippedStreakResult != null)
+        {
+            if (_trippedStreakResult.ToolName == null || string.Equals(_trippedStreakResult.ToolName, toolName, StringComparison.OrdinalIgnoreCase))
+            {
+                return RecordTrip(_trippedStreakResult, toolName);
+            }
+        }
+
+        if (_options.MaxConsecutiveToolErrors > 0 && _consecutiveToolErrors.TryGetValue(toolName, out var errCount) && errCount >= _options.MaxConsecutiveToolErrors)
+        {
+            var diag = $"Tool failure streak detected: tool '{toolName}' failed with {errCount} consecutive errors (threshold: {_options.MaxConsecutiveToolErrors}). Cease repetitive failing tool calls.";
+            return RecordTrip(new LoopCheckResult(true, LoopType.NoProgress, diag, toolName));
+        }
+
+        if (_options.MaxIdenticalObservationStreak > 0 && _identicalObservationStreak >= _options.MaxIdenticalObservationStreak)
+        {
+            var diag = $"Identical tool observation streak detected: tool execution produced {_identicalObservationStreak} consecutive identical observations (threshold: {_options.MaxIdenticalObservationStreak}). Cease repetitive tool invocation.";
+            return RecordTrip(new LoopCheckResult(true, LoopType.NoProgress, diag, toolName));
+        }
 
         var argsToHash = _options.CanonicalizeJsonArguments
             ? CanonicalizeJson(argumentsJson)
@@ -342,15 +520,19 @@ public sealed class ToolLoopCircuitBreaker
         return new LoopCheckResult(false, LoopType.None, string.Empty, toolName);
     }
 
-    private LoopCheckResult RecordTrip(LoopCheckResult result)
+    private LoopCheckResult RecordTrip(LoopCheckResult result, string? fallbackToolName = null)
     {
         if (result.IsLoopDetected)
         {
-            var eventType = result.Type == LoopType.StreamingRepetition
-                ? CircuitBreakerEventType.StreamingRepetition
-                : CircuitBreakerEventType.ToolPingPong;
-            _options.Telemetry?.Record(eventType, result.ToolName, result.DiagnosticMessage, _options.SessionId);
-            _options.OnLoopDetected?.Invoke(result);
+            var effectiveTool = result.ToolName ?? fallbackToolName;
+            var eventType = result.Type switch
+            {
+                LoopType.StreamingRepetition => CircuitBreakerEventType.StreamingRepetition,
+                LoopType.NoProgress => CircuitBreakerEventType.NoProgress,
+                _ => CircuitBreakerEventType.ToolPingPong
+            };
+            _options.Telemetry?.Record(eventType, effectiveTool, result.DiagnosticMessage, _options.SessionId);
+            _options.OnLoopDetected?.Invoke(result.ToolName == null && effectiveTool != null ? result with { ToolName = effectiveTool } : result);
         }
         return result;
     }

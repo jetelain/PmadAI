@@ -362,7 +362,7 @@ public static class MarkdownReportWriter
                     ? $"[**{configName}**]({s.TranscriptPath})"
                     : $"**{configName}**";
 
-                sb.AppendLine($"| `{s.ModelName}` | {configDisplay} | {h.TotalInterventions} | {h.PseudoTagsExtracted} | {h.JsonRepairs} | {b.TotalTrips} | {b.ToolPingPongTrips} | {b.StreamingRepetitionTrips} | {d.TotalHits} | {d.ToolAliasesResolved} | {d.ParameterAliasesResolved} | {d.CasingNormalized} |");
+                sb.AppendLine($"| `{s.ModelName}` | {configDisplay} | {h.TotalInterventions} | {h.PseudoTagsExtracted} | {h.JsonRepairs} | {b.TotalTrips} | {b.ToolPingPongTrips + b.NoProgressTrips} | {b.StreamingRepetitionTrips} | {d.TotalHits} | {d.ToolAliasesResolved} | {d.ParameterAliasesResolved} | {d.CasingNormalized} |");
             }
         }
 
@@ -459,14 +459,14 @@ public static class MarkdownReportWriter
                 if (sc.CircuitBreakerStats != null && sc.CircuitBreakerStats.TotalTrips > 0)
                 {
                     var b = sc.CircuitBreakerStats;
-                    sb.AppendLine($"> ⚡ **Circuit Breaker Details for {sc.ScenarioName}:** {b.TotalTrips} trip(s), {b.ToolPingPongTrips} ping-pong loop trip(s), {b.StreamingRepetitionTrips} streaming repetition trip(s).");
+                    sb.AppendLine($"> ⚡ **Circuit Breaker Details for {sc.ScenarioName}:** {b.TotalTrips} trip(s), {b.ToolPingPongTrips} ping-pong loop trip(s), {b.StreamingRepetitionTrips} streaming repetition trip(s){(b.NoProgressTrips > 0 ? $", {b.NoProgressTrips} semantic/no-progress loop trip(s)" : "")}.");
                     sb.AppendLine();
                 }
 
                 if (sc.DispatchStats != null && sc.DispatchStats.TotalHits > 0)
                 {
                     var d = sc.DispatchStats;
-                    sb.AppendLine($"> 🔀 **Dispatch Normalization Details for {sc.ScenarioName}:** {d.TotalHits} event(s) ({d.ToolAliasesResolved} tool alias hits, {d.ParameterAliasesResolved} param alias hits, {d.CasingNormalized} casing normalizations).");
+                    sb.AppendLine($"> 🔀 **Dispatch Normalization Details for {sc.ScenarioName}:** {d.TotalHits} event(s) ({d.ToolAliasesResolved} tool alias hits, {d.ParameterAliasesResolved} param alias hits, {d.CasingNormalized} casing normalizations{(d.EnumValuesSnapped > 0 ? $", {d.EnumValuesSnapped} enum value(s) snapped" : "")}).");
                     sb.AppendLine();
                 }
 
@@ -557,11 +557,12 @@ public static class MarkdownReportWriter
     private static CircuitBreakerTelemetrySnapshot AggregateBreakerStats(IEnumerable<BenchmarkScenarioResult> scenarioResults)
     {
         var list = scenarioResults.Where(s => s.CircuitBreakerStats != null).Select(s => s.CircuitBreakerStats!).ToList();
-        if (list.Count == 0) return new CircuitBreakerTelemetrySnapshot(0, 0, 0);
+        if (list.Count == 0) return new CircuitBreakerTelemetrySnapshot(0, 0, 0, 0);
         return new CircuitBreakerTelemetrySnapshot(
             TotalTrips: list.Sum(s => s.TotalTrips),
             StreamingRepetitionTrips: list.Sum(s => s.StreamingRepetitionTrips),
-            ToolPingPongTrips: list.Sum(s => s.ToolPingPongTrips)
+            ToolPingPongTrips: list.Sum(s => s.ToolPingPongTrips),
+            NoProgressTrips: list.Sum(s => s.NoProgressTrips)
         );
     }
 
@@ -574,7 +575,9 @@ public static class MarkdownReportWriter
             ToolAliasesResolved: list.Sum(s => s.ToolAliasesResolved),
             ParameterAliasesResolved: list.Sum(s => s.ParameterAliasesResolved),
             NamespacesStripped: list.Sum(s => s.NamespacesStripped),
-            CasingNormalized: list.Sum(s => s.CasingNormalized)
+            CasingNormalized: list.Sum(s => s.CasingNormalized),
+            EnumValuesSnapped: list.Sum(s => s.EnumValuesSnapped),
+            EnumValuesUnmatched: list.Sum(s => s.EnumValuesUnmatched)
         );
     }
 

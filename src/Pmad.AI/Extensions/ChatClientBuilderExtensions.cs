@@ -60,6 +60,8 @@ public static class ChatClientBuilderExtensions
             options.PingPongThreshold = 3;
             options.ResetOnUserPrompt = true;
             options.MaxToolHistory = 30;
+            options.MaxIdenticalObservationStreak = 4;
+            options.MaxConsecutiveToolErrors = 5;
             configureBreaker?.Invoke(options);
         });
 
@@ -140,6 +142,8 @@ public static class ChatClientBuilderExtensions
             options.PingPongThreshold = 3;
             options.ResetOnUserPrompt = true;
             options.MaxToolHistory = 30;
+            options.MaxIdenticalObservationStreak = 4;
+            options.MaxConsecutiveToolErrors = 5;
             configureBreaker?.Invoke(options);
         });
 

@@ -11,7 +11,10 @@ public enum CircuitBreakerEventType
     StreamingRepetition,
 
     /// <summary>Repetitive identical tool invocation on unchanged state detected.</summary>
-    ToolPingPong
+    ToolPingPong,
+
+    /// <summary>Semantic loop or repeated tool failures with no forward progress detected.</summary>
+    NoProgress
 }
 
 /// <summary>
@@ -31,7 +34,8 @@ public sealed record CircuitBreakerEvent(
 public sealed record CircuitBreakerTelemetrySnapshot(
     int TotalTrips,
     int StreamingRepetitionTrips,
-    int ToolPingPongTrips
+    int ToolPingPongTrips,
+    int NoProgressTrips = 0
 );
 
 /// <summary>
@@ -70,16 +74,17 @@ public sealed class CircuitBreakerTelemetry
             ? _events
             : _events.Where(e => string.Equals(e.SessionId, sessionId, StringComparison.OrdinalIgnoreCase));
 
-        int streaming = 0, pingPong = 0;
+        int streaming = 0, pingPong = 0, noProgress = 0;
         foreach (var e in filtered)
         {
             switch (e.Type)
             {
                 case CircuitBreakerEventType.StreamingRepetition: streaming++; break;
                 case CircuitBreakerEventType.ToolPingPong: pingPong++; break;
+                case CircuitBreakerEventType.NoProgress: noProgress++; break;
             }
         }
 
-        return new CircuitBreakerTelemetrySnapshot(streaming + pingPong, streaming, pingPong);
+        return new CircuitBreakerTelemetrySnapshot(streaming + pingPong + noProgress, streaming, pingPong, noProgress);
     }
 }

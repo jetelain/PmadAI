@@ -17,7 +17,13 @@ public enum LenientDispatchEventType
     NamespaceStripped,
 
     /// <summary>Case-folding or casing normalization applied to match tool or parameter.</summary>
-    CasingNormalized
+    CasingNormalized,
+
+    /// <summary>String argument value snapped to schema enum or const member.</summary>
+    EnumValueSnapped,
+
+    /// <summary>String argument value did not match any schema enum or const member and could not be unambiguously snapped.</summary>
+    EnumValueUnmatched
 }
 
 /// <summary>
@@ -39,7 +45,9 @@ public sealed record LenientDispatchTelemetrySnapshot(
     int ToolAliasesResolved,
     int ParameterAliasesResolved,
     int NamespacesStripped,
-    int CasingNormalized
+    int CasingNormalized,
+    int EnumValuesSnapped = 0,
+    int EnumValuesUnmatched = 0
 );
 
 /// <summary>
@@ -78,7 +86,7 @@ public sealed class LenientDispatchTelemetry
             ? _events
             : _events.Where(e => string.Equals(e.SessionId, sessionId, StringComparison.OrdinalIgnoreCase));
 
-        int toolAliases = 0, paramAliases = 0, namespaces = 0, casing = 0;
+        int toolAliases = 0, paramAliases = 0, namespaces = 0, casing = 0, enumSnapped = 0, enumUnmatched = 0;
         foreach (var e in filtered)
         {
             switch (e.Type)
@@ -87,10 +95,12 @@ public sealed class LenientDispatchTelemetry
                 case LenientDispatchEventType.ParameterAliasResolved: paramAliases++; break;
                 case LenientDispatchEventType.NamespaceStripped: namespaces++; break;
                 case LenientDispatchEventType.CasingNormalized: casing++; break;
+                case LenientDispatchEventType.EnumValueSnapped: enumSnapped++; break;
+                case LenientDispatchEventType.EnumValueUnmatched: enumUnmatched++; break;
             }
         }
 
-        var total = toolAliases + paramAliases + namespaces + casing;
-        return new LenientDispatchTelemetrySnapshot(total, toolAliases, paramAliases, namespaces, casing);
+        var total = toolAliases + paramAliases + namespaces + casing + enumSnapped;
+        return new LenientDispatchTelemetrySnapshot(total, toolAliases, paramAliases, namespaces, casing, enumSnapped, enumUnmatched);
     }
 }

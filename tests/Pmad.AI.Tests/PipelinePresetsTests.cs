@@ -73,6 +73,8 @@ public class PipelinePresetsTests
                 Assert.Equal(3, opts.PingPongThreshold);
                 Assert.True(opts.ResetOnUserPrompt);
                 Assert.Equal(30, opts.MaxToolHistory);
+                Assert.Equal(4, opts.MaxIdenticalObservationStreak);
+                Assert.Equal(5, opts.MaxConsecutiveToolErrors);
             },
             configureThinking: opts =>
             {
@@ -150,6 +152,8 @@ public class PipelinePresetsTests
                 breakerConfigured = true;
                 Assert.Equal(3, opts.PingPongThreshold);
                 Assert.True(opts.ResetOnUserPrompt);
+                Assert.Equal(4, opts.MaxIdenticalObservationStreak);
+                Assert.Equal(5, opts.MaxConsecutiveToolErrors);
             },
             configureThinking: opts =>
             {

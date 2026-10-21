@@ -498,6 +498,7 @@ public sealed record DispatchedToolCall(
 public class LenientToolDispatcher
 {
     private readonly LenientToolDispatcherOptions _options;
+    private readonly object _syncLock = new();
     private ToolDispatcherConfiguration _configuration = new();
     private readonly Dictionary<string, AIFunction> _registeredTools = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _canonicalToolNames = new(StringComparer.OrdinalIgnoreCase);
@@ -531,8 +532,11 @@ public class LenientToolDispatcher
     public void Configure(ToolDispatcherConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(configuration);
-        _configuration = configuration;
-        RebuildLookupTables();
+        lock (_syncLock)
+        {
+            _configuration = configuration;
+            RebuildLookupTables();
+        }
     }
 
     private void RebuildLookupTables()
@@ -569,6 +573,11 @@ public class LenientToolDispatcher
                 }
             }
         }
+
+        foreach (var (toolName, tool) in _registeredTools)
+        {
+            _canonicalToolNames[tool.Name] = tool.Name;
+        }
     }
 
     /// <summary>
@@ -577,9 +586,57 @@ public class LenientToolDispatcher
     public void RegisterTool(AIFunction tool)
     {
         ArgumentNullException.ThrowIfNull(tool);
-        _registeredTools[tool.Name] = tool;
+        lock (_syncLock)
+        {
+            RegisterToolInternal(tool);
+        }
+    }
+
+    private void RegisterToolInternal(AIFunction tool)
+    {
+        _canonicalToolNames[tool.Name] = tool.Name;
+
+        if (_registeredTools.TryGetValue(tool.Name, out var existing))
+        {
+            if (ReferenceEquals(existing, tool))
+            {
+                return;
+            }
+
+            if (_toolRootSchemas.TryGetValue(tool.Name, out var existingSchema) &&
+                AreSchemasEqual(existingSchema, tool.JsonSchema))
+            {
+                _registeredTools[tool.Name] = tool;
+                return;
+            }
+
+            _registeredTools[tool.Name] = tool;
+        }
+        else
+        {
+            _registeredTools[tool.Name] = tool;
+        }
+
         CacheToolSchema(tool);
     }
+
+    private static bool AreSchemasEqual(JsonElement a, JsonElement b)
+    {
+        if (a.ValueKind != b.ValueKind)
+        {
+            return false;
+        }
+
+        if (a.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+        {
+            return true;
+        }
+
+        return string.Equals(a.GetRawText(), b.GetRawText(), StringComparison.Ordinal);
+    }
+
+    internal bool TryGetCachedSchemaProperties(string toolName, out Dictionary<string, (string CanonicalName, JsonElement Schema)>? properties)
+        => _toolSchemaProperties.TryGetValue(toolName, out properties);
 
     private void CacheToolSchema(AIFunction tool)
     {
@@ -598,6 +655,10 @@ public class LenientToolDispatcher
             }
             _toolSchemaProperties[tool.Name] = propDict;
         }
+        else
+        {
+            _toolSchemaProperties.Remove(tool.Name);
+        }
     }
 
     /// <summary>
@@ -606,9 +667,12 @@ public class LenientToolDispatcher
     public void RegisterTools(IEnumerable<AIFunction> tools)
     {
         ArgumentNullException.ThrowIfNull(tools);
-        foreach (var t in tools)
+        lock (_syncLock)
         {
-            RegisterTool(t);
+            foreach (var t in tools)
+            {
+                RegisterToolInternal(t);
+            }
         }
     }
 
@@ -1361,47 +1425,36 @@ public class LenientToolDispatcher
         }
 
         // 1. Schema-based Enum matching (case-insensitive + casing/plural heuristics)
-        if (schema.HasValue && schema.Value.TryGetProperty("enum", out var enumProp) && enumProp.ValueKind == JsonValueKind.Array)
+        if (schema.HasValue)
         {
-            foreach (var enumEl in enumProp.EnumerateArray())
+            if (TryGetEnumOrConstMembers(schema.Value, out var enumMembers))
             {
-                if (enumEl.ValueKind == JsonValueKind.String)
+                var snapped = SnapEnumValueCore(trimmed, enumMembers, telemetry: null, sessionId: null);
+                if (!string.Equals(snapped, trimmed, StringComparison.Ordinal) || enumMembers.Contains(snapped))
                 {
-                    var enumStr = enumEl.GetString();
-                    if (enumStr != null)
+                    return snapped;
+                }
+            }
+
+            if (schema.Value.TryGetProperty("enum", out var enumProp) && enumProp.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var enumEl in enumProp.EnumerateArray())
+                {
+                    if (enumEl.ValueKind is JsonValueKind.True or JsonValueKind.False)
                     {
-                        if (string.Equals(enumStr, trimmed, StringComparison.OrdinalIgnoreCase))
+                        if (bool.TryParse(trimmed, out var parsedBool) && parsedBool == enumEl.GetBoolean())
                         {
-                            return enumStr;
-                        }
-                        if (string.Equals(ToSnakeCase(enumStr), ToSnakeCase(trimmed), StringComparison.OrdinalIgnoreCase))
-                        {
-                            return enumStr;
-                        }
-                        if (trimmed.EndsWith("s", StringComparison.OrdinalIgnoreCase) && string.Equals(enumStr, trimmed[..^1], StringComparison.OrdinalIgnoreCase))
-                        {
-                            return enumStr;
-                        }
-                        if (enumStr.EndsWith("s", StringComparison.OrdinalIgnoreCase) && string.Equals(enumStr[..^1], trimmed, StringComparison.OrdinalIgnoreCase))
-                        {
-                            return enumStr;
+                            return enumEl.GetBoolean();
                         }
                     }
-                }
-                else if (enumEl.ValueKind is JsonValueKind.True or JsonValueKind.False)
-                {
-                    if (bool.TryParse(trimmed, out var parsedBool) && parsedBool == enumEl.GetBoolean())
+                    else if (enumEl.ValueKind == JsonValueKind.Number)
                     {
-                        return enumEl.GetBoolean();
-                    }
-                }
-                else if (enumEl.ValueKind == JsonValueKind.Number)
-                {
-                    if (double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedDbl))
-                    {
-                        if (Math.Abs(parsedDbl - enumEl.GetDouble()) < double.Epsilon)
+                        if (double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedDbl))
                         {
-                            return ToolCallHealingTransform.UnwrapJsonElement(enumEl);
+                            if (Math.Abs(parsedDbl - enumEl.GetDouble()) < double.Epsilon)
+                            {
+                                return ToolCallHealingTransform.UnwrapJsonElement(enumEl);
+                            }
                         }
                     }
                 }
@@ -1581,6 +1634,11 @@ public class LenientToolDispatcher
                     if (value == null) return null;
                 }
                 catch (JsonException) { }
+            }
+
+            if (value is string currentStr && resolvedSchema.HasValue && TryGetEnumOrConstMembers(resolvedSchema.Value, out var enumMembers))
+            {
+                value = SnapEnumValueCore(currentStr, enumMembers, Telemetry, SessionId);
             }
         }
 
@@ -1917,6 +1975,408 @@ public class LenientToolDispatcher
         }
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Snaps a candidate string value to the closest matching schema enum or const member using deterministic rules.
+    /// If no unique candidate matches, returns the original value untouched.
+    /// </summary>
+    public string SnapEnumValue(string value, JsonElement schema)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (TryGetEnumOrConstMembers(schema, out var candidates))
+        {
+            return SnapEnumValueCore(value, candidates, Telemetry, SessionId);
+        }
+        return value;
+    }
+
+    /// <summary>
+    /// Snaps a candidate string value to the closest matching member among candidate strings using deterministic rules.
+    /// If no unique candidate matches, returns the original value untouched.
+    /// </summary>
+    public string SnapEnumValue(string value, IEnumerable<string> candidates)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        ArgumentNullException.ThrowIfNull(candidates);
+        var list = candidates as IReadOnlyList<string> ?? candidates.ToList();
+        return SnapEnumValueCore(value, list, Telemetry, SessionId);
+    }
+
+    internal static string SnapEnumValueCore(
+        string value,
+        IReadOnlyList<string> candidates,
+        LenientDispatchTelemetry? telemetry = null,
+        string? sessionId = null)
+    {
+        if (candidates == null || candidates.Count == 0)
+        {
+            return value;
+        }
+
+        // Exact match check (Ordinal) - already a valid member
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            if (string.Equals(candidates[i], value, StringComparison.Ordinal))
+            {
+                return value;
+            }
+        }
+
+        // 1. Ordinal case-insensitive match
+        List<string>? rule1Matches = null;
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            if (string.Equals(candidates[i], value, StringComparison.OrdinalIgnoreCase))
+            {
+                rule1Matches ??= new List<string>(2);
+                rule1Matches.Add(candidates[i]);
+            }
+        }
+
+        if (rule1Matches != null)
+        {
+            if (rule1Matches.Count == 1)
+            {
+                telemetry?.Record(LenientDispatchEventType.EnumValueSnapped, value, rule1Matches[0], sessionId);
+                return rule1Matches[0];
+            }
+            // Tie among ordinal case-insensitive matches -> do not guess
+            telemetry?.Record(LenientDispatchEventType.EnumValueUnmatched, value, value, sessionId);
+            return value;
+        }
+
+        // 2. Normalization (trim, collapse whitespace/underscore/hyphen, naive plural stripping)
+        var normValue = NormalizeEnumString(value);
+        var normValueNoPlural = StripPluralSuffix(normValue);
+        var normValueNoSep = normValue.Replace("_", "");
+        var normValueNoSepNoPlural = StripPluralSuffix(normValueNoSep);
+
+        // 2a. Normalized exact match (collapsed whitespace/underscore/hyphen)
+        List<string>? rule2aMatches = null;
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            var normC = NormalizeEnumString(candidates[i]);
+            if (string.Equals(normC, normValue, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normC.Replace("_", ""), normValueNoSep, StringComparison.OrdinalIgnoreCase))
+            {
+                rule2aMatches ??= new List<string>(2);
+                rule2aMatches.Add(candidates[i]);
+            }
+        }
+
+        if (rule2aMatches != null)
+        {
+            if (rule2aMatches.Count == 1)
+            {
+                telemetry?.Record(LenientDispatchEventType.EnumValueSnapped, value, rule2aMatches[0], sessionId);
+                return rule2aMatches[0];
+            }
+            // Tie among normalized matches
+            telemetry?.Record(LenientDispatchEventType.EnumValueUnmatched, value, value, sessionId);
+            return value;
+        }
+
+        // 2b. Naive plural stripping
+        List<string>? rule2bMatches = null;
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            var normC = NormalizeEnumString(candidates[i]);
+            var normCNoPlural = StripPluralSuffix(normC);
+            var normCNoSep = normC.Replace("_", "");
+            var normCNoSepNoPlural = StripPluralSuffix(normCNoSep);
+
+            if (string.Equals(normCNoPlural, normValueNoPlural, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normCNoSepNoPlural, normValueNoSepNoPlural, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normC, normValueNoPlural, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normCNoPlural, normValue, StringComparison.OrdinalIgnoreCase))
+            {
+                rule2bMatches ??= new List<string>(2);
+                rule2bMatches.Add(candidates[i]);
+            }
+        }
+
+        if (rule2bMatches != null)
+        {
+            if (rule2bMatches.Count == 1)
+            {
+                telemetry?.Record(LenientDispatchEventType.EnumValueSnapped, value, rule2bMatches[0], sessionId);
+                return rule2bMatches[0];
+            }
+            // Tie among plural-stripped matches
+            telemetry?.Record(LenientDispatchEventType.EnumValueUnmatched, value, value, sessionId);
+            return value;
+        }
+
+        // 3. Unique prefix/suffix/substring containment (e.g. Stalingrad in Battle of Stalingrad) — only when exactly one member matches.
+        var trimVal = value.Trim();
+        if (trimVal.Length >= 2)
+        {
+            List<string>? rule3Matches = null;
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                var cand = candidates[i];
+                var trimCand = cand.Trim();
+                var normCand = NormalizeEnumString(cand);
+
+                bool contains = (trimCand.Length >= 2 && (ContainsTokenOrAffix(trimCand, trimVal) || ContainsTokenOrAffix(trimVal, trimCand))) ||
+                                (normCand.Length >= 2 && normValue.Length >= 2 &&
+                                 (ContainsTokenOrAffix(normCand, normValue) ||
+                                  ContainsTokenOrAffix(normValue, normCand)));
+
+                if (contains)
+                {
+                    rule3Matches ??= new List<string>(2);
+                    rule3Matches.Add(cand);
+                }
+            }
+
+            if (rule3Matches != null)
+            {
+                if (rule3Matches.Count == 1)
+                {
+                    telemetry?.Record(LenientDispatchEventType.EnumValueSnapped, value, rule3Matches[0], sessionId);
+                    return rule3Matches[0];
+                }
+                // Ambiguous tie among multiple containing members
+                telemetry?.Record(LenientDispatchEventType.EnumValueUnmatched, value, value, sessionId);
+                return value;
+            }
+        }
+
+        // 4. Bounded edit distance (<= 2 and <= 25% of length) with a unique best candidate.
+        int minDistance = int.MaxValue;
+        List<string>? bestCandidates = null;
+        var lowerVal = trimVal.ToLowerInvariant();
+
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            var cand = candidates[i];
+            var lowerCand = cand.Trim().ToLowerInvariant();
+            int maxLen = Math.Max(lowerVal.Length, lowerCand.Length);
+            if (maxLen == 0) continue;
+
+            int d = EditDistance(lowerVal, lowerCand, maxDistance: 2);
+            var normC = NormalizeEnumString(cand);
+            if (normC.Length > 0 && normValue.Length > 0)
+            {
+                int dNorm = EditDistance(normValue, normC, maxDistance: 2);
+                d = Math.Min(d, dNorm);
+                maxLen = Math.Max(maxLen, Math.Max(normValue.Length, normC.Length));
+            }
+
+            // Bounded: <= 2 and <= 25% of max length
+            if (d <= 2 && (double)d / maxLen <= 0.25 + 1e-9)
+            {
+                if (d < minDistance)
+                {
+                    minDistance = d;
+                    bestCandidates ??= new List<string>(2);
+                    bestCandidates.Clear();
+                    bestCandidates.Add(cand);
+                }
+                else if (d == minDistance)
+                {
+                    bestCandidates?.Add(cand);
+                }
+            }
+        }
+
+        if (bestCandidates != null)
+        {
+            if (bestCandidates.Count == 1)
+            {
+                telemetry?.Record(LenientDispatchEventType.EnumValueSnapped, value, bestCandidates[0], sessionId);
+                return bestCandidates[0];
+            }
+            // Tie among best candidates at minDistance
+            telemetry?.Record(LenientDispatchEventType.EnumValueUnmatched, value, value, sessionId);
+            return value;
+        }
+
+        // 5. Otherwise leave the value untouched (never guess among ties) and record a telemetry event.
+        telemetry?.Record(LenientDispatchEventType.EnumValueUnmatched, value, value, sessionId);
+        return value;
+    }
+
+    internal static bool TryGetEnumOrConstMembers(JsonElement schema, out List<string> candidates)
+    {
+        candidates = [];
+        if (schema.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (schema.TryGetProperty("enum", out var enumProp) && enumProp.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var el in enumProp.EnumerateArray())
+            {
+                if (el.ValueKind == JsonValueKind.String)
+                {
+                    var s = el.GetString();
+                    if (s != null && !candidates.Contains(s))
+                    {
+                        candidates.Add(s);
+                    }
+                }
+            }
+        }
+        else if (schema.TryGetProperty("const", out var constProp) && constProp.ValueKind == JsonValueKind.String)
+        {
+            var s = constProp.GetString();
+            if (s != null)
+            {
+                candidates.Add(s);
+            }
+        }
+        else if (schema.TryGetProperty("oneOf", out var oneOfProp) && oneOfProp.ValueKind == JsonValueKind.Array)
+        {
+            ExtractFromCompoundSchema(oneOfProp, candidates);
+        }
+        else if (schema.TryGetProperty("anyOf", out var anyOfProp) && anyOfProp.ValueKind == JsonValueKind.Array)
+        {
+            ExtractFromCompoundSchema(anyOfProp, candidates);
+        }
+        else if (schema.TryGetProperty("allOf", out var allOfProp) && allOfProp.ValueKind == JsonValueKind.Array)
+        {
+            ExtractFromCompoundSchema(allOfProp, candidates);
+        }
+
+        return candidates.Count > 0;
+    }
+
+    private static void ExtractFromCompoundSchema(JsonElement arrayProp, List<string> candidates)
+    {
+        foreach (var item in arrayProp.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.Object)
+            {
+                if (item.TryGetProperty("const", out var cp) && cp.ValueKind == JsonValueKind.String)
+                {
+                    var s = cp.GetString();
+                    if (s != null && !candidates.Contains(s)) candidates.Add(s);
+                }
+                else if (item.TryGetProperty("enum", out var ep) && ep.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var el in ep.EnumerateArray())
+                    {
+                        if (el.ValueKind == JsonValueKind.String)
+                        {
+                            var s = el.GetString();
+                            if (s != null && !candidates.Contains(s)) candidates.Add(s);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static string NormalizeEnumString(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+        return ToSnakeCase(s.Trim());
+    }
+
+    private static string StripPluralSuffix(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        if (s.Length > 2 && s.EndsWith("s", StringComparison.OrdinalIgnoreCase) && !s.EndsWith("ss", StringComparison.OrdinalIgnoreCase))
+        {
+            return s[..^1];
+        }
+        return s;
+    }
+
+    internal static bool ContainsTokenOrAffix(string container, string part)
+    {
+        if (string.IsNullOrWhiteSpace(container) || string.IsNullOrWhiteSpace(part)) return false;
+        var c = container.Trim();
+        var p = part.Trim();
+        if (p.Length < 2 || c.Length < p.Length) return false;
+
+        // Exact match
+        if (string.Equals(c, p, StringComparison.OrdinalIgnoreCase)) return true;
+
+        // Prefix with separator
+        if (c.StartsWith(p, StringComparison.OrdinalIgnoreCase) &&
+            c.Length > p.Length && (c[p.Length] is '_' or '-' or '/' or ' ' || char.IsWhiteSpace(c[p.Length])))
+        {
+            return true;
+        }
+
+        // Suffix with separator
+        if (c.EndsWith(p, StringComparison.OrdinalIgnoreCase) &&
+            c.Length > p.Length && (c[c.Length - p.Length - 1] is '_' or '-' or '/' or ' ' || char.IsWhiteSpace(c[c.Length - p.Length - 1])))
+        {
+            return true;
+        }
+
+        // Substring bounded by separators
+        var idx = c.IndexOf(p, StringComparison.OrdinalIgnoreCase);
+        while (idx >= 0)
+        {
+            bool startBound = idx == 0 || c[idx - 1] is '_' or '-' or '/' or ' ' || char.IsWhiteSpace(c[idx - 1]);
+            int endPos = idx + p.Length;
+            bool endBound = endPos == c.Length || c[endPos] is '_' or '-' or '/' or ' ' || char.IsWhiteSpace(c[endPos]);
+
+            if (startBound && endBound)
+            {
+                return true;
+            }
+
+            idx = c.IndexOf(p, idx + 1, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return false;
+    }
+
+    private static int EditDistance(string s, string t, int maxDistance = int.MaxValue)
+    {
+        int n = s.Length;
+        int m = t.Length;
+        if (n == 0) return m;
+        if (m == 0) return n;
+
+        if (Math.Abs(n - m) > maxDistance)
+        {
+            return maxDistance + 1;
+        }
+
+        var d = new int[n + 1, m + 1];
+
+        for (int i = 0; i <= n; i++)
+            d[i, 0] = i;
+        for (int j = 0; j <= m; j++)
+            d[0, j] = j;
+
+        for (int i = 1; i <= n; i++)
+        {
+            int rowMin = int.MaxValue;
+            for (int j = 1; j <= m; j++)
+            {
+                int cost = (s[i - 1] == t[j - 1]) ? 0 : 1;
+                d[i, j] = Math.Min(
+                    Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1),
+                    d[i - 1, j - 1] + cost);
+
+                if (i > 1 && j > 1 && s[i - 1] == t[j - 2] && s[i - 2] == t[j - 1])
+                {
+                    d[i, j] = Math.Min(d[i, j], d[i - 2, j - 2] + 1);
+                }
+
+                if (d[i, j] < rowMin)
+                {
+                    rowMin = d[i, j];
+                }
+            }
+
+            if (rowMin > maxDistance)
+            {
+                return maxDistance + 1;
+            }
+        }
+
+        return d[n, m];
+    }
 }
 
 /// <summary>
@@ -1933,6 +2393,14 @@ public class LenientToolDispatchChatClient : DelegatingChatClient
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
     }
 
+    private void RegisterRequestTools(ChatOptions? options)
+    {
+        if (options?.Tools is { Count: > 0 })
+        {
+            _dispatcher.RegisterTools(options.Tools.OfType<AIFunction>());
+        }
+    }
+
     public override async Task<ChatResponse> GetResponseAsync(
         IEnumerable<ChatMessage> chatMessages,
         ChatOptions? options = null,
@@ -1944,6 +2412,7 @@ public class LenientToolDispatchChatClient : DelegatingChatClient
         {
             _dispatcher.SessionId = options.ConversationId;
         }
+        RegisterRequestTools(options);
         var response = await base.GetResponseAsync(chatMessages, options, cancellationToken);
         if (response?.Messages != null)
         {
@@ -1966,6 +2435,7 @@ public class LenientToolDispatchChatClient : DelegatingChatClient
         {
             _dispatcher.SessionId = options.ConversationId;
         }
+        RegisterRequestTools(options);
         await foreach (var update in base.GetStreamingResponseAsync(chatMessages, options, cancellationToken))
         {
             if (update.Contents != null)

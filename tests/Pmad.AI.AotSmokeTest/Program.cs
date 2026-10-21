@@ -122,6 +122,14 @@ public static class Program
         }
         Console.WriteLine("✓ LenientAIFunction verified");
 
+        // 4c. Schema-driven enum snapping in AOT
+        var snapped = dispatcher.SnapEnumValue("production", ["Development", "Staging", "Production"]);
+        if (snapped != "Production")
+        {
+            throw new InvalidOperationException($"SnapEnumValue failed: expected Production, got {snapped}");
+        }
+        Console.WriteLine("✓ Schema-driven enum snapping verified");
+
         // 5. Compaction (ThinkingTrace & ToolResult)
         var compactor = new ToolResultCompactor(new ToolResultCompactionOptions
         {
