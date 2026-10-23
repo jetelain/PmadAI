@@ -22,13 +22,13 @@ public class ReadOnlyCommandValidatorOptions
     /// <summary>Binaries permitted for execution in Bash dialect. Default: read-only utilities.</summary>
     public HashSet<string> AllowedBinaries { get; set; } = new(StringComparer.OrdinalIgnoreCase)
     {
-        "find", "rg", "grep", "cat", "ls", "git", "head", "tail", "wc"
+        "find", "rg", "grep", "cat", "ls", "git", "head", "tail", "wc", "cd"
     };
 
     /// <summary>Cmdlets permitted for execution in PowerShell dialect. Default: read-only cmdlets (aliases prohibited).</summary>
     public HashSet<string> AllowedPowerShellCmdlets { get; set; } = new(StringComparer.OrdinalIgnoreCase)
     {
-        "Get-ChildItem", "Get-Content", "Select-String"
+        "Get-ChildItem", "Get-Content", "Select-String", "Set-Location", "cd"
     };
 
     /// <summary>Default-deny git subcommands permitted when git binary is invoked.</summary>
@@ -42,6 +42,9 @@ public class ReadOnlyCommandValidatorOptions
 
     /// <summary>Whether to block file redirection operators (&gt;, &gt;&gt;, &lt;, etc.). Default: true.</summary>
     public bool BlockRedirection { get; set; } = true;
+
+    /// <summary>Whether to tolerate safe standard error redirections (2&gt;/dev/null, 2&gt;&amp;1, and in PowerShell 2&gt;$null) even when BlockRedirection is enabled. Default: true.</summary>
+    public bool AllowStderrRedirection { get; set; } = true;
 
     /// <summary>Whether to enforce that all chained/piped commands resolve to allowed binaries/cmdlets. Default: true.</summary>
     public bool BlockPipesToDisallowedBinaries { get; set; } = true;
@@ -258,6 +261,11 @@ public class ReadOnlyCommandValidator
                     {
                         if (c == '>')
                         {
+                            if (TryMatchSafeStderrRedirection(command, i, out int nextIdx))
+                            {
+                                i = nextIdx;
+                                continue;
+                            }
                             return new CommandValidationResult(false, "Output redirection ('>') is not permitted in read-only mode.", command);
                         }
                         if (c == '<')
@@ -356,6 +364,11 @@ public class ReadOnlyCommandValidator
 
                     if (_options.BlockRedirection && c == '>')
                     {
+                        if (TryMatchSafeStderrRedirection(command, i, out int nextIdx))
+                        {
+                            i = nextIdx;
+                            continue;
+                        }
                         return new CommandValidationResult(false, "PowerShell redirection ('>') is not permitted in read-only mode.", command);
                     }
                 }
@@ -422,9 +435,27 @@ public class ReadOnlyCommandValidator
                 }
                 else if (c == '&' && _options.Dialect == ShellDialect.Bash)
                 {
-                    // Single '&' (background) also separates commands in Bash.
-                    segments.Add(command.Substring(start, i - start));
-                    start = i + 1;
+                    // Single '&' (background) also separates commands in Bash, unless part of descriptor redirection (e.g. 2>&1, >&1)
+                    bool isRedirection = false;
+                    int prev = i - 1;
+                    while (prev >= 0 && (command[prev] == ' ' || command[prev] == '\t'))
+                    {
+                        prev--;
+                    }
+                    if (prev >= 0 && command[prev] == '>')
+                    {
+                        isRedirection = true;
+                    }
+                    if (i + 1 < command.Length && command[i + 1] == '>')
+                    {
+                        isRedirection = true;
+                    }
+
+                    if (!isRedirection)
+                    {
+                        segments.Add(command.Substring(start, i - start));
+                        start = i + 1;
+                    }
                 }
                 else if (c == '|' && i + 1 < command.Length && command[i + 1] == '|')
                 {
@@ -715,5 +746,123 @@ public class ReadOnlyCommandValidator
             name = name[..^4];
         }
         return name;
+    }
+
+    private bool TryMatchSafeStderrRedirection(string command, int gtIndex, out int newIndex)
+    {
+        newIndex = gtIndex;
+
+        if (!_options.AllowStderrRedirection)
+        {
+            return false;
+        }
+
+        // Look backwards from gtIndex to find descriptor '2'
+        int descIdx = gtIndex - 1;
+        while (descIdx >= 0 && (command[descIdx] == ' ' || command[descIdx] == '\t'))
+        {
+            descIdx--;
+        }
+
+        if (descIdx < 0 || command[descIdx] != '2')
+        {
+            return false;
+        }
+
+        // '2' must be at start of command, preceded by whitespace, or preceded by a command delimiter
+        if (descIdx > 0)
+        {
+            char prev = command[descIdx - 1];
+            if (!char.IsWhiteSpace(prev) && prev != ';' && prev != '&' && prev != '|' && prev != '(' && prev != '\n')
+            {
+                return false;
+            }
+        }
+
+        // Determine redirection operator: '>' or '>>'
+        int afterGt = gtIndex + 1;
+        bool isAppend = false;
+        if (afterGt < command.Length && command[afterGt] == '>')
+        {
+            isAppend = true;
+            afterGt++;
+        }
+
+        // Skip optional spaces after '>' or '>>'
+        int targetStart = afterGt;
+        while (targetStart < command.Length && (command[targetStart] == ' ' || command[targetStart] == '\t'))
+        {
+            targetStart++;
+        }
+
+        if (targetStart >= command.Length)
+        {
+            return false;
+        }
+
+        // Check for 2>&1 or 2>& 1 (append '>>' is not valid for descriptor duping)
+        if (!isAppend && command[targetStart] == '&')
+        {
+            int afterAmp = targetStart + 1;
+            while (afterAmp < command.Length && (command[afterAmp] == ' ' || command[afterAmp] == '\t'))
+            {
+                afterAmp++;
+            }
+
+            if (afterAmp < command.Length && command[afterAmp] == '1')
+            {
+                // '1' must be followed by end of command, whitespace, or delimiter
+                int afterOne = afterAmp + 1;
+                if (afterOne == command.Length || char.IsWhiteSpace(command[afterOne]) ||
+                    command[afterOne] == ';' || command[afterOne] == '&' || command[afterOne] == '|' ||
+                    command[afterOne] == ')' || command[afterOne] == '\n')
+                {
+                    newIndex = afterAmp;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // Check for 2>/dev/null or 2>>/dev/null (Bash)
+        if (_options.Dialect == ShellDialect.Bash)
+        {
+            const string devNull = "/dev/null";
+            if (command.AsSpan(targetStart).StartsWith(devNull, StringComparison.Ordinal))
+            {
+                int afterTarget = targetStart + devNull.Length;
+                if (afterTarget == command.Length || char.IsWhiteSpace(command[afterTarget]) ||
+                    command[afterTarget] == ';' || command[afterTarget] == '&' || command[afterTarget] == '|' ||
+                    command[afterTarget] == ')' || command[afterTarget] == '\n')
+                {
+                    newIndex = afterTarget - 1;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // Check for 2>$null or 2>>$null (PowerShell)
+        if (_options.Dialect == ShellDialect.PowerShell)
+        {
+            const string psNull = "$null";
+            if (command.AsSpan(targetStart).StartsWith(psNull, StringComparison.OrdinalIgnoreCase))
+            {
+                int afterTarget = targetStart + psNull.Length;
+                if (afterTarget == command.Length || char.IsWhiteSpace(command[afterTarget]) ||
+                    command[afterTarget] == ';' || command[afterTarget] == '&' || command[afterTarget] == '|' ||
+                    command[afterTarget] == ')' || command[afterTarget] == '\n')
+                {
+                    newIndex = afterTarget - 1;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        return false;
     }
 }

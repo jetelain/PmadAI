@@ -246,4 +246,134 @@ public class ReadOnlyCommandValidatorTests
         Assert.False(result.IsAllowed);
         Assert.Contains("Dangerous git global flag", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Theory]
+    [InlineData("cd src")]
+    [InlineData("cd ..")]
+    [InlineData("cd /repo && git status")]
+    [InlineData("cd src; ls -la")]
+    [InlineData("cd -")]
+    [InlineData("cd --")]
+    [InlineData("cd /tmp && find . -name \"*.cs\"")]
+    public void ValidateCommand_Bash_AllowsCdOutOfTheBox(string command)
+    {
+        var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
+        {
+            Dialect = ShellDialect.Bash
+        });
+
+        var result = validator.ValidateCommand(command);
+        Assert.True(result.IsAllowed, $"Expected '{command}' to be allowed, but failed: {result.Reason}");
+    }
+
+    [Theory]
+    [InlineData("cd src")]
+    [InlineData("cd ..")]
+    [InlineData("Set-Location src")]
+    [InlineData("Set-Location ..")]
+    public void ValidateCommand_PowerShell_AllowsCdAndSetLocation(string command)
+    {
+        var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
+        {
+            Dialect = ShellDialect.PowerShell
+        });
+
+        var result = validator.ValidateCommand(command);
+        Assert.True(result.IsAllowed, $"Expected '{command}' to be allowed, but failed: {result.Reason}");
+    }
+
+    [Theory]
+    [InlineData("find . -name \"*.cs\" 2>/dev/null")]
+    [InlineData("find . -name \"*.cs\" 2> /dev/null")]
+    [InlineData("find . -name \"*.cs\" 2>>/dev/null")]
+    [InlineData("find . -name \"*.cs\" 2>> /dev/null")]
+    [InlineData("grep -i \"error\" log.txt 2>/dev/null")]
+    [InlineData("git status 2>&1")]
+    [InlineData("git status 2>& 1")]
+    [InlineData("git status 2 >&1")]
+    [InlineData("git diff 2>&1 | grep \"TODO\"")]
+    [InlineData("cd src && git status 2>&1")]
+    [InlineData("cat file.txt 2>/dev/null | wc -l")]
+    public void ValidateCommand_Bash_ToleratesSafeStderrRedirections(string command)
+    {
+        var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
+        {
+            Dialect = ShellDialect.Bash
+        });
+
+        var result = validator.ValidateCommand(command);
+        Assert.True(result.IsAllowed, $"Expected '{command}' to be allowed, but failed: {result.Reason}");
+    }
+
+    [Theory]
+    [InlineData("Get-ChildItem -Path . 2>&1")]
+    [InlineData("Get-ChildItem -Path . 2>$null")]
+    [InlineData("Get-ChildItem -Path . 2> $null")]
+    [InlineData("Get-ChildItem -Path . 2>>$null")]
+    [InlineData("Get-Content file.txt 2>&1")]
+    public void ValidateCommand_PowerShell_ToleratesSafeStderrRedirections(string command)
+    {
+        var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
+        {
+            Dialect = ShellDialect.PowerShell
+        });
+
+        var result = validator.ValidateCommand(command);
+        Assert.True(result.IsAllowed, $"Expected '{command}' to be allowed, but failed: {result.Reason}");
+    }
+
+    [Theory]
+    [InlineData("cat secret.txt > out.txt 2>&1", "Output redirection")]
+    [InlineData("cat secret.txt 2> out.txt", "Output redirection")]
+    [InlineData("cat secret.txt 2>> out.txt", "Output redirection")]
+    [InlineData("git status 2>&1 > file.txt", "Output redirection")]
+    [InlineData("cat file2>/dev/null", "Output redirection")]
+    [InlineData("cat file.txt 2>/dev/null/evil", "Output redirection")]
+    [InlineData("cat file.txt 2>&10", "Output redirection")]
+    [InlineData("cat file.txt 1>/dev/null", "Output redirection")]
+    [InlineData("cat file.txt &> /dev/null", "Output redirection")]
+    [InlineData("cat file.txt 2>1.txt", "Output redirection")]
+    [InlineData("cat file.txt 2>&1.txt", "Output redirection")]
+    public void ValidateCommand_Bash_StillBlocksArbitraryRedirections(string command, string expectedReasonKeyword)
+    {
+        var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
+        {
+            Dialect = ShellDialect.Bash
+        });
+
+        var result = validator.ValidateCommand(command);
+        Assert.False(result.IsAllowed, $"Expected '{command}' to be blocked, but was allowed.");
+        Assert.Contains(expectedReasonKeyword, result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("Get-ChildItem 2>/dev/null")]
+    [InlineData("Get-ChildItem 2> file.txt")]
+    [InlineData("Get-ChildItem 2>> file.txt")]
+    public void ValidateCommand_PowerShell_BlocksNonSafeRedirections(string command)
+    {
+        var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
+        {
+            Dialect = ShellDialect.PowerShell
+        });
+
+        var result = validator.ValidateCommand(command);
+        Assert.False(result.IsAllowed, $"Expected '{command}' to be blocked in PowerShell, but was allowed.");
+    }
+
+    [Fact]
+    public void ValidateCommand_AllowStderrRedirection_CanBeDisabled()
+    {
+        var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
+        {
+            Dialect = ShellDialect.Bash,
+            AllowStderrRedirection = false
+        });
+
+        var resNull = validator.ValidateCommand("git status 2>/dev/null");
+        Assert.False(resNull.IsAllowed);
+
+        var resMerge = validator.ValidateCommand("git status 2>&1");
+        Assert.False(resMerge.IsAllowed);
+    }
 }
