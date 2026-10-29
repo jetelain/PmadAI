@@ -527,5 +527,141 @@ public class ToolDispatcherSourceGeneratorTests
         Assert.Contains("\"za\"", generatedText);
         Assert.Contains("\"primary-zone\"", generatedText);
     }
+
+    [Fact]
+    public void Generator_EmitsPropagatedParameters_FromMethodAndParameterAttributes()
+    {
+        var source = """
+        using System.Collections.Generic;
+        using Pmad.AI;
+        using Pmad.AI.Tools;
+
+        public record BatchItem(string Name, bool DryRun);
+
+        public static class BatchTools
+        {
+            [ToolAlias("execute_batch")]
+            [ToolPropagatedParameter("targetPath")]
+            public static void ExecuteBatch(
+                string targetPath,
+                [ToolPropagatedParameter] bool dryRun,
+                List<BatchItem> items)
+            {
+            }
+        }
+        """;
+
+        var compilation = CreateCompilation(source);
+        var generator = new ToolDispatcherGenerator();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generator);
+
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var runResult = driver.GetRunResult();
+        Assert.Single(runResult.GeneratedTrees);
+
+        var generatedText = runResult.GeneratedTrees[0].GetText().ToString();
+        Assert.Contains("propagatedParameters:", generatedText);
+        Assert.Contains("\"dryRun\"", generatedText);
+        Assert.Contains("\"targetPath\"", generatedText);
+    }
+
+    [Fact]
+    public void Generator_EmitsPrimaryCollectionProperties_FromMethodParameterAndItemProperty()
+    {
+        var source = """
+        using System.Collections.Generic;
+        using Pmad.AI;
+        using Pmad.AI.Tools;
+
+        public record QuestionItem([ToolPrimaryProperty] string QuestionText, int Priority);
+
+        public class ChunkItem
+        {
+            public string Content { get; set; } = string.Empty;
+        }
+
+        public class TagItem
+        {
+            public string TagName { get; set; } = string.Empty;
+        }
+
+        public static class InquiryTools
+        {
+            [ToolAlias("process_inquiry")]
+            [ToolPrimaryProperty("chunks[]", "Content")]
+            public static void ProcessInquiry(
+                List<QuestionItem> questions,
+                List<ChunkItem> chunks,
+                [ToolPrimaryProperty("TagName")] List<TagItem> tags)
+            {
+            }
+        }
+        """;
+
+        var compilation = CreateCompilation(source);
+        var generator = new ToolDispatcherGenerator();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generator);
+
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var runResult = driver.GetRunResult();
+        Assert.Single(runResult.GeneratedTrees);
+
+        var generatedText = runResult.GeneratedTrees[0].GetText().ToString();
+        Assert.Contains("primaryCollectionProperties:", generatedText);
+        Assert.Contains("[\"questions[]\"] = \"QuestionText\"", generatedText);
+        Assert.Contains("[\"chunks[]\"] = \"Content\"", generatedText);
+        Assert.Contains("[\"tags[]\"] = \"TagName\"", generatedText);
+    }
+
+    [Fact]
+    public void Generator_EmitsPropagatedAndPrimary_FromLambda()
+    {
+        var source = """
+        using System.Collections.Generic;
+        using Microsoft.Extensions.AI;
+        using Pmad.AI;
+        using Pmad.AI.Tools;
+
+        public record QueryItem(string Query);
+
+        public static class LambdaTools
+        {
+            public static void Register()
+            {
+                var fn = AIFunctionFactory.Create(
+                    [ToolAlias("search_items")]
+                    [ToolPropagatedParameter("scope")]
+                    (
+                        string scope,
+                        [ToolPrimaryProperty("Query")] List<QueryItem> queries
+                    ) => "done",
+                    "search_items");
+            }
+        }
+        """;
+
+        var compilation = CreateCompilation(source);
+        var generator = new ToolDispatcherGenerator();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generator);
+
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var runResult = driver.GetRunResult();
+        Assert.Single(runResult.GeneratedTrees);
+
+        var generatedText = runResult.GeneratedTrees[0].GetText().ToString();
+        Assert.Contains("propagatedParameters:", generatedText);
+        Assert.Contains("\"scope\"", generatedText);
+        Assert.Contains("primaryCollectionProperties:", generatedText);
+        Assert.Contains("[\"queries[]\"] = \"Query\"", generatedText);
+    }
 }
 

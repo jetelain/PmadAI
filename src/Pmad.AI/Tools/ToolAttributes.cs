@@ -82,3 +82,70 @@ public sealed class ToolParameterValueAliasAttribute : Attribute
     {
     }
 }
+
+/// <summary>
+/// Declares that a root-level parameter should be propagated into nested collection items.
+/// Can be applied to a tool method (specifying the parameter name) or directly to a parameter.
+/// Consumed at compile time by the Pmad.AI.SourceGenerators package.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Parameter, AllowMultiple = true)]
+public sealed class ToolPropagatedParameterAttribute : Attribute
+{
+    /// <summary>The name of the parameter to propagate.</summary>
+    public string? ParameterName { get; }
+
+    /// <summary>
+    /// Marks the target parameter to be propagated into nested collection items.
+    /// </summary>
+    public ToolPropagatedParameterAttribute()
+    {
+    }
+
+    /// <summary>
+    /// Specifies a parameter by name to be propagated into nested collection items.
+    /// </summary>
+    public ToolPropagatedParameterAttribute(string parameterName)
+    {
+        ParameterName = parameterName;
+    }
+}
+
+/// <summary>
+/// Declares the primary string property used when wrapping a raw string into an object for a collection parameter.
+/// Can be applied directly to a property/field on an item class/record, to a collection parameter (specifying the property name),
+/// or to a tool method (specifying the parameter path and property name).
+/// Consumed at compile time by the Pmad.AI.SourceGenerators package.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Property | AttributeTargets.Field | AttributeTargets.Parameter, AllowMultiple = true)]
+public sealed class ToolPrimaryPropertyAttribute : Attribute
+{
+    /// <summary>The parameter path (e.g. "questions[]" or "questions"), if applied to a method.</summary>
+    public string? ParameterPath { get; }
+
+    /// <summary>The name of the primary string property on the item type.</summary>
+    public string? PropertyName { get; }
+
+    /// <summary>
+    /// Designates this property or field as the primary string property for collection item wrapping.
+    /// </summary>
+    public ToolPrimaryPropertyAttribute()
+    {
+    }
+
+    /// <summary>
+    /// Specifies the primary string property name on the collection item type when applied to a collection parameter.
+    /// </summary>
+    public ToolPrimaryPropertyAttribute(string propertyName)
+    {
+        PropertyName = propertyName;
+    }
+
+    /// <summary>
+    /// Specifies the collection parameter path and primary string property name when applied to a method.
+    /// </summary>
+    public ToolPrimaryPropertyAttribute(string parameterPath, string propertyName)
+    {
+        ParameterPath = parameterPath;
+        PropertyName = propertyName;
+    }
+}

@@ -16,7 +16,9 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
         EquatableArray<string> Aliases,
         EquatableArray<DiscoveredParamMapping> ParamMappings,
         EquatableArray<DiscoveredNestedParamMapping> NestedParamMappings,
-        EquatableArray<DiscoveredValueAliasMapping> ValueAliasMappings);
+        EquatableArray<DiscoveredValueAliasMapping> ValueAliasMappings,
+        EquatableArray<string> PropagatedParameters,
+        EquatableArray<DiscoveredPrimaryCollectionProperty> PrimaryCollectionProperties);
 
     private sealed record DiscoveredParamMapping(
         string CanonicalParam,
@@ -31,6 +33,10 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
         string ParamPath,
         string CanonicalValue,
         EquatableArray<string> Aliases);
+
+    private sealed record DiscoveredPrimaryCollectionProperty(
+        string ParamPath,
+        string PropertyName);
 
     private sealed record DiscoveredTranslation(
         string SourceTool,
@@ -83,6 +89,14 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
             .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolParameterValueAliasAttribute" or "Pmad.AI.ToolParameterValueAliasAttribute")
             .ToList();
 
+        var propParamAttrs = methodSymbol.GetAttributes()
+            .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolPropagatedParameterAttribute" or "Pmad.AI.ToolPropagatedParameterAttribute")
+            .ToList();
+
+        var primaryPropAttrs = methodSymbol.GetAttributes()
+            .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolPrimaryPropertyAttribute" or "Pmad.AI.ToolPrimaryPropertyAttribute")
+            .ToList();
+
         string canonicalName = ResolveMethodToolName(methodSymbol, aliasAttrs);
         var aliases = new List<string>();
 
@@ -97,6 +111,27 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
         var paramMappings = new List<DiscoveredParamMapping>();
         var nestedParamMappings = new List<DiscoveredNestedParamMapping>();
         var valueAliasMappings = new List<DiscoveredValueAliasMapping>();
+        var propagatedParameters = new List<string>();
+        var primaryCollectionProperties = new List<DiscoveredPrimaryCollectionProperty>();
+
+        foreach (var attr in propParamAttrs)
+        {
+            if (attr.ConstructorArguments.Length > 0 && attr.ConstructorArguments[0].Value is string pn && !string.IsNullOrWhiteSpace(pn))
+            {
+                propagatedParameters.Add(pn.Trim());
+            }
+        }
+
+        foreach (var attr in primaryPropAttrs)
+        {
+            if (attr.ConstructorArguments.Length >= 2 &&
+                attr.ConstructorArguments[0].Value is string pPath &&
+                attr.ConstructorArguments[1].Value is string propName &&
+                !string.IsNullOrWhiteSpace(pPath) && !string.IsNullOrWhiteSpace(propName))
+            {
+                primaryCollectionProperties.Add(new DiscoveredPrimaryCollectionProperty(pPath.Trim(), propName.Trim()));
+            }
+        }
 
         foreach (var attr in paramValAttrs)
         {
@@ -144,19 +179,44 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                 paramMappings.Add(new DiscoveredParamMapping(param.Name, new EquatableArray<string>(pAliases.ToArray())));
             }
 
+            var pPropAttrs = param.GetAttributes()
+                .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolPropagatedParameterAttribute" or "Pmad.AI.ToolPropagatedParameterAttribute");
+            foreach (var pa in pPropAttrs)
+            {
+                string pName = param.Name;
+                if (pa.ConstructorArguments.Length > 0 && pa.ConstructorArguments[0].Value is string explicitName && !string.IsNullOrWhiteSpace(explicitName))
+                {
+                    pName = explicitName.Trim();
+                }
+                propagatedParameters.Add(pName);
+            }
+
+            var pPrimaryAttrs = param.GetAttributes()
+                .Where(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolPrimaryPropertyAttribute" or "Pmad.AI.ToolPrimaryPropertyAttribute");
+            foreach (var pa in pPrimaryAttrs)
+            {
+                if (pa.ConstructorArguments.Length > 0 && pa.ConstructorArguments[0].Value is string explicitProp && !string.IsNullOrWhiteSpace(explicitProp))
+                {
+                    primaryCollectionProperties.Add(new DiscoveredPrimaryCollectionProperty(param.Name + "[]", explicitProp.Trim()));
+                }
+            }
+
             nestedParamMappings.AddRange(ExtractNestedParamMappings(param));
             valueAliasMappings.AddRange(ExtractValueAliasesFromParameter(param));
+            primaryCollectionProperties.AddRange(ExtractPrimaryCollectionPropertiesFromParameter(param));
         }
 
         DiscoveredToolMapping? toolMapping = null;
-        if (aliasAttrs.Count > 0 || paramValAttrs.Count > 0 || paramMappings.Count > 0 || nestedParamMappings.Count > 0 || valueAliasMappings.Count > 0)
+        if (aliasAttrs.Count > 0 || paramValAttrs.Count > 0 || paramMappings.Count > 0 || nestedParamMappings.Count > 0 || valueAliasMappings.Count > 0 || propagatedParameters.Count > 0 || primaryCollectionProperties.Count > 0)
         {
             toolMapping = new DiscoveredToolMapping(
                 canonicalName,
                 new EquatableArray<string>(aliases.ToArray()),
                 new EquatableArray<DiscoveredParamMapping>(paramMappings.ToArray()),
                 new EquatableArray<DiscoveredNestedParamMapping>(nestedParamMappings.ToArray()),
-                new EquatableArray<DiscoveredValueAliasMapping>(valueAliasMappings.ToArray()));
+                new EquatableArray<DiscoveredValueAliasMapping>(valueAliasMappings.ToArray()),
+                new EquatableArray<string>(propagatedParameters.Distinct(StringComparer.OrdinalIgnoreCase).ToArray()),
+                new EquatableArray<DiscoveredPrimaryCollectionProperty>(primaryCollectionProperties.Distinct().ToArray()));
         }
 
         List<DiscoveredTranslation>? translations = null;
@@ -198,6 +258,9 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
         bool hasToolAlias = false;
         var valueAliasMappings = new List<DiscoveredValueAliasMapping>();
 
+        var propagatedParameters = new List<string>();
+        var primaryCollectionProperties = new List<DiscoveredPrimaryCollectionProperty>();
+
         foreach (var attrList in lambda.AttributeLists)
         {
             foreach (var attr in attrList.Attributes)
@@ -221,6 +284,29 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                                 var constant = model.GetConstantValue(arg.Expression);
                                 if (constant.HasValue && constant.Value is string s) aliases.Add(s);
                             }
+                        }
+                    }
+                }
+                else if (typeStr is "Pmad.AI.Tools.ToolPropagatedParameterAttribute" or "Pmad.AI.ToolPropagatedParameterAttribute")
+                {
+                    if (attr.ArgumentList != null && attr.ArgumentList.Arguments.Count > 0)
+                    {
+                        var constant = model.GetConstantValue(attr.ArgumentList.Arguments[0].Expression);
+                        if (constant.HasValue && constant.Value is string s && !string.IsNullOrWhiteSpace(s))
+                        {
+                            propagatedParameters.Add(s.Trim());
+                        }
+                    }
+                }
+                else if (typeStr is "Pmad.AI.Tools.ToolPrimaryPropertyAttribute" or "Pmad.AI.ToolPrimaryPropertyAttribute")
+                {
+                    if (attr.ArgumentList != null && attr.ArgumentList.Arguments.Count >= 2)
+                    {
+                        var p1 = model.GetConstantValue(attr.ArgumentList.Arguments[0].Expression);
+                        var p2 = model.GetConstantValue(attr.ArgumentList.Arguments[1].Expression);
+                        if (p1.HasValue && p1.Value is string s1 && p2.HasValue && p2.Value is string s2 && !string.IsNullOrWhiteSpace(s1) && !string.IsNullOrWhiteSpace(s2))
+                        {
+                            primaryCollectionProperties.Add(new DiscoveredPrimaryCollectionProperty(s1.Trim(), s2.Trim()));
                         }
                     }
                 }
@@ -265,7 +351,7 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
             }
         }
 
-        if (!hasToolAlias && valueAliasMappings.Count == 0) return null;
+        if (!hasToolAlias && valueAliasMappings.Count == 0 && propagatedParameters.Count == 0 && primaryCollectionProperties.Count == 0) return null;
 
         string? canonicalName = explicitName;
         if (string.IsNullOrEmpty(canonicalName))
@@ -287,12 +373,37 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                     foreach (var attr in attrList.Attributes)
                     {
                         var attrType = model.GetTypeInfo(attr).Type;
-                        if ((attrType?.ToDisplayString() is "Pmad.AI.Tools.ToolParameterAliasAttribute" or "Pmad.AI.ToolParameterAliasAttribute") && attr.ArgumentList != null)
+                        var typeStr = attrType?.ToDisplayString();
+                        if ((typeStr is "Pmad.AI.Tools.ToolParameterAliasAttribute" or "Pmad.AI.ToolParameterAliasAttribute") && attr.ArgumentList != null)
                         {
                             foreach (var arg in attr.ArgumentList.Arguments)
                             {
                                 var constant = model.GetConstantValue(arg.Expression);
                                 if (constant.HasValue && constant.Value is string s) pAliases.Add(s);
+                            }
+                        }
+                        else if (typeStr is "Pmad.AI.Tools.ToolPropagatedParameterAttribute" or "Pmad.AI.ToolPropagatedParameterAttribute")
+                        {
+                            string pName = param.Identifier.Text;
+                            if (attr.ArgumentList != null && attr.ArgumentList.Arguments.Count > 0)
+                            {
+                                var constant = model.GetConstantValue(attr.ArgumentList.Arguments[0].Expression);
+                                if (constant.HasValue && constant.Value is string s && !string.IsNullOrWhiteSpace(s))
+                                {
+                                    pName = s.Trim();
+                                }
+                            }
+                            propagatedParameters.Add(pName);
+                        }
+                        else if (typeStr is "Pmad.AI.Tools.ToolPrimaryPropertyAttribute" or "Pmad.AI.ToolPrimaryPropertyAttribute")
+                        {
+                            if (attr.ArgumentList != null && attr.ArgumentList.Arguments.Count > 0)
+                            {
+                                var constant = model.GetConstantValue(attr.ArgumentList.Arguments[0].Expression);
+                                if (constant.HasValue && constant.Value is string s && !string.IsNullOrWhiteSpace(s))
+                                {
+                                    primaryCollectionProperties.Add(new DiscoveredPrimaryCollectionProperty(param.Identifier.Text + "[]", s.Trim()));
+                                }
                             }
                         }
                     }
@@ -307,6 +418,7 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                 {
                     nestedParamMappings.AddRange(ExtractNestedParamMappings(paramSymbol));
                     valueAliasMappings.AddRange(ExtractValueAliasesFromParameter(paramSymbol));
+                    primaryCollectionProperties.AddRange(ExtractPrimaryCollectionPropertiesFromParameter(paramSymbol));
                 }
             }
         }
@@ -316,7 +428,9 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
             new EquatableArray<string>(aliases.ToArray()),
             new EquatableArray<DiscoveredParamMapping>(paramMappings.ToArray()),
             new EquatableArray<DiscoveredNestedParamMapping>(nestedParamMappings.ToArray()),
-            new EquatableArray<DiscoveredValueAliasMapping>(valueAliasMappings.ToArray()));
+            new EquatableArray<DiscoveredValueAliasMapping>(valueAliasMappings.ToArray()),
+            new EquatableArray<string>(propagatedParameters.Distinct(StringComparer.OrdinalIgnoreCase).ToArray()),
+            new EquatableArray<DiscoveredPrimaryCollectionProperty>(primaryCollectionProperties.Distinct().ToArray()));
 
         return (tool, null);
     }
@@ -379,6 +493,8 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                     }
                     foreach (var a in vam.Aliases) vSet.Add(a);
                 }
+                foreach (var p in tool.PropagatedParameters) builder.PropagatedParameters.Add(p);
+                foreach (var pcp in tool.PrimaryCollectionProperties) builder.PrimaryCollectionProperties[pcp.ParamPath] = pcp.PropertyName;
             }
 
             if (translations != null)
@@ -476,6 +592,26 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                 sb.Append("                    }");
             }
 
+            if (tool.PropagatedParameters.Count > 0)
+            {
+                sb.AppendLine(",");
+                sb.Append("                    propagatedParameters: [");
+                sb.Append(string.Join(", ", tool.PropagatedParameters.OrderBy(p => p, StringComparer.Ordinal).Select(p => $"\"{EscapeString(p)}\"")));
+                sb.Append("]");
+            }
+
+            if (tool.PrimaryCollectionProperties.Count > 0)
+            {
+                sb.AppendLine(",");
+                sb.AppendLine("                    primaryCollectionProperties: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)");
+                sb.AppendLine("                    {");
+                foreach (var pKvp in tool.PrimaryCollectionProperties.OrderBy(k => k.Key, StringComparer.Ordinal))
+                {
+                    sb.AppendLine($"                        [\"{EscapeString(pKvp.Key)}\"] = \"{EscapeString(pKvp.Value)}\",");
+                }
+                sb.Append("                    }");
+            }
+
             sb.AppendLine("),");
         }
 
@@ -516,6 +652,8 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
         public Dictionary<string, HashSet<string>> ParamAliases { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, Dictionary<string, HashSet<string>>> NestedParamAliases { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, Dictionary<string, HashSet<string>>> ParamValueAliases { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> PropagatedParameters { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, string> PrimaryCollectionProperties { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
     private static string EscapeString(string s) =>
@@ -630,6 +768,69 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                     if (aliases.Count > 0)
                     {
                         list.Add(new DiscoveredNestedParamMapping(path, field.Name, new EquatableArray<string>(aliases.ToArray())));
+                    }
+                }
+            }
+        }
+
+        return list;
+    }
+
+    private static List<DiscoveredPrimaryCollectionProperty> ExtractPrimaryCollectionPropertiesFromParameter(IParameterSymbol param)
+    {
+        var list = new List<DiscoveredPrimaryCollectionProperty>();
+        var elemType = UnwrapCollectionElementType(param.Type);
+        if (elemType == null)
+        {
+            return list;
+        }
+
+        elemType = UnwrapNullable(elemType);
+        if (elemType is INamedTypeSymbol complexType &&
+            complexType.SpecialType == SpecialType.None &&
+            complexType.ContainingNamespace?.ToDisplayString() != "System" &&
+            complexType.ContainingNamespace?.ToDisplayString() != "System.Collections.Generic")
+        {
+            string path = param.Name + "[]";
+            foreach (var member in complexType.GetMembers())
+            {
+                if (member is IPropertySymbol prop)
+                {
+                    var attr = prop.GetAttributes().FirstOrDefault(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolPrimaryPropertyAttribute" or "Pmad.AI.ToolPrimaryPropertyAttribute");
+                    if (attr == null)
+                    {
+                        foreach (var ctor in complexType.Constructors)
+                        {
+                            var ctorParam = ctor.Parameters.FirstOrDefault(p => string.Equals(p.Name, prop.Name, StringComparison.OrdinalIgnoreCase));
+                            if (ctorParam != null)
+                            {
+                                attr = ctorParam.GetAttributes().FirstOrDefault(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolPrimaryPropertyAttribute" or "Pmad.AI.ToolPrimaryPropertyAttribute");
+                                if (attr != null) break;
+                            }
+                        }
+                    }
+
+                    if (attr != null)
+                    {
+                        string propName = prop.Name;
+                        if (attr.ConstructorArguments.Length > 0 && attr.ConstructorArguments[0].Value is string explicitName && !string.IsNullOrWhiteSpace(explicitName))
+                        {
+                            propName = explicitName.Trim();
+                        }
+                        list.Add(new DiscoveredPrimaryCollectionProperty(path, propName));
+                    }
+                }
+                else if (member is IFieldSymbol field)
+                {
+                    var attr = field.GetAttributes().FirstOrDefault(a => a.AttributeClass?.ToDisplayString() is "Pmad.AI.Tools.ToolPrimaryPropertyAttribute" or "Pmad.AI.ToolPrimaryPropertyAttribute");
+                    if (attr != null)
+                    {
+                        string fieldName = field.Name;
+                        if (attr.ConstructorArguments.Length > 0 && attr.ConstructorArguments[0].Value is string explicitName && !string.IsNullOrWhiteSpace(explicitName))
+                        {
+                            fieldName = explicitName.Trim();
+                        }
+                        list.Add(new DiscoveredPrimaryCollectionProperty(path, fieldName));
                     }
                 }
             }
