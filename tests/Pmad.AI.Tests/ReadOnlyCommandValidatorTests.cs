@@ -376,4 +376,48 @@ public class ReadOnlyCommandValidatorTests
         var resMerge = validator.ValidateCommand("git status 2>&1");
         Assert.False(resMerge.IsAllowed);
     }
+
+    [Theory]
+    [InlineData("ls 2>&1 & rm x")]
+    [InlineData("ls 2>&1&rm x")]
+    [InlineData("ls 2>/dev/null &rm x")]
+    [InlineData("ls & rm x")]
+    public void ValidateCommand_Bash_StillSplitsOnBackgroundAmpersand(string command)
+    {
+        var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
+        {
+            Dialect = ShellDialect.Bash
+        });
+
+        var result = validator.ValidateCommand(command);
+        Assert.False(result.IsAllowed, $"Expected '{command}' to be blocked, but was allowed.");
+    }
+
+    [Fact]
+    public void ValidateCommand_AllowStderrRedirection_Disabled_WithBlockRedirectionDisabled_DoesNotThrow()
+    {
+        var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
+        {
+            Dialect = ShellDialect.Bash,
+            AllowStderrRedirection = false,
+            BlockRedirection = false
+        });
+
+        var result = validator.ValidateCommand("git status 2>&1");
+        Assert.True(result.IsAllowed, result.Reason);
+    }
+
+    [Theory]
+    [InlineData("Get-ChildItem -Path . 2>&1 | Select-String foo")]
+    [InlineData("Get-Content file.txt 2>$null | Select-String foo")]
+    public void ValidateCommand_PowerShell_AllowsStderrRedirectionInPipeline(string command)
+    {
+        var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
+        {
+            Dialect = ShellDialect.PowerShell
+        });
+
+        var result = validator.ValidateCommand(command);
+        Assert.True(result.IsAllowed, $"Expected '{command}' to be allowed, but failed: {result.Reason}");
+    }
 }

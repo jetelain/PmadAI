@@ -40,7 +40,7 @@ public class ReadOnlyCommandValidatorOptions
     /// <summary>Whether to block subshells and substitutions ($(), backticks, process substitutions). Default: true.</summary>
     public bool BlockSubshells { get; set; } = true;
 
-    /// <summary>Whether to block file redirection operators (&gt;, &gt;&gt;, &lt;, etc.). Default: true.</summary>
+    /// <summary>Whether to block file redirection operators (&gt;, &gt;&gt;, &lt;, etc.). Default: true. Safe stderr redirections remain tolerated unless <see cref="AllowStderrRedirection"/> is false.</summary>
     public bool BlockRedirection { get; set; } = true;
 
     /// <summary>Whether to tolerate safe standard error redirections (2&gt;/dev/null, 2&gt;&amp;1, and in PowerShell 2&gt;$null) even when BlockRedirection is enabled. Default: true.</summary>
@@ -813,9 +813,7 @@ public class ReadOnlyCommandValidator
             {
                 // '1' must be followed by end of command, whitespace, or delimiter
                 int afterOne = afterAmp + 1;
-                if (afterOne == command.Length || char.IsWhiteSpace(command[afterOne]) ||
-                    command[afterOne] == ';' || command[afterOne] == '&' || command[afterOne] == '|' ||
-                    command[afterOne] == ')' || command[afterOne] == '\n')
+                if (IsDelimiterOrEnd(command, afterOne))
                 {
                     newIndex = afterAmp;
                     return true;
@@ -832,9 +830,7 @@ public class ReadOnlyCommandValidator
             if (command.AsSpan(targetStart).StartsWith(devNull, StringComparison.Ordinal))
             {
                 int afterTarget = targetStart + devNull.Length;
-                if (afterTarget == command.Length || char.IsWhiteSpace(command[afterTarget]) ||
-                    command[afterTarget] == ';' || command[afterTarget] == '&' || command[afterTarget] == '|' ||
-                    command[afterTarget] == ')' || command[afterTarget] == '\n')
+                if (IsDelimiterOrEnd(command, afterTarget))
                 {
                     newIndex = afterTarget - 1;
                     return true;
@@ -851,9 +847,7 @@ public class ReadOnlyCommandValidator
             if (command.AsSpan(targetStart).StartsWith(psNull, StringComparison.OrdinalIgnoreCase))
             {
                 int afterTarget = targetStart + psNull.Length;
-                if (afterTarget == command.Length || char.IsWhiteSpace(command[afterTarget]) ||
-                    command[afterTarget] == ';' || command[afterTarget] == '&' || command[afterTarget] == '|' ||
-                    command[afterTarget] == ')' || command[afterTarget] == '\n')
+                if (IsDelimiterOrEnd(command, afterTarget))
                 {
                     newIndex = afterTarget - 1;
                     return true;
@@ -864,5 +858,16 @@ public class ReadOnlyCommandValidator
         }
 
         return false;
+    }
+
+    private static bool IsDelimiterOrEnd(string command, int index)
+    {
+        if (index >= command.Length)
+        {
+            return true;
+        }
+
+        var c = command[index];
+        return char.IsWhiteSpace(c) || c == ';' || c == '&' || c == '|' || c == ')';
     }
 }
