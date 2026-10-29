@@ -398,4 +398,150 @@ public class LenientToolDispatcherEnhancementsTests
         var result = await tool.InvokeAsync(dispatched.Arguments);
         Assert.Equal("Item summary: Important summary", result?.ToString());
     }
+
+    [Fact]
+    public async Task PropagateUnmappedParameters_ToStringifiedJsonArray_ParsesAndPropagates()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (List<TestBatchTaskItem> tasks) => $"Tasks: {tasks.Count}, Author: {tasks[0].Author}/{tasks[1].Author}",
+            "batch_run");
+
+        dispatcher.RegisterTool(tool);
+
+        // Model passes tasks as a stringified JSON array and author at root
+        var dispatched = dispatcher.NormalizeCall("batch_run", new Dictionary<string, object?>
+        {
+            ["author"] = "antigravity",
+            ["tasks"] = "[{\"action\": \"build\"}, {\"action\": \"test\"}]"
+        });
+
+        Assert.False(dispatched.Arguments.ContainsKey("author"));
+        var result = await tool.InvokeAsync(dispatched.Arguments);
+        Assert.Equal("Tasks: 2, Author: antigravity/antigravity", result?.ToString());
+    }
+
+    public record TestPromptItem(string Prompt, string? Category = null);
+
+    [Fact]
+    public async Task PropagateUnmappedParameters_ToRawStringArray_WrapsAndPropagates()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (List<TestPromptItem> prompts) => $"Prompts: {prompts.Count}, P0: {prompts[0].Prompt}({prompts[0].Category}), P1: {prompts[1].Prompt}({prompts[1].Category})",
+            "ask_all");
+
+        dispatcher.RegisterTool(tool);
+
+        // Model passes raw strings in prompts array, and category at root
+        var dispatched = dispatcher.NormalizeCall("ask_all", new Dictionary<string, object?>
+        {
+            ["category"] = "general",
+            ["prompts"] = new List<object?> { "Question 1?", "Question 2?" }
+        });
+
+        Assert.False(dispatched.Arguments.ContainsKey("category"));
+        var result = await tool.InvokeAsync(dispatched.Arguments);
+        Assert.Equal("Prompts: 2, P0: Question 1?(general), P1: Question 2?(general)", result?.ToString());
+    }
+
+    [Fact]
+    public async Task PropagateUnmappedParameters_ReadOnlyDictionary_DoesNotThrow()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (List<TestBatchTaskItem> tasks) => $"Tasks: {tasks.Count}, Author: {tasks[0].Author}",
+            "batch_run");
+
+        dispatcher.RegisterTool(tool);
+
+        var innerDict = new System.Collections.ObjectModel.ReadOnlyDictionary<string, object?>(
+            new Dictionary<string, object?> { ["action"] = "compile" });
+
+        var dispatched = dispatcher.NormalizeCall("batch_run", new Dictionary<string, object?>
+        {
+            ["author"] = "antigravity",
+            ["tasks"] = new List<object?> { innerDict }
+        });
+
+        Assert.False(dispatched.Arguments.ContainsKey("author"));
+        var result = await tool.InvokeAsync(dispatched.Arguments);
+        Assert.Equal("Tasks: 1, Author: antigravity", result?.ToString());
+    }
+
+    public record TestNullablePromptItem(string? Text = null, int Priority = 1);
+
+    [Fact]
+    public async Task FindPrimaryStringProperty_NullableStringProperty_AutoDiscovered()
+    {
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions
+        {
+            DefaultPrimaryStringProperties = new List<string>() // no hardcoded fallbacks
+        });
+
+        var tool = AIFunctionFactory.Create(
+            (List<TestNullablePromptItem> items) => $"Items: {items.Count}, Text: {items[0].Text}",
+            "process_items");
+
+        dispatcher.RegisterTool(tool);
+
+        // TestNullablePromptItem has a single string property 'Text' which is nullable (string?)
+        var dispatched = dispatcher.NormalizeCall("process_items", new Dictionary<string, object?>
+        {
+            ["items"] = new List<object?> { "Hello nullable world" }
+        });
+
+        var result = await tool.InvokeAsync(dispatched.Arguments);
+        Assert.Equal("Items: 1, Text: Hello nullable world", result?.ToString());
+    }
+
+    [Fact]
+    public void UnpackSingleItemArrays_MultiItemArray_NotUnpacked()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (string path, string old_text, string new_text) => $"Single edit on {path}: {old_text}->{new_text}",
+            "replace_text");
+
+        dispatcher.RegisterTool(tool);
+
+        // Model passes edits array of 2 elements to a tool that expects flat parameters
+        var dispatched = dispatcher.NormalizeCall("replace_text", new Dictionary<string, object?>
+        {
+            ["path"] = "README.md",
+            ["edits"] = new List<object?>
+            {
+                new Dictionary<string, object?> { ["old_text"] = "foo", ["new_text"] = "bar" },
+                new Dictionary<string, object?> { ["old_text"] = "alpha", ["new_text"] = "beta" }
+            }
+        });
+
+        // edits array should NOT be unpacked because count > 1
+        Assert.True(dispatched.Arguments.ContainsKey("edits"));
+        Assert.False(dispatched.Arguments.ContainsKey("old_text"));
+    }
+
+    [Fact]
+    public async Task UnpackSingleItemArrays_StringifiedJsonArray_UnpacksSuccessfully()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (string path, string old_text, string new_text) => $"Single edit on {path}: {old_text}->{new_text}",
+            "replace_text");
+
+        dispatcher.RegisterTool(tool);
+
+        var dispatched = dispatcher.NormalizeCall("replace_text", new Dictionary<string, object?>
+        {
+            ["path"] = "README.md",
+            ["edits"] = "[{\"old_text\": \"hello\", \"new_text\": \"world\"}]"
+        });
+
+        Assert.False(dispatched.Arguments.ContainsKey("edits"));
+        Assert.Equal("hello", dispatched.Arguments["old_text"]);
+        Assert.Equal("world", dispatched.Arguments["new_text"]);
+
+        var result = await tool.InvokeAsync(dispatched.Arguments);
+        Assert.Equal("Single edit on README.md: hello->world", result?.ToString());
+    }
 }

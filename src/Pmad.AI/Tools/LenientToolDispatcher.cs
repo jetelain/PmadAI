@@ -954,57 +954,9 @@ public class LenientToolDispatcher
         }
 
         // 2. Resolve canonical tool name (exact match always wins over aliases)
-        string canonicalTool = toolName;
-        ToolMapping? mapping = null;
-
-        if (_registeredTools.TryGetValue(toolName, out var registeredTool))
+        var (canonicalTool, mapping, wasAliasResolved) = ResolveCanonicalToolAndMapping(toolName);
+        if (wasAliasResolved)
         {
-            canonicalTool = registeredTool.Name;
-            _configuration.Tools.TryGetValue(canonicalTool, out mapping);
-            if (mapping == null && _aliasToCanonical.TryGetValue(canonicalTool, out var aliasedConfigCanonical))
-            {
-                _configuration.Tools.TryGetValue(aliasedConfigCanonical, out mapping);
-            }
-        }
-        else if (_canonicalToolNames.TryGetValue(toolName, out var configuredCanonical))
-        {
-            canonicalTool = configuredCanonical;
-            _configuration.Tools.TryGetValue(canonicalTool, out mapping);
-            if (_registeredTools.TryGetValue(canonicalTool, out var rt))
-            {
-                canonicalTool = rt.Name;
-            }
-            else if (mapping != null)
-            {
-                foreach (var alias in mapping.Aliases)
-                {
-                    if (_registeredTools.TryGetValue(alias, out var aliasTool))
-                    {
-                        canonicalTool = aliasTool.Name;
-                        break;
-                    }
-                }
-            }
-        }
-        else if (_aliasToCanonical.TryGetValue(toolName, out var canonicalAlias))
-        {
-            canonicalTool = canonicalAlias;
-            _configuration.Tools.TryGetValue(canonicalTool, out mapping);
-            if (_registeredTools.TryGetValue(canonicalTool, out var rt))
-            {
-                canonicalTool = rt.Name;
-            }
-            else if (mapping != null)
-            {
-                foreach (var alias in mapping.Aliases)
-                {
-                    if (_registeredTools.TryGetValue(alias, out var aliasTool))
-                    {
-                        canonicalTool = aliasTool.Name;
-                        break;
-                    }
-                }
-            }
             Telemetry?.Record(LenientDispatchEventType.ToolAliasResolved, toolName, canonicalTool, SessionId);
         }
 
@@ -1359,51 +1311,66 @@ public class LenientToolDispatcher
         }
 
         // 2. Resolve canonical tool name (exact match always wins over aliases)
+        var (canonicalTool, _, _) = ResolveCanonicalToolAndMapping(toolName);
+        return canonicalTool;
+    }
+
+    private (string CanonicalName, ToolMapping? Mapping, bool WasAliasResolved) ResolveCanonicalToolAndMapping(string toolName)
+    {
         if (_registeredTools.TryGetValue(toolName, out var registeredTool))
         {
-            return registeredTool.Name;
+            var canonical = registeredTool.Name;
+            _configuration.Tools.TryGetValue(canonical, out var mapping);
+            if (mapping == null && _aliasToCanonical.TryGetValue(canonical, out var aliasedConfigCanonical))
+            {
+                _configuration.Tools.TryGetValue(aliasedConfigCanonical, out mapping);
+            }
+            return (canonical, mapping, false);
         }
 
         if (_canonicalToolNames.TryGetValue(toolName, out var configuredCanonical))
         {
-            if (_registeredTools.ContainsKey(configuredCanonical))
+            _configuration.Tools.TryGetValue(configuredCanonical, out var mapping);
+            if (_registeredTools.TryGetValue(configuredCanonical, out var rt))
             {
-                return configuredCanonical;
+                return (rt.Name, mapping, false);
             }
-            if (_configuration.Tools.TryGetValue(configuredCanonical, out var map))
+            if (mapping != null)
             {
-                foreach (var alias in map.Aliases)
+                foreach (var alias in mapping.Aliases)
                 {
                     if (_registeredTools.TryGetValue(alias, out var aliasTool))
                     {
-                        return aliasTool.Name;
+                        return (aliasTool.Name, mapping, false);
                     }
                 }
             }
-            return configuredCanonical;
+            return (configuredCanonical, mapping, false);
         }
 
-        // Search aliases via O(1) lookup
-        if (_aliasToCanonical.TryGetValue(toolName, out var canonicalKey))
+        if (_aliasToCanonical.TryGetValue(toolName, out var canonicalAlias))
         {
-            if (_registeredTools.ContainsKey(canonicalKey))
+            _configuration.Tools.TryGetValue(canonicalAlias, out var mapping);
+            string targetTool = canonicalAlias;
+            if (_registeredTools.TryGetValue(canonicalAlias, out var rt))
             {
-                return canonicalKey;
+                targetTool = rt.Name;
             }
-            if (_configuration.Tools.TryGetValue(canonicalKey, out var map))
+            else if (mapping != null)
             {
-                foreach (var alias in map.Aliases)
+                foreach (var alias in mapping.Aliases)
                 {
                     if (_registeredTools.TryGetValue(alias, out var aliasTool))
                     {
-                        return aliasTool.Name;
+                        targetTool = aliasTool.Name;
+                        break;
                     }
                 }
             }
-            return canonicalKey;
+            return (targetTool, mapping, true);
         }
 
-        return toolName;
+        return (toolName, null, false);
     }
 
     /// <summary>
@@ -2136,23 +2103,42 @@ public class LenientToolDispatcher
             }
 
             var val = canonicalArgs[argKey];
+            if (val is string strVal)
+            {
+                var trimmed = strVal.Trim();
+                if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(trimmed);
+                        val = ConvertJsonElementToClr(doc.RootElement);
+                    }
+                    catch (JsonException) { }
+                }
+            }
+
             IDictionary<string, object?>? firstItemDict = null;
+            int itemCount = 0;
 
             if (val is System.Collections.IEnumerable list and not string and not IDictionary<string, object?> and not System.Collections.IDictionary)
             {
                 foreach (var item in list)
                 {
+                    itemCount++;
+                    if (itemCount > 1)
+                    {
+                        break;
+                    }
+
                     if (item is IDictionary<string, object?> d)
                     {
                         firstItemDict = d;
-                        break;
                     }
                     else if (item is JsonElement je && je.ValueKind == JsonValueKind.Object)
                     {
                         if (ConvertJsonElementToClr(je) is IDictionary<string, object?> parsedDict)
                         {
                             firstItemDict = parsedDict;
-                            break;
                         }
                     }
                 }
@@ -2160,9 +2146,10 @@ public class LenientToolDispatcher
             else if (val is IDictionary<string, object?> singleDict)
             {
                 firstItemDict = singleDict;
+                itemCount = 1;
             }
 
-            if (firstItemDict != null && firstItemDict.Count > 0)
+            if (itemCount == 1 && firstItemDict != null && firstItemDict.Count > 0)
             {
                 bool unpackedAny = false;
                 foreach (var (itemK, itemV) in firstItemDict)
@@ -2222,8 +2209,27 @@ public class LenientToolDispatcher
                     continue;
                 }
 
-                if (!canonicalArgs.TryGetValue(canonicalParamName, out var arrayVal) ||
-                    arrayVal is not System.Collections.IEnumerable list ||
+                if (!canonicalArgs.TryGetValue(canonicalParamName, out var arrayVal) || arrayVal == null)
+                {
+                    continue;
+                }
+
+                if (arrayVal is string strVal)
+                {
+                    var trimmed = strVal.Trim();
+                    if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+                    {
+                        try
+                        {
+                            using var doc = JsonDocument.Parse(trimmed);
+                            arrayVal = ConvertJsonElementToClr(doc.RootElement);
+                            canonicalArgs[canonicalParamName] = arrayVal;
+                        }
+                        catch (JsonException) { }
+                    }
+                }
+
+                if (arrayVal is not System.Collections.IEnumerable list ||
                     arrayVal is string or IDictionary<string, object?> or System.Collections.IDictionary)
                 {
                     continue;
@@ -2277,9 +2283,27 @@ public class LenientToolDispatcher
                     continue;
                 }
 
+                var newItemsList = new List<object?>();
+                bool collectionModified = false;
+
                 foreach (var item in list)
                 {
-                    if (item is IDictionary<string, object?> itemDict)
+                    var effectiveItem = item;
+
+                    if (effectiveItem is string strItem)
+                    {
+                        var primaryProp = FindPrimaryStringProperty(itemProps, resolvedItemSchema, mapping, canonicalParamName + "[]");
+                        if (primaryProp != null)
+                        {
+                            effectiveItem = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                [primaryProp] = strItem
+                            };
+                            collectionModified = true;
+                        }
+                    }
+
+                    if (effectiveItem is IDictionary<string, object?> itemDict)
                     {
                         bool alreadyHas = (itemDict.TryGetValue(targetItemPropName, out var v1) && v1 != null) ||
                                           (itemDict.TryGetValue(ToSnakeCase(targetItemPropName), out var v2) && v2 != null) ||
@@ -2302,15 +2326,25 @@ public class LenientToolDispatcher
 
                         if (!alreadyHas)
                         {
+                            var mutableDict = new Dictionary<string, object?>(itemDict, StringComparer.OrdinalIgnoreCase);
                             object? effectiveVal = rootVal;
                             if (_options.EnableParameterCoercion && rootVal is string && itemProps.TryGetProperty(targetItemPropName, out var targetPropSchema))
                             {
                                 effectiveVal = CoerceParameterValue(targetItemPropName, rootVal, targetPropSchema, mapping) ?? rootVal;
                             }
-                            itemDict[targetItemPropName] = effectiveVal;
+                            mutableDict[targetItemPropName] = effectiveVal;
+                            effectiveItem = mutableDict;
                             propagatedToAny = true;
+                            collectionModified = true;
                         }
                     }
+
+                    newItemsList.Add(effectiveItem);
+                }
+
+                if (collectionModified)
+                {
+                    canonicalArgs[canonicalParamName] = newItemsList;
                 }
             }
 
@@ -2364,7 +2398,7 @@ public class LenientToolDispatcher
                     if (!string.IsNullOrEmpty(reqPropName) &&
                         propertiesElement.TryGetProperty(reqPropName, out var propDef) &&
                         propDef.ValueKind == JsonValueKind.Object &&
-                        (!propDef.TryGetProperty("type", out var typeEl) || typeEl.ValueEquals("string")))
+                        (!propDef.TryGetProperty("type", out _) || SchemaTypeMatches(propDef, "string")))
                     {
                         singleRequiredString = reqPropName;
                         requiredStringCount++;
@@ -2384,8 +2418,7 @@ public class LenientToolDispatcher
         foreach (var p in propertiesElement.EnumerateObject())
         {
             if (p.Value.ValueKind == JsonValueKind.Object &&
-                p.Value.TryGetProperty("type", out var t) &&
-                t.ValueEquals("string"))
+                SchemaTypeMatches(p.Value, "string"))
             {
                 singleStringProp = p.Name;
                 stringPropCount++;
@@ -2404,7 +2437,7 @@ public class LenientToolDispatcher
             {
                 if (propertiesElement.TryGetProperty(wk, out var prop) &&
                     prop.ValueKind == JsonValueKind.Object &&
-                    (!prop.TryGetProperty("type", out var typeEl) || typeEl.ValueEquals("string")))
+                    (!prop.TryGetProperty("type", out _) || SchemaTypeMatches(prop, "string")))
                 {
                     return wk;
                 }

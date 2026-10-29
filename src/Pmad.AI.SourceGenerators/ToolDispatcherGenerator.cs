@@ -131,6 +131,16 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
             {
                 primaryCollectionProperties.Add(new DiscoveredPrimaryCollectionProperty(pPath.Trim(), propName.Trim()));
             }
+            else if (attr.ConstructorArguments.Length == 1 &&
+                     attr.ConstructorArguments[0].Value is string singleProp &&
+                     !string.IsNullOrWhiteSpace(singleProp))
+            {
+                var collectionParams = methodSymbol.Parameters.Where(p => UnwrapCollectionElementType(p.Type) != null).ToList();
+                if (collectionParams.Count == 1)
+                {
+                    primaryCollectionProperties.Add(new DiscoveredPrimaryCollectionProperty(collectionParams[0].Name + "[]", singleProp.Trim()));
+                }
+            }
         }
 
         foreach (var attr in paramValAttrs)
@@ -307,6 +317,21 @@ public class ToolDispatcherGenerator : IIncrementalGenerator
                         if (p1.HasValue && p1.Value is string s1 && p2.HasValue && p2.Value is string s2 && !string.IsNullOrWhiteSpace(s1) && !string.IsNullOrWhiteSpace(s2))
                         {
                             primaryCollectionProperties.Add(new DiscoveredPrimaryCollectionProperty(s1.Trim(), s2.Trim()));
+                        }
+                    }
+                    else if (attr.ArgumentList != null && attr.ArgumentList.Arguments.Count == 1)
+                    {
+                        var p1 = model.GetConstantValue(attr.ArgumentList.Arguments[0].Expression);
+                        if (p1.HasValue && p1.Value is string s1 && !string.IsNullOrWhiteSpace(s1))
+                        {
+                            var collectionParams = lambda.ParameterList.Parameters
+                                .Select(p => model.GetDeclaredSymbol(p) as IParameterSymbol)
+                                .Where(p => p != null && UnwrapCollectionElementType(p.Type) != null)
+                                .ToList();
+                            if (collectionParams.Count == 1)
+                            {
+                                primaryCollectionProperties.Add(new DiscoveredPrimaryCollectionProperty(collectionParams[0]!.Name + "[]", s1.Trim()));
+                            }
                         }
                     }
                 }

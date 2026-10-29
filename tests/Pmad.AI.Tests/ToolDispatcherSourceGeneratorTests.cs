@@ -663,5 +663,41 @@ public class ToolDispatcherSourceGeneratorTests
         Assert.Contains("primaryCollectionProperties:", generatedText);
         Assert.Contains("[\"queries[]\"] = \"Query\"", generatedText);
     }
+
+    [Fact]
+    public void Generator_EmitsPrimary_FromMethodWithSingleParameterAnd1ArgAttribute()
+    {
+        var source = """
+        using System.Collections.Generic;
+        using Pmad.AI;
+        using Pmad.AI.Tools;
+
+        public record CustomItem(string Detail);
+
+        public static class SingleParamTools
+        {
+            [ToolAlias("process_items")]
+            [ToolPrimaryProperty("Detail")]
+            public static void Process(List<CustomItem> items)
+            {
+            }
+        }
+        """;
+
+        var compilation = CreateCompilation(source);
+        var generator = new ToolDispatcherGenerator();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generator);
+
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
+
+        Assert.Empty(diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var runResult = driver.GetRunResult();
+        Assert.Single(runResult.GeneratedTrees);
+
+        var generatedText = runResult.GeneratedTrees[0].GetText().ToString();
+        Assert.Contains("primaryCollectionProperties:", generatedText);
+        Assert.Contains("[\"items[]\"] = \"Detail\"", generatedText);
+    }
 }
 
