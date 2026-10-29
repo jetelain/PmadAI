@@ -56,6 +56,17 @@ public class ToolMapping
     /// </summary>
     public Dictionary<string, Dictionary<string, HashSet<string>>> ParameterValueAliases { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Explicit list of root-level parameters that should be propagated to nested collection items.
+    /// </summary>
+    public HashSet<string> PropagatedParameters { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Explicit mappings of collection parameter paths (e.g. "questions[]" or "questions")
+    /// to the primary string property name used when wrapping raw strings into objects.
+    /// </summary>
+    public Dictionary<string, string> PrimaryCollectionProperties { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
     public ToolMapping() { }
 
     public ToolMapping(
@@ -63,7 +74,9 @@ public class ToolMapping
         IDictionary<string, IEnumerable<string>>? parameterAliases = null,
         IDictionary<string, ParameterComputer>? computedParameters = null,
         IDictionary<string, IDictionary<string, IEnumerable<string>>>? nestedParameterAliases = null,
-        IDictionary<string, IDictionary<string, IEnumerable<string>>>? parameterValueAliases = null)
+        IDictionary<string, IDictionary<string, IEnumerable<string>>>? parameterValueAliases = null,
+        IEnumerable<string>? propagatedParameters = null,
+        IDictionary<string, string>? primaryCollectionProperties = null)
     {
         if (aliases != null)
         {
@@ -114,6 +127,49 @@ public class ToolMapping
                 ParameterValueAliases[path] = inner;
             }
         }
+
+        if (propagatedParameters != null)
+        {
+            foreach (var p in propagatedParameters)
+            {
+                if (!string.IsNullOrWhiteSpace(p))
+                {
+                    PropagatedParameters.Add(p.Trim());
+                }
+            }
+        }
+
+        if (primaryCollectionProperties != null)
+        {
+            foreach (var (path, prop) in primaryCollectionProperties)
+            {
+                if (!string.IsNullOrWhiteSpace(path) && !string.IsNullOrWhiteSpace(prop))
+                {
+                    PrimaryCollectionProperties[path.Trim()] = prop.Trim();
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Adds a root-level parameter to propagate to nested collection items.
+    /// </summary>
+    public ToolMapping AddPropagatedParameter(string parameterName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(parameterName);
+        PropagatedParameters.Add(parameterName.Trim());
+        return this;
+    }
+
+    /// <summary>
+    /// Configures the primary string property used when wrapping a raw string into an object for a collection parameter.
+    /// </summary>
+    public ToolMapping SetPrimaryCollectionProperty(string paramPath, string propertyName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(paramPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(propertyName);
+        PrimaryCollectionProperties[paramPath.Trim()] = propertyName.Trim();
+        return this;
     }
 
     /// <summary>
@@ -469,6 +525,43 @@ public class LenientToolDispatcherOptions
     /// case-insensitive enum and boolean matching). Default: true.
     /// </summary>
     public bool EnableParameterCoercion { get; set; } = true;
+
+    /// <summary>
+    /// Whether to automatically synthesize collection/array parameters when the model passes flattened root-level
+    /// properties, or unpack 1-element arrays into flat parameters when the tool expects scalar parameters.
+    /// Also handles blank-chunk fallback (e.g. [{}]). Default: true.
+    /// </summary>
+    public bool AutoPromoteFlattenedArrayParameters { get; set; } = true;
+
+    /// <summary>
+    /// Whether to automatically propagate unmapped root-level parameters into nested collection items
+    /// when the item schema defines a matching property. Default: true.
+    /// </summary>
+    public bool AutoPropagateCollectionParameters { get; set; } = true;
+
+    /// <summary>
+    /// Backward-compatible alias for <see cref="AutoPropagateCollectionParameters"/>.
+    /// </summary>
+    public bool PropagateReplaceAllToCollections
+    {
+        get => AutoPropagateCollectionParameters;
+        set => AutoPropagateCollectionParameters = value;
+    }
+
+    /// <summary>
+    /// Global parameter names that should be propagated to nested collection items if present at root.
+    /// </summary>
+    public HashSet<string> PropagatedParameters { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Configurable fallback property names when determining the primary string property of an object schema.
+    /// Used when the schema does not define a single required or unique string property.
+    /// Default: "prompt", "question", "text", "query", "content", "message", "title", "name", "value", "command".
+    /// </summary>
+    public IList<string> DefaultPrimaryStringProperties { get; set; } = new List<string>
+    {
+        "prompt", "question", "text", "query", "content", "message", "title", "name", "value", "command"
+    };
 
     /// <summary>
     /// Optional telemetry collector to record lenient dispatch remappings and alias hits.
@@ -861,23 +954,9 @@ public class LenientToolDispatcher
         }
 
         // 2. Resolve canonical tool name (exact match always wins over aliases)
-        string canonicalTool = toolName;
-        ToolMapping? mapping = null;
-
-        if (_registeredTools.TryGetValue(toolName, out var registeredTool))
+        var (canonicalTool, mapping, wasAliasResolved) = ResolveCanonicalToolAndMapping(toolName);
+        if (wasAliasResolved)
         {
-            canonicalTool = registeredTool.Name;
-            _configuration.Tools.TryGetValue(canonicalTool, out mapping);
-        }
-        else if (_canonicalToolNames.TryGetValue(toolName, out var configuredCanonical))
-        {
-            canonicalTool = configuredCanonical;
-            _configuration.Tools.TryGetValue(canonicalTool, out mapping);
-        }
-        else if (_aliasToCanonical.TryGetValue(toolName, out var canonicalAlias))
-        {
-            canonicalTool = canonicalAlias;
-            _configuration.Tools.TryGetValue(canonicalTool, out mapping);
             Telemetry?.Record(LenientDispatchEventType.ToolAliasResolved, toolName, canonicalTool, SessionId);
         }
 
@@ -976,6 +1055,18 @@ public class LenientToolDispatcher
         // 5. Deep schema-driven and mapping-driven normalization (nested property renaming, casing matching, stringified JSON parsing, value alias resolution)
         _toolRootSchemas.TryGetValue(canonicalTool, out var rootSchema);
         _toolSchemaProperties.TryGetValue(canonicalTool, out var propDict);
+
+        // 4.5. Flattened collection promotion & array-to-flat unpacking & replaceAll propagation
+        if (_options.AutoPromoteFlattenedArrayParameters && propDict != null)
+        {
+            PromoteFlattenedParametersToArrays(canonicalTool, canonicalArgs, propDict, rootSchema, mapping);
+            UnpackSingleItemArraysToFlatParameters(canonicalTool, canonicalArgs, propDict, rootSchema);
+        }
+
+        if (_options.AutoPropagateCollectionParameters && propDict != null)
+        {
+            PropagateUnmappedParametersToCollections(canonicalArgs, propDict, rootSchema, mapping);
+        }
 
         var currentKeys = canonicalArgs.Keys.ToList();
         foreach (var key in currentKeys)
@@ -1186,7 +1277,15 @@ public class LenientToolDispatcher
     /// Attempts to retrieve a registered <see cref="AIFunction"/> canonical tool by name.
     /// </summary>
     public bool TryGetRegisteredTool(string name, out AIFunction? tool)
-        => _registeredTools.TryGetValue(name, out tool);
+    {
+        if (_registeredTools.TryGetValue(name, out tool))
+        {
+            return true;
+        }
+
+        var canonical = ResolveCanonicalToolName(name);
+        return _registeredTools.TryGetValue(canonical, out tool);
+    }
 
     /// <summary>
     /// Resolves a raw candidate tool name to its canonical tool name, taking into account
@@ -1212,23 +1311,66 @@ public class LenientToolDispatcher
         }
 
         // 2. Resolve canonical tool name (exact match always wins over aliases)
+        var (canonicalTool, _, _) = ResolveCanonicalToolAndMapping(toolName);
+        return canonicalTool;
+    }
+
+    private (string CanonicalName, ToolMapping? Mapping, bool WasAliasResolved) ResolveCanonicalToolAndMapping(string toolName)
+    {
         if (_registeredTools.TryGetValue(toolName, out var registeredTool))
         {
-            return registeredTool.Name;
+            var canonical = registeredTool.Name;
+            _configuration.Tools.TryGetValue(canonical, out var mapping);
+            if (mapping == null && _aliasToCanonical.TryGetValue(canonical, out var aliasedConfigCanonical))
+            {
+                _configuration.Tools.TryGetValue(aliasedConfigCanonical, out mapping);
+            }
+            return (canonical, mapping, false);
         }
 
         if (_canonicalToolNames.TryGetValue(toolName, out var configuredCanonical))
         {
-            return configuredCanonical;
+            _configuration.Tools.TryGetValue(configuredCanonical, out var mapping);
+            if (_registeredTools.TryGetValue(configuredCanonical, out var rt))
+            {
+                return (rt.Name, mapping, false);
+            }
+            if (mapping != null)
+            {
+                foreach (var alias in mapping.Aliases)
+                {
+                    if (_registeredTools.TryGetValue(alias, out var aliasTool))
+                    {
+                        return (aliasTool.Name, mapping, false);
+                    }
+                }
+            }
+            return (configuredCanonical, mapping, false);
         }
 
-        // Search aliases via O(1) lookup
-        if (_aliasToCanonical.TryGetValue(toolName, out var canonicalKey))
+        if (_aliasToCanonical.TryGetValue(toolName, out var canonicalAlias))
         {
-            return canonicalKey;
+            _configuration.Tools.TryGetValue(canonicalAlias, out var mapping);
+            string targetTool = canonicalAlias;
+            if (_registeredTools.TryGetValue(canonicalAlias, out var rt))
+            {
+                targetTool = rt.Name;
+            }
+            else if (mapping != null)
+            {
+                foreach (var alias in mapping.Aliases)
+                {
+                    if (_registeredTools.TryGetValue(alias, out var aliasTool))
+                    {
+                        targetTool = aliasTool.Name;
+                        break;
+                    }
+                }
+            }
+            return (targetTool, mapping, true);
         }
 
-        return toolName;
+        return (toolName, null, false);
     }
 
     /// <summary>
@@ -1624,7 +1766,7 @@ public class LenientToolDispatcher
             bool expectsObject = resolvedSchema.HasValue && (SchemaTypeMatches(resolvedSchema.Value, "object") || (resolvedSchema.Value.ValueKind == JsonValueKind.Object && resolvedSchema.Value.TryGetProperty("properties", out _)));
 
             var trimmed = str.Trim();
-            if ((trimmed.StartsWith('{') && trimmed.EndsWith('}') && (expectsObject || !resolvedSchema.HasValue)) ||
+            if ((trimmed.StartsWith('{') && trimmed.EndsWith('}') && (expectsObject || expectsArray || !resolvedSchema.HasValue)) ||
                 (trimmed.StartsWith('[') && trimmed.EndsWith(']') && (expectsArray || !resolvedSchema.HasValue)))
             {
                 try
@@ -1655,17 +1797,60 @@ public class LenientToolDispatcher
             var normalizedList = new List<object?>();
             foreach (var item in list)
             {
-                normalizedList.Add(NormalizeValueDeep(item, itemsSchema, mapping, paramPath + "[]", rootSchema));
+                var effectiveItem = item;
+                if (effectiveItem is string strItem && itemsSchema.HasValue)
+                {
+                    var resolvedItemSchema = rootSchema.HasValue ? ResolveSchema(itemsSchema.Value, rootSchema.Value) : itemsSchema.Value;
+                    if (resolvedItemSchema.ValueKind == JsonValueKind.Object &&
+                        resolvedItemSchema.TryGetProperty("properties", out var itemProps) &&
+                        itemProps.ValueKind == JsonValueKind.Object)
+                    {
+                        var primaryProp = FindPrimaryStringProperty(itemProps, resolvedItemSchema, mapping, paramPath + "[]");
+                        if (primaryProp != null)
+                        {
+                            effectiveItem = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                [primaryProp] = strItem
+                            };
+                        }
+                    }
+                }
+
+                normalizedList.Add(NormalizeValueDeep(effectiveItem, itemsSchema, mapping, paramPath + "[]", rootSchema));
             }
             return normalizedList;
         }
-        else if (resolvedSchema.HasValue && SchemaTypeMatches(resolvedSchema.Value, "array") && value is IDictionary<string, object?> singleDict)
+        else if (resolvedSchema.HasValue && SchemaTypeMatches(resolvedSchema.Value, "array"))
         {
-            // Single object shortcut healing for array parameters
-            return new List<object?>
+            if (value is IDictionary<string, object?> singleDict)
             {
-                NormalizeValueDeep(singleDict, itemsSchema, mapping, paramPath + "[]", rootSchema)
-            };
+                // Single object shortcut healing for array parameters
+                return new List<object?>
+                {
+                    NormalizeValueDeep(singleDict, itemsSchema, mapping, paramPath + "[]", rootSchema)
+                };
+            }
+            else if (value is string singleStr && itemsSchema.HasValue)
+            {
+                var resolvedItemSchema = rootSchema.HasValue ? ResolveSchema(itemsSchema.Value, rootSchema.Value) : itemsSchema.Value;
+                if (resolvedItemSchema.ValueKind == JsonValueKind.Object &&
+                    resolvedItemSchema.TryGetProperty("properties", out var itemProps) &&
+                    itemProps.ValueKind == JsonValueKind.Object)
+                {
+                    var primaryProp = FindPrimaryStringProperty(itemProps, resolvedItemSchema, mapping, paramPath + "[]");
+                    if (primaryProp != null)
+                    {
+                        var dictItem = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            [primaryProp] = singleStr
+                        };
+                        return new List<object?>
+                        {
+                            NormalizeValueDeep(dictItem, itemsSchema, mapping, paramPath + "[]", rootSchema)
+                        };
+                    }
+                }
+            }
         }
 
         // 3. Handle object properties (typed or untyped dictionary)
@@ -1753,6 +1938,10 @@ public class LenientToolDispatcher
                 }
 
                 var normalizedSubVal = NormalizeValueDeep(rawVal, propSchema, mapping, paramPath + "." + canonicalKey, rootSchema);
+                if (_options.EnableParameterCoercion && normalizedSubVal is string && propSchema.HasValue)
+                {
+                    normalizedSubVal = CoerceParameterValue(canonicalKey, normalizedSubVal, propSchema, mapping);
+                }
                 normalizedDict[canonicalKey] = normalizedSubVal;
             }
 
@@ -1760,6 +1949,502 @@ public class LenientToolDispatcher
         }
 
         return value;
+    }
+
+    private void PromoteFlattenedParametersToArrays(
+        string canonicalTool,
+        AIFunctionArguments canonicalArgs,
+        Dictionary<string, (string CanonicalName, JsonElement Schema)> propDict,
+        JsonElement? rootSchema,
+        ToolMapping? mapping)
+    {
+        foreach (var (propKey, (canonicalParamName, paramSchema)) in propDict)
+        {
+            var resolvedSchema = rootSchema.HasValue ? ResolveSchema(paramSchema, rootSchema.Value) : paramSchema;
+            if (!SchemaTypeMatches(resolvedSchema, "array"))
+            {
+                continue;
+            }
+
+            if (resolvedSchema.ValueKind != JsonValueKind.Object ||
+                !resolvedSchema.TryGetProperty("items", out var itemsSchemaEl))
+            {
+                continue;
+            }
+
+            var resolvedItemsSchema = rootSchema.HasValue ? ResolveSchema(itemsSchemaEl, rootSchema.Value) : itemsSchemaEl;
+            if (resolvedItemsSchema.ValueKind != JsonValueKind.Object ||
+                !resolvedItemsSchema.TryGetProperty("properties", out var itemPropertiesEl) ||
+                itemPropertiesEl.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            // Check if canonicalArgs already has canonicalParamName
+            bool hasValidCollection = false;
+            string? matchedKey = canonicalParamName;
+            if (canonicalArgs.TryGetValue(canonicalParamName, out var existingVal) ||
+                TryGetValueCaseInsensitive(canonicalArgs, canonicalParamName, out existingVal, out matchedKey))
+            {
+                if (existingVal is System.Collections.IEnumerable enumerable and not string and not IDictionary<string, object?> and not System.Collections.IDictionary)
+                {
+                    foreach (var item in enumerable)
+                    {
+                        if (item is IDictionary<string, object?> d && d.Count > 0)
+                        {
+                            hasValidCollection = true;
+                            break;
+                        }
+                        else if (item is JsonElement je && je.ValueKind == JsonValueKind.Object && je.EnumerateObject().Any())
+                        {
+                            hasValidCollection = true;
+                            break;
+                        }
+                        else if (item != null && item is not IDictionary<string, object?> and not System.Collections.IDictionary)
+                        {
+                            hasValidCollection = true;
+                            break;
+                        }
+                    }
+                }
+                else if (existingVal is IDictionary<string, object?> singleDict && singleDict.Count > 0)
+                {
+                    hasValidCollection = true;
+                }
+                else if (existingVal != null)
+                {
+                    hasValidCollection = true;
+                }
+            }
+
+            if (hasValidCollection)
+            {
+                continue;
+            }
+
+            // Collect item properties and aliases
+            var itemPropNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var prop in itemPropertiesEl.EnumerateObject())
+            {
+                itemPropNames.Add(prop.Name);
+                itemPropNames.Add(ToSnakeCase(prop.Name));
+                itemPropNames.Add(ToCamelCase(prop.Name));
+                itemPropNames.Add(ToPascalCase(prop.Name));
+            }
+
+            if (mapping?.NestedParameterAliases != null)
+            {
+                var nestedPath = canonicalParamName + "[]";
+                if (mapping.NestedParameterAliases.TryGetValue(nestedPath, out var nestedAliases))
+                {
+                    foreach (var (canonProp, aliases) in nestedAliases)
+                    {
+                        itemPropNames.Add(canonProp);
+                        foreach (var alias in aliases)
+                        {
+                            itemPropNames.Add(alias);
+                        }
+                    }
+                }
+            }
+
+            // Do not steal top-level tool parameters
+            var topLevelParams = new HashSet<string>(propDict.Keys, StringComparer.OrdinalIgnoreCase);
+            topLevelParams.Remove(canonicalParamName);
+            topLevelParams.Remove(propKey);
+
+            var extractedItem = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            var matchedRootKeys = new List<string>();
+
+            foreach (var (argKey, argVal) in canonicalArgs)
+            {
+                if (topLevelParams.Contains(argKey))
+                {
+                    continue;
+                }
+
+                if (itemPropNames.Contains(argKey) && argVal != null)
+                {
+                    extractedItem[argKey] = argVal;
+                    matchedRootKeys.Add(argKey);
+                }
+            }
+
+            if (extractedItem.Count > 0)
+            {
+                foreach (var k in matchedRootKeys)
+                {
+                    canonicalArgs.Remove(k);
+                }
+
+                if (matchedKey != null && canonicalArgs.ContainsKey(matchedKey))
+                {
+                    canonicalArgs.Remove(matchedKey);
+                }
+
+                canonicalArgs[canonicalParamName] = new List<object?> { extractedItem };
+                Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, "<flattened>", canonicalParamName, SessionId);
+            }
+        }
+    }
+
+    private void UnpackSingleItemArraysToFlatParameters(
+        string canonicalTool,
+        AIFunctionArguments canonicalArgs,
+        Dictionary<string, (string CanonicalName, JsonElement Schema)> propDict,
+        JsonElement? rootSchema)
+    {
+        var currentKeys = canonicalArgs.Keys.ToList();
+        foreach (var argKey in currentKeys)
+        {
+            if (propDict.ContainsKey(argKey))
+            {
+                continue;
+            }
+
+            var val = canonicalArgs[argKey];
+            if (val is string strVal)
+            {
+                var trimmed = strVal.Trim();
+                if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(trimmed);
+                        val = ConvertJsonElementToClr(doc.RootElement);
+                    }
+                    catch (JsonException) { }
+                }
+            }
+
+            IDictionary<string, object?>? firstItemDict = null;
+            int itemCount = 0;
+
+            if (val is System.Collections.IEnumerable list and not string and not IDictionary<string, object?> and not System.Collections.IDictionary)
+            {
+                foreach (var item in list)
+                {
+                    itemCount++;
+                    if (itemCount > 1)
+                    {
+                        break;
+                    }
+
+                    if (item is IDictionary<string, object?> d)
+                    {
+                        firstItemDict = d;
+                    }
+                    else if (item is JsonElement je && je.ValueKind == JsonValueKind.Object)
+                    {
+                        if (ConvertJsonElementToClr(je) is IDictionary<string, object?> parsedDict)
+                        {
+                            firstItemDict = parsedDict;
+                        }
+                    }
+                }
+            }
+            else if (val is IDictionary<string, object?> singleDict)
+            {
+                firstItemDict = singleDict;
+                itemCount = 1;
+            }
+
+            if (itemCount == 1 && firstItemDict != null && firstItemDict.Count > 0)
+            {
+                bool unpackedAny = false;
+                foreach (var (itemK, itemV) in firstItemDict)
+                {
+                    if (propDict.TryGetValue(itemK, out var entry) && !canonicalArgs.ContainsKey(entry.CanonicalName))
+                    {
+                        canonicalArgs[entry.CanonicalName] = itemV;
+                        unpackedAny = true;
+                    }
+                }
+
+                if (unpackedAny)
+                {
+                    canonicalArgs.Remove(argKey);
+                    Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, argKey, "<unpacked>", SessionId);
+                }
+            }
+        }
+    }
+
+    private void PropagateUnmappedParametersToCollections(
+        AIFunctionArguments canonicalArgs,
+        Dictionary<string, (string CanonicalName, JsonElement Schema)> propDict,
+        JsonElement? rootSchema,
+        ToolMapping? mapping)
+    {
+        var rootKeys = canonicalArgs.Keys.ToList();
+        foreach (var rootKey in rootKeys)
+        {
+            if (!canonicalArgs.TryGetValue(rootKey, out var rootVal) || rootVal == null)
+            {
+                continue;
+            }
+
+            bool isExplicitPropagated = (mapping != null && mapping.PropagatedParameters.Contains(rootKey)) ||
+                                        _options.PropagatedParameters.Contains(rootKey);
+            bool isUnmapped = !propDict.ContainsKey(rootKey);
+
+            if (!isExplicitPropagated && !isUnmapped)
+            {
+                continue;
+            }
+
+            bool propagatedToAny = false;
+            var seenArrays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (canonicalParamName, paramSchema) in propDict.Values)
+            {
+                if (!seenArrays.Add(canonicalParamName))
+                {
+                    continue;
+                }
+
+                var resolvedSchema = rootSchema.HasValue ? ResolveSchema(paramSchema, rootSchema.Value) : paramSchema;
+                if (!SchemaTypeMatches(resolvedSchema, "array"))
+                {
+                    continue;
+                }
+
+                if (!canonicalArgs.TryGetValue(canonicalParamName, out var arrayVal) || arrayVal == null)
+                {
+                    continue;
+                }
+
+                if (arrayVal is string strVal)
+                {
+                    var trimmed = strVal.Trim();
+                    if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+                    {
+                        try
+                        {
+                            using var doc = JsonDocument.Parse(trimmed);
+                            arrayVal = ConvertJsonElementToClr(doc.RootElement);
+                            canonicalArgs[canonicalParamName] = arrayVal;
+                        }
+                        catch (JsonException) { }
+                    }
+                }
+
+                if (arrayVal is not System.Collections.IEnumerable list ||
+                    arrayVal is string or IDictionary<string, object?> or System.Collections.IDictionary)
+                {
+                    continue;
+                }
+
+                if (!resolvedSchema.TryGetProperty("items", out var itemsSchema))
+                {
+                    continue;
+                }
+
+                var resolvedItemSchema = rootSchema.HasValue ? ResolveSchema(itemsSchema, rootSchema.Value) : itemsSchema;
+                if (resolvedItemSchema.ValueKind != JsonValueKind.Object ||
+                    !resolvedItemSchema.TryGetProperty("properties", out var itemProps) ||
+                    itemProps.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                string? targetItemPropName = null;
+                foreach (var prop in itemProps.EnumerateObject())
+                {
+                    var canonProp = prop.Name;
+                    if (string.Equals(canonProp, rootKey, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ToSnakeCase(canonProp), rootKey, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ToCamelCase(canonProp), rootKey, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ToPascalCase(canonProp), rootKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        targetItemPropName = canonProp;
+                        break;
+                    }
+                }
+
+                if (targetItemPropName == null && mapping?.NestedParameterAliases != null)
+                {
+                    var nestedPath = canonicalParamName + "[]";
+                    if (mapping.NestedParameterAliases.TryGetValue(nestedPath, out var nestedAliases))
+                    {
+                        foreach (var (canonProp, aliases) in nestedAliases)
+                        {
+                            if (aliases.Contains(rootKey))
+                            {
+                                targetItemPropName = canonProp;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (targetItemPropName == null)
+                {
+                    continue;
+                }
+
+                var newItemsList = new List<object?>();
+                bool collectionModified = false;
+
+                foreach (var item in list)
+                {
+                    var effectiveItem = item;
+
+                    if (effectiveItem is string strItem)
+                    {
+                        var primaryProp = FindPrimaryStringProperty(itemProps, resolvedItemSchema, mapping, canonicalParamName + "[]");
+                        if (primaryProp != null)
+                        {
+                            effectiveItem = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                [primaryProp] = strItem
+                            };
+                            collectionModified = true;
+                        }
+                    }
+
+                    if (effectiveItem is IDictionary<string, object?> itemDict)
+                    {
+                        bool alreadyHas = (itemDict.TryGetValue(targetItemPropName, out var v1) && v1 != null) ||
+                                          (itemDict.TryGetValue(ToSnakeCase(targetItemPropName), out var v2) && v2 != null) ||
+                                          (itemDict.TryGetValue(ToCamelCase(targetItemPropName), out var v3) && v3 != null) ||
+                                          (itemDict.TryGetValue(ToPascalCase(targetItemPropName), out var v4) && v4 != null);
+
+                        if (!alreadyHas && mapping?.NestedParameterAliases != null &&
+                            mapping.NestedParameterAliases.TryGetValue(canonicalParamName + "[]", out var nestedAliases) &&
+                            nestedAliases.TryGetValue(targetItemPropName, out var aliases))
+                        {
+                            foreach (var a in aliases)
+                            {
+                                if (itemDict.TryGetValue(a, out var va) && va != null)
+                                {
+                                    alreadyHas = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!alreadyHas)
+                        {
+                            var mutableDict = new Dictionary<string, object?>(itemDict, StringComparer.OrdinalIgnoreCase);
+                            object? effectiveVal = rootVal;
+                            if (_options.EnableParameterCoercion && rootVal is string && itemProps.TryGetProperty(targetItemPropName, out var targetPropSchema))
+                            {
+                                effectiveVal = CoerceParameterValue(targetItemPropName, rootVal, targetPropSchema, mapping) ?? rootVal;
+                            }
+                            mutableDict[targetItemPropName] = effectiveVal;
+                            effectiveItem = mutableDict;
+                            propagatedToAny = true;
+                            collectionModified = true;
+                        }
+                    }
+
+                    newItemsList.Add(effectiveItem);
+                }
+
+                if (collectionModified)
+                {
+                    canonicalArgs[canonicalParamName] = newItemsList;
+                }
+            }
+
+            if (propagatedToAny && isUnmapped)
+            {
+                canonicalArgs.Remove(rootKey);
+                Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, rootKey, "<propagated_to_collection>", SessionId);
+            }
+        }
+    }
+
+    private string? FindPrimaryStringProperty(
+        JsonElement propertiesElement,
+        JsonElement? itemSchema,
+        ToolMapping? mapping,
+        string? paramPath)
+    {
+        // 1. Explicit configuration in ToolMapping
+        if (mapping?.PrimaryCollectionProperties != null && !string.IsNullOrEmpty(paramPath))
+        {
+            if (mapping.PrimaryCollectionProperties.TryGetValue(paramPath, out var explicitProp) &&
+                !string.IsNullOrWhiteSpace(explicitProp))
+            {
+                return explicitProp;
+            }
+
+            var trimmedPath = paramPath.EndsWith("[]", StringComparison.Ordinal)
+                ? paramPath[..^2]
+                : paramPath;
+
+            if (mapping.PrimaryCollectionProperties.TryGetValue(trimmedPath, out var explicitPropTrimmed) &&
+                !string.IsNullOrWhiteSpace(explicitPropTrimmed))
+            {
+                return explicitPropTrimmed;
+            }
+        }
+
+        // 2. Auto-discovery from JSON schema 'required'
+        if (itemSchema.HasValue && itemSchema.Value.ValueKind == JsonValueKind.Object &&
+            itemSchema.Value.TryGetProperty("required", out var requiredEl) &&
+            requiredEl.ValueKind == JsonValueKind.Array)
+        {
+            string? singleRequiredString = null;
+            int requiredStringCount = 0;
+
+            foreach (var reqItem in requiredEl.EnumerateArray())
+            {
+                if (reqItem.ValueKind == JsonValueKind.String)
+                {
+                    var reqPropName = reqItem.GetString();
+                    if (!string.IsNullOrEmpty(reqPropName) &&
+                        propertiesElement.TryGetProperty(reqPropName, out var propDef) &&
+                        propDef.ValueKind == JsonValueKind.Object &&
+                        (!propDef.TryGetProperty("type", out _) || SchemaTypeMatches(propDef, "string")))
+                    {
+                        singleRequiredString = reqPropName;
+                        requiredStringCount++;
+                    }
+                }
+            }
+
+            if (requiredStringCount == 1)
+            {
+                return singleRequiredString;
+            }
+        }
+
+        // 3. Auto-discovery from JSON schema unique string property
+        string? singleStringProp = null;
+        int stringPropCount = 0;
+        foreach (var p in propertiesElement.EnumerateObject())
+        {
+            if (p.Value.ValueKind == JsonValueKind.Object &&
+                SchemaTypeMatches(p.Value, "string"))
+            {
+                singleStringProp = p.Name;
+                stringPropCount++;
+            }
+        }
+
+        if (stringPropCount == 1)
+        {
+            return singleStringProp;
+        }
+
+        // 4. Configurable fallback list
+        if (_options.DefaultPrimaryStringProperties != null)
+        {
+            foreach (var wk in _options.DefaultPrimaryStringProperties)
+            {
+                if (propertiesElement.TryGetProperty(wk, out var prop) &&
+                    prop.ValueKind == JsonValueKind.Object &&
+                    (!prop.TryGetProperty("type", out _) || SchemaTypeMatches(prop, "string")))
+                {
+                    return wk;
+                }
+            }
+        }
+
+        return null;
     }
 
     private static JsonElement ResolveSchema(JsonElement schema, JsonElement rootSchema, int depth = 0)

@@ -130,6 +130,56 @@ public static class Program
         }
         Console.WriteLine("✓ Schema-driven enum snapping verified");
 
+        // 4d. ToolMapping with ComputedParameters in AOT
+        var customConfig = new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["read_file"] = new ToolMapping(
+                    aliases: ["view_file"],
+                    parameterAliases: new Dictionary<string, IEnumerable<string>> { ["path"] = ["filePath"] },
+                    computedParameters: new Dictionary<string, ParameterComputer>
+                    {
+                        ["limit"] = raw =>
+                        {
+                            if (raw.TryGetValue("end_line", out var end) && int.TryParse(end?.ToString(), out var e) &&
+                                raw.TryGetValue("offset", out var off) && int.TryParse(off?.ToString(), out var o))
+                            {
+                                return e - o + 1;
+                            }
+                            return null;
+                        }
+                    })
+            }
+        };
+        var customDispatcher = new LenientToolDispatcher();
+        customDispatcher.Configure(customConfig);
+        var readNormalized = customDispatcher.NormalizeCall("view_file", new Dictionary<string, object?>
+        {
+            ["filePath"] = "test.txt",
+            ["offset"] = 5,
+            ["end_line"] = 15
+        });
+        if (readNormalized.CanonicalToolName != "read_file" ||
+            readNormalized.Arguments["path"]?.ToString() != "test.txt" ||
+            (int)readNormalized.Arguments["limit"]! != 11)
+        {
+            throw new InvalidOperationException($"Computed parameters in AOT unexpected: {readNormalized.CanonicalToolName} limit={readNormalized.Arguments["limit"]}");
+        }
+        Console.WriteLine("✓ Custom ToolMapping and computed parameters verified");
+
+        // 4e. Auto-promotion of flattened parameters in AOT
+        var searchNormalized = dispatcher.NormalizeCall("search", new Dictionary<string, object?>
+        {
+            ["q"] = "csharp",
+            ["limit"] = 10
+        });
+        if (searchNormalized.CanonicalToolName != "search")
+        {
+            throw new InvalidOperationException("Auto-promotion / normalization in AOT failed");
+        }
+        Console.WriteLine("✓ Auto-promotion of flattened parameters verified");
+
         // 5. Compaction (ThinkingTrace & ToolResult)
         var compactor = new ToolResultCompactor(new ToolResultCompactionOptions
         {
