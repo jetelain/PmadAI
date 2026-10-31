@@ -41,6 +41,7 @@ public class CommandValidationRule
     /// Flags or options prohibited at this command or subcommand level.
     /// Long flags starting with <c>--</c> automatically match inline <c>--flag=value</c> forms.
     /// Entries ending with <c>*</c> match prefix forms (such as <c>-c*</c> matching <c>-c</c> and <c>-ccore.pager=sh</c>, or <c>-O*</c> matching <c>-Osh</c>).
+    /// When subcommands are configured, short flags in <see cref="BlockedFlags"/> are enforced before the subcommand verb while long flags are enforced across the entire command; place subcommand-specific short flags in <see cref="NestedSubcommands"/>.
     /// </summary>
     public HashSet<string> BlockedFlags { get; set; } = new(StringComparer.Ordinal);
 
@@ -172,7 +173,7 @@ public class ReadOnlyCommandValidatorOptions
                         BlockedFlags =
                         [
                             "-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy",
-                            "-f", "--force", "-u", "--set-upstream-to", "--unset-upstream", "--edit-description"
+                            "-f", "--force", "-u*", "--set-upstream-to", "--unset-upstream", "--edit-description"
                         ]
                     },
                     ["tag"] = new CommandValidationRule
@@ -182,7 +183,7 @@ public class ReadOnlyCommandValidatorOptions
                         BlockedFlags =
                         [
                             "-d", "-D", "--delete", "-a", "--annotate", "-s", "--sign",
-                            "-f", "--force", "-u", "--local-user", "-m", "--message", "-F", "--file"
+                            "-f", "--force", "-u*", "--local-user", "-m*", "--message", "-F*", "--file"
                         ]
                     },
                     ["remote"] = new CommandValidationRule
@@ -813,7 +814,7 @@ public class ReadOnlyCommandValidator
 
                 if (!rule.AllowPositionalArguments)
                 {
-                    if (arg == "--" || arg[0] != '-')
+                    if (arg.Length <= 1 || arg[0] != '-' || arg == "--")
                     {
                         return new CommandValidationResult(
                             false,
@@ -851,8 +852,10 @@ public class ReadOnlyCommandValidator
                     rawSegment);
             }
 
-            if (rule.FlagsWithArgs.Contains(token) ||
-                (parentFlagsWithArgs != null && parentFlagsWithArgs.Contains(token)))
+            if ((rule.FlagsWithArgs.Contains(token) ||
+                 (parentFlagsWithArgs != null && parentFlagsWithArgs.Contains(token))) &&
+                i + 1 < tokens.Count &&
+                tokens[i + 1][0] != '-')
             {
                 i += 2;
                 continue;
