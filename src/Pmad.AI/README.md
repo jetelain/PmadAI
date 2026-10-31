@@ -89,7 +89,7 @@ dotnet add package Pmad.AI
 | **`Pmad.AI`** | Root pipeline registration & middleware extensions | `UseToolCallHealing`, `UseToolLoopCircuitBreaker`, `UseThinkingTraceCompaction`, `UseToolResultCompaction`, `UseLenientToolDispatch`, `UseVerbatimTranscript` |
 | **`Pmad.AI.Tools`** | Tool dispatching, aliasing, translations, and attributes | `LenientToolDispatcher`, `ToolMapping`, `ToolTranslation`, `[ToolAlias]`, `[ToolParameterAlias]`, `[ToolTranslation]` |
 | **`Pmad.AI.Healing`** | Payload healing and protocol repair for local/open-weights models | `ToolCallHealingTransform`, `ToolCallHealingChatClient`, `StreamingHealingMode` |
-| **`Pmad.AI.Guardrails`** | Execution loop breaker and shell security validation | `ToolLoopCircuitBreaker`, `ToolLoopCircuitBreakerChatClient`, `ReadOnlyCommandValidator`, `ShellDialect` |
+| **`Pmad.AI.Guardrails`** | Execution loop breaker and shell security validation | `ToolLoopCircuitBreaker`, `ToolLoopCircuitBreakerChatClient`, `ReadOnlyCommandValidator`, `CommandValidationRule`, `ShellDialect` |
 | **`Pmad.AI.Compaction`** | Context window history compaction and speculative summarization | `ICompactionOptions`, `ToolResultCompactor`, `ThinkingTraceCompactor`, `ThinkingTraceCompactionChatClient`, `ISpeculativeSummarizer`, `OllamaSpeculativeSummarizer`, `OllamaApiClient` |
 | **`Pmad.AI.Transcripts`** | Audit-grade Markdown transcript logging | `VerbatimTranscriptChatClient`, `VerbatimTranscriptOptions` |
 | **`Pmad.AI.Tokens`** | Fast zero-allocation token estimation | `HeuristicTokenEstimator` |
@@ -309,7 +309,23 @@ var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
 {
     Dialect = ShellDialect.Bash,
     BlockSubshells = true,
-    BlockRedirection = true
+    BlockRedirection = true,
+    AllowedBinaries = ["find", "rg", "grep", "cat", "ls", "git", "head", "tail", "wc", "cd", "csnav"],
+    CommandRules =
+    {
+        ["csnav"] = new CommandValidationRule
+        {
+            AllowedSubcommands = ["references", "definition", "implementations", "explore", "decompile", "server"],
+            FlagsWithArgs = ["-s", "--solution", "--format"],
+            NestedSubcommands =
+            {
+                ["server"] = new CommandValidationRule
+                {
+                    AllowedSubcommands = ["status", "start", "reload"]
+                }
+            }
+        }
+    }
 });
 
 // Safe commands: Allowed
