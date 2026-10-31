@@ -173,7 +173,8 @@ public class ReadOnlyCommandValidatorOptions
                         BlockedFlags =
                         [
                             "-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy",
-                            "-f", "--force", "-u*", "--set-upstream-to", "--unset-upstream", "--edit-description"
+                            "-f", "--force", "-u*", "--set-upstream*", "--unset-upstream", "--edit-description",
+                            "-t*", "--track*", "--create-reflog", "--no-create-reflog"
                         ]
                     },
                     ["tag"] = new CommandValidationRule
@@ -182,8 +183,10 @@ public class ReadOnlyCommandValidatorOptions
                         FlagsWithArgs = ["-l", "--list", "-v", "--verify", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"],
                         BlockedFlags =
                         [
-                            "-d", "-D", "--delete", "-a", "--annotate", "-s", "--sign",
-                            "-f", "--force", "-u*", "--local-user", "-m*", "--message", "-F*", "--file"
+                            "-d", "-D", "--delete", "-a", "--annotate", "--no-annotate", "-s", "--sign", "--no-sign",
+                            "-f", "--force", "-u*", "--local-user", "-m*", "--message", "-F*", "--file",
+                            "-e", "--edit", "--no-edit", "--trailer", "--no-trailer", "--cleanup", "--no-cleanup",
+                            "--create-reflog", "--no-create-reflog"
                         ]
                     },
                     ["remote"] = new CommandValidationRule
@@ -254,8 +257,8 @@ public class ReadOnlyCommandValidator
             return unquotedCheck;
         }
 
-        // Fast path for single commands without pipes, semicolons, or boolean chaining
-        if (commandLine.IndexOfAny(['|', ';', '&']) < 0)
+        // Fast path for single commands without pipes, semicolons, newlines, or boolean chaining
+        if (commandLine.IndexOfAny(['|', ';', '&', '\n', '\r']) < 0)
         {
             var trimmed = commandLine.Trim();
             if (string.IsNullOrEmpty(trimmed))
@@ -384,10 +387,15 @@ public class ReadOnlyCommandValidator
                     continue;
                 }
 
-                // Check variable expansion in double quotes or unquoted
-                if ((inDoubleQuote || !inSingleQuote) && c == '$')
+                // Check variable expansion and backtick subshells in double quotes or unquoted
+                if (inDoubleQuote || !inSingleQuote)
                 {
-                    if (i + 1 < command.Length)
+                    if (_options.BlockSubshells && c == '`')
+                    {
+                        return new CommandValidationResult(false, "Subshell execution ('`') is not permitted in read-only mode.", command);
+                    }
+
+                    if (c == '$' && i + 1 < command.Length)
                     {
                         char next = command[i + 1];
                         if (next == '(')
@@ -397,7 +405,11 @@ public class ReadOnlyCommandValidator
                                 return new CommandValidationResult(false, "Subshell execution ('$(') is not permitted in read-only mode.", command);
                             }
                         }
-                        else if (char.IsLetter(next) || next == '_' || next == '{')
+                        else if (!inDoubleQuote && (next == '\'' || next == '"'))
+                        {
+                            return new CommandValidationResult(false, "Shell dollar-quoting (\"$'...'\" or '$\"...\"') is not permitted in read-only mode.", command);
+                        }
+                        else if (char.IsLetterOrDigit(next) || next is '_' or '{' or '@' or '*' or '#' or '?' or '-' or '$' or '!')
                         {
                             return new CommandValidationResult(false, "Environment variable expansion ('$' or '${') is not permitted in read-only mode.", command);
                         }
@@ -407,6 +419,19 @@ public class ReadOnlyCommandValidator
                 // Outside quotes
                 if (!inSingleQuote && !inDoubleQuote)
                 {
+                    if (_options.BlockSubshells)
+                    {
+                        if ((c == '<' || c == '>') && i + 1 < command.Length && command[i + 1] == '(')
+                        {
+                            return new CommandValidationResult(false, $"Process substitution ('{c}(') is not permitted in read-only mode.", command);
+                        }
+
+                        if (c == '(' || c == ')')
+                        {
+                            return new CommandValidationResult(false, $"Subshell grouping ('{c}') is not permitted in read-only mode.", command);
+                        }
+                    }
+
                     if (_options.BlockRedirection)
                     {
                         if (c == '>')
@@ -420,30 +445,11 @@ public class ReadOnlyCommandValidator
                         }
                         if (c == '<')
                         {
-                            if (i + 1 < command.Length && command[i + 1] == '(')
-                            {
-                                if (_options.BlockSubshells)
-                                {
-                                    return new CommandValidationResult(false, "Process substitution ('<(') is not permitted in read-only mode.", command);
-                                }
-                            }
                             if (i + 1 < command.Length && command[i + 1] == '<')
                             {
                                 return new CommandValidationResult(false, "Here-doc ('<<') is not permitted in read-only mode.", command);
                             }
                             return new CommandValidationResult(false, "Input redirection ('<') is not permitted in read-only mode.", command);
-                        }
-                    }
-
-                    if (_options.BlockSubshells)
-                    {
-                        if (c == '`')
-                        {
-                            return new CommandValidationResult(false, "Subshell execution ('`') is not permitted in read-only mode.", command);
-                        }
-                        if (c == '>' && i + 1 < command.Length && command[i + 1] == '(')
-                        {
-                            return new CommandValidationResult(false, "Process substitution ('>(') is not permitted in read-only mode.", command);
                         }
                     }
 
@@ -498,7 +504,7 @@ public class ReadOnlyCommandValidator
                                 return new CommandValidationResult(false, $"PowerShell subexpression ('{c}(') is not permitted in read-only mode.", command);
                             }
                         }
-                        else if (char.IsLetter(next) || next == '_' || next == '{')
+                        else if (char.IsLetterOrDigit(next) || next is '_' or '{' or '?' or '^' or '$' or '`')
                         {
                             return new CommandValidationResult(false, $"PowerShell variable expansion ('{c}') is not permitted in read-only mode.", command);
                         }
@@ -510,6 +516,16 @@ public class ReadOnlyCommandValidator
                     if (c == '&')
                     {
                         return new CommandValidationResult(false, "PowerShell call operator ('&') is not permitted in read-only mode.", command);
+                    }
+
+                    if (_options.BlockSubshells && (c == '(' || c == ')'))
+                    {
+                        return new CommandValidationResult(false, $"PowerShell parenthetical expression ('{c}') is not permitted in read-only mode.", command);
+                    }
+
+                    if (c == '{' || c == '}')
+                    {
+                        return new CommandValidationResult(false, $"PowerShell script block ('{c}') is not permitted in read-only mode.", command);
                     }
 
                     if (_options.BlockRedirection && c == '>')
@@ -618,9 +634,13 @@ public class ReadOnlyCommandValidator
                     segments.Add(command.Substring(start, i - start));
                     start = i + 1;
                 }
-                else if (c == '\n')
+                else if (c == '\r' || c == '\n')
                 {
                     segments.Add(command.Substring(start, i - start));
+                    if (c == '\r' && i + 1 < command.Length && command[i + 1] == '\n')
+                    {
+                        i++;
+                    }
                     start = i + 1;
                 }
             }
@@ -704,8 +724,13 @@ public class ReadOnlyCommandValidator
         if (rawCmd.Contains('/') || rawCmd.Contains('\\'))
         {
             var clean = rawCmd.Replace('\\', '/');
-            if (!clean.StartsWith("/bin/", StringComparison.Ordinal) &&
-                !clean.StartsWith("/usr/bin/", StringComparison.Ordinal))
+            int prefixLen = clean.StartsWith("/bin/", StringComparison.Ordinal) ? "/bin/".Length
+                : clean.StartsWith("/usr/bin/", StringComparison.Ordinal) ? "/usr/bin/".Length
+                : -1;
+
+            if (prefixLen < 0 ||
+                clean.IndexOf('/', prefixLen) >= 0 ||
+                clean.AsSpan(prefixLen) is "" or "." or "..")
             {
                 return new CommandValidationResult(
                     false,
@@ -822,12 +847,20 @@ public class ReadOnlyCommandValidator
                             rawSegment);
                     }
 
-                    if ((rule.FlagsWithArgs.Contains(arg) ||
-                         (parentFlagsWithArgs != null && parentFlagsWithArgs.Contains(arg))) &&
-                        j + 1 < tokens.Count &&
-                        tokens[j + 1][0] != '-')
+                    if (rule.FlagsWithArgs.Contains(arg))
                     {
-                        j++;
+                        if (j + 1 < tokens.Count)
+                        {
+                            if (tokens[j + 1][0] == '-')
+                            {
+                                return new CommandValidationResult(
+                                    false,
+                                    $"Flag '{arg}' requires a non-flag argument for '{commandPath}' in read-only mode.",
+                                    rawSegment);
+                            }
+
+                            j++;
+                        }
                     }
                 }
             }
@@ -852,11 +885,17 @@ public class ReadOnlyCommandValidator
                     rawSegment);
             }
 
-            if ((rule.FlagsWithArgs.Contains(token) ||
-                 (parentFlagsWithArgs != null && parentFlagsWithArgs.Contains(token))) &&
-                i + 1 < tokens.Count &&
-                tokens[i + 1][0] != '-')
+            if (rule.FlagsWithArgs.Contains(token) ||
+                (parentFlagsWithArgs != null && parentFlagsWithArgs.Contains(token)))
             {
+                if (i + 1 >= tokens.Count || tokens[i + 1][0] == '-')
+                {
+                    return new CommandValidationResult(
+                        false,
+                        $"Flag '{token}' requires a non-flag argument for '{commandPath}' in read-only mode.",
+                        rawSegment);
+                }
+
                 i += 2;
                 continue;
             }
@@ -982,7 +1021,6 @@ public class ReadOnlyCommandValidator
         }
 
         // Check wildcard prefix patterns (e.g. "-c*", "-O*", "-i*", "--ext-diff*") and bundled short flags
-        bool isPureShortBundle = !isLongFlag && token.Length > 2 && IsAsciiLetterOrDigitSpan(token.AsSpan(1));
         foreach (var pattern in blockedFlags)
         {
             if (pattern.Length > 1 && pattern[^1] == '*')
@@ -1012,10 +1050,11 @@ public class ReadOnlyCommandValidator
                     return true;
                 }
             }
-            else if (isPureShortBundle && pattern.Length == 2 && pattern[0] == '-' && char.IsLetterOrDigit(pattern[1]))
+            else if (!isLongFlag && token.Length > 2 && pattern.Length == 2 && pattern[0] == '-' && char.IsLetterOrDigit(pattern[1]))
             {
-                // Bundled exact short flag (e.g. "-avD" matching "-D")
-                if (token.AsSpan(1).Contains(pattern[1]))
+                // Bundled exact short flag (e.g. "-avD" matching "-D", or "-dlv1.0" matching "-d")
+                int charIdx = token.AsSpan(1).IndexOf(pattern[1]);
+                if (charIdx >= 0 && IsAsciiLetterOrDigitSpan(token.AsSpan(1, charIdx)))
                 {
                     return true;
                 }
