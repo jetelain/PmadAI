@@ -10,12 +10,39 @@ public class ReadOnlyCommandValidatorTests
     [InlineData("find . -name \"*.cs\"")]
     [InlineData("rg -n \"TODO\" src/")]
     [InlineData("grep -i \"error\" log.txt")]
+    [InlineData("grep \"error$\" log.txt")]
+    [InlineData("rg \"foo$|bar$\" src/")]
     [InlineData("git status")]
     [InlineData("git log -n 5")]
     [InlineData("git diff HEAD~1")]
     [InlineData("git show HEAD")]
     [InlineData("git blame src/main.cs")]
+    [InlineData("git branch")]
+    [InlineData("git branch -a")]
+    [InlineData("git branch --show-current")]
+    [InlineData("git branch -l \"main*\"")]
+    [InlineData("git branch --contains HEAD")]
+    [InlineData("git tag")]
+    [InlineData("git tag -l \"v1.*\"")]
+    [InlineData("git tag -v v1.0.0")]
+    [InlineData("git tag --points-at HEAD")]
+    [InlineData("git ls-tree HEAD")]
+    [InlineData("git describe --tags")]
+    [InlineData("git shortlog -sn")]
+    [InlineData("git shortlog -c")]
+    [InlineData("git remote")]
+    [InlineData("git remote -v")]
+    [InlineData("git remote show origin")]
+    [InlineData("git remote get-url origin")]
+    [InlineData("git cat-file -p HEAD")]
+    [InlineData("git check-ref-format refs/heads/main")]
+    [InlineData("git grep -c \"pattern\"")]
+    [InlineData("git ls-files -c")]
+    [InlineData("git log -c -n 1")]
+    [InlineData("git show -c HEAD")]
     [InlineData("cat file.txt | grep \"pattern\"")]
+    [InlineData("ls\ncat file.txt")]
+    [InlineData("ls\r\ncat file.txt")]
     public void ValidateCommand_Bash_AllowsSafeCommands(string command)
     {
         var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
@@ -44,7 +71,10 @@ public class ReadOnlyCommandValidatorTests
     [Theory]
     [InlineData("cat $(whoami)", "Subshell")]
     [InlineData("cat `whoami`", "Subshell")]
+    [InlineData("cat \"`whoami`\"", "Subshell")]
     [InlineData("diff <(ls a) <(ls b)", "Process substitution")]
+    [InlineData("(rm -rf /)", "Subshell")]
+    [InlineData("ls; (rm -rf /)", "Subshell")]
     public void ValidateCommand_Bash_BlocksSubshells(string command, string expectedReasonKeyword)
     {
         var validator = new ReadOnlyCommandValidator();
@@ -54,9 +84,33 @@ public class ReadOnlyCommandValidatorTests
         Assert.Contains(expectedReasonKeyword, result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void ValidateCommand_Bash_BlocksProcessSubstitution_WhenBlockRedirectionDisabled()
+    {
+        var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
+        {
+            Dialect = ShellDialect.Bash,
+            BlockRedirection = false,
+            BlockSubshells = true
+        });
+
+        var result = validator.ValidateCommand("cat <(rm -rf /)");
+        Assert.False(result.IsAllowed);
+        Assert.Contains("Process substitution", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData("cat $SECRET", "Environment variable")]
     [InlineData("cat ${VAR}", "Environment variable")]
+    [InlineData("cat $0", "Environment variable")]
+    [InlineData("cat $1", "Environment variable")]
+    [InlineData("cat $?", "Environment variable")]
+    [InlineData("cat $$", "Environment variable")]
+    [InlineData("cat $@", "Environment variable")]
+    [InlineData("cat $*", "Environment variable")]
+    [InlineData("find . $'-exec' rm -rf {} +", "dollar-quoting")]
+    [InlineData("find . $\"-exec\" rm -rf {} +", "dollar-quoting")]
+    [InlineData("git $'-c' core.pager=sh diff", "dollar-quoting")]
     public void ValidateCommand_Bash_BlocksVariableExpansion(string command, string expectedReasonKeyword)
     {
         var validator = new ReadOnlyCommandValidator();
@@ -93,6 +147,73 @@ public class ReadOnlyCommandValidatorTests
     [InlineData("git diff --output=/tmp/diff.txt")]
     [InlineData("git -c core.pager=evil diff")]
     [InlineData("git --exec-path=/tmp/evil status")]
+    [InlineData("git branch -d old-branch")]
+    [InlineData("git branch -D old-branch")]
+    [InlineData("git branch -avD old-branch")]
+    [InlineData("git branch --delete old-branch")]
+    [InlineData("git branch -m old-branch new-branch")]
+    [InlineData("git branch -M old-branch new-branch")]
+    [InlineData("git branch -c old-branch new-branch")]
+    [InlineData("git branch -C old-branch new-branch")]
+    [InlineData("git branch -f main HEAD~1")]
+    [InlineData("git branch --force main HEAD~1")]
+    [InlineData("git branch -u origin/main")]
+    [InlineData("git branch -uorigin/main")]
+    [InlineData("git branch -auorigin/main")]
+    [InlineData("git branch --set-upstream-to=origin/main")]
+    [InlineData("git branch --set-upstream origin/main")]
+    [InlineData("git branch --unset-upstream")]
+    [InlineData("git branch --edit-description")]
+    [InlineData("git branch -t origin/main")]
+    [InlineData("git branch --track origin/main")]
+    [InlineData("git branch --create-reflog")]
+    [InlineData("git branch new-branch")]
+    [InlineData("git branch -a new-branch")]
+    [InlineData("git branch -- new-branch")]
+    [InlineData("git branch -")]
+    [InlineData("git branch --format -l new-branch")]
+    [InlineData("git branch --work-tree new-branch")]
+    [InlineData("git tag -d v1.0.0")]
+    [InlineData("git tag -D v1.0.0")]
+    [InlineData("git tag --delete v1.0.0")]
+    [InlineData("git tag v1.0.0")]
+    [InlineData("git tag -a v1.0.0 -m \"release\"")]
+    [InlineData("git tag -f v1.0.0")]
+    [InlineData("git tag -s v1.0.0")]
+    [InlineData("git tag -")]
+    [InlineData("git tag -F/tmp/msg -l v1.0.0")]
+    [InlineData("git tag -m\"msg\" -l v1.0.0")]
+    [InlineData("git tag -ukey@example.com -l v1.0.0")]
+    [InlineData("git tag --format -l new-tag")]
+    [InlineData("git tag --no-edit --trailer -l new-tag")]
+    [InlineData("git tag --cleanup -l new-tag")]
+    [InlineData("git tag -e -l new-tag")]
+    [InlineData("git tag --create-reflog")]
+    [InlineData("git tag -C new-tag")]
+    [InlineData("git tag -dlv1.0.0")]
+    [InlineData("git remote add origin https://example.com/repo.git")]
+    [InlineData("git remote remove origin")]
+    [InlineData("git remote rm origin")]
+    [InlineData("git remote set-url origin https://example.com/repo.git")]
+    [InlineData("git remote rename origin upstream")]
+    [InlineData("git remote prune origin")]
+    [InlineData("git remote -v add origin https://example.com/repo.git")]
+    [InlineData("git -C status commit -m \"smuggled\"")]
+    [InlineData("git --git-dir status commit -m \"smuggled\"")]
+    [InlineData("git --git-dir=/tmp/evil status")]
+    [InlineData("git --namespace status commit -m \"smuggled\"")]
+    [InlineData("git --super-prefix status commit -m \"smuggled\"")]
+    [InlineData("git --bare status")]
+    [InlineData("git -p status")]
+    [InlineData("git -pC/tmp status")]
+    [InlineData("git -C /tmp")]
+    [InlineData("git -- commit -m \"smuggled\"")]
+    [InlineData("git -C -c core.pager=evil status")]
+    [InlineData("git -C --exec-path=/tmp/evil status")]
+    [InlineData("git -C -C commit status")]
+    [InlineData("git --work-tree -C commit -a -m status")]
+    [InlineData("git --work-tree -C branch -D status")]
+    [InlineData("git --work-tree -C tag --delete status v1.0.0")]
     public void ValidateCommand_Bash_BlocksDisallowedGitSubcommandsAndOptionInjection(string command)
     {
         var validator = new ReadOnlyCommandValidator();
@@ -112,9 +233,23 @@ public class ReadOnlyCommandValidatorTests
     }
 
     [Theory]
+    [InlineData("ls\nrm -rf /")]
+    [InlineData("ls\r\nrm -rf /")]
+    [InlineData("ls\rrm -rf /")]
+    public void ValidateCommand_Bash_NewlineCommandInjection_Blocked(string command)
+    {
+        var validator = new ReadOnlyCommandValidator();
+        var result = validator.ValidateCommand(command);
+
+        Assert.False(result.IsAllowed);
+        Assert.Contains("rm", result.Reason);
+    }
+
+    [Theory]
     [InlineData("Get-ChildItem -Path .")]
     [InlineData("Get-Content file.txt")]
     [InlineData("Select-String -Pattern \"foo\" -Path *.cs")]
+    [InlineData("Get-ChildItem -Path .\r\nGet-Content file.txt")]
     public void ValidateCommand_PowerShell_AllowsSafeCmdlets(string command)
     {
         var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
@@ -152,6 +287,14 @@ public class ReadOnlyCommandValidatorTests
     [InlineData("& \"calc.exe\"")]
     [InlineData("Get-ChildItem > out.txt")]
     [InlineData("Get-ChildItem $(Get-Process)")]
+    [InlineData("Get-ChildItem (Remove-Item file.txt)")]
+    [InlineData("Get-ChildItem (Invoke-Expression \"calc.exe\")")]
+    [InlineData("Get-ChildItem README.md | Get-Content -Path { Remove-Item file.txt }")]
+    [InlineData("Get-ChildItem $1")]
+    [InlineData("Get-ChildItem $?")]
+    [InlineData("Get-ChildItem $^")]
+    [InlineData("Get-ChildItem\nRemove-Item file.txt")]
+    [InlineData("Get-ChildItem\r\nRemove-Item file.txt")]
     public void ValidateCommand_PowerShell_BlocksDangerousOperations(string command)
     {
         var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
@@ -178,13 +321,14 @@ public class ReadOnlyCommandValidatorTests
     [Theory]
     [InlineData("git grep -O'sh -c x' foo")]
     [InlineData("git grep -Osh foo")]
+    [InlineData("git grep -nOsh foo")]
     [InlineData("git grep --open-files-in-pager=sh foo")]
     public void ValidateCommand_Bash_BlocksGitGrepPager(string command)
     {
         var result = new ReadOnlyCommandValidator().ValidateCommand(command);
 
         Assert.False(result.IsAllowed);
-        Assert.Contains("pager", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("git grep", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -199,6 +343,10 @@ public class ReadOnlyCommandValidatorTests
     [InlineData("/tmp/cat file.txt")]
     [InlineData("scripts/grep foo")]
     [InlineData("./git status")]
+    [InlineData("/bin/../../tmp/evil/cat file.txt")]
+    [InlineData("/usr/bin/../../../tmp/evil/git status")]
+    [InlineData("/bin/subdir/cat file.txt")]
+    [InlineData("/bin/..")]
     public void ValidateCommand_Bash_BlocksRelativeAndNonSystemPaths(string command)
     {
         var result = new ReadOnlyCommandValidator().ValidateCommand(command);
@@ -244,7 +392,7 @@ public class ReadOnlyCommandValidatorTests
         var result = new ReadOnlyCommandValidator().ValidateCommand(command);
 
         Assert.False(result.IsAllowed);
-        Assert.Contains("Dangerous git global flag", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not permitted for 'git'", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]
@@ -419,5 +567,138 @@ public class ReadOnlyCommandValidatorTests
 
         var result = validator.ValidateCommand(command);
         Assert.True(result.IsAllowed, $"Expected '{command}' to be allowed, but failed: {result.Reason}");
+    }
+
+    [Theory]
+    [InlineData("csnav definition -t CrucibleAgentHarness")]
+    [InlineData("csnav explore -t IdeationService")]
+    [InlineData("csnav references -t IWorkspaceSymbolService")]
+    [InlineData("csnav api-search -p \"*Symbol*\"")]
+    [InlineData("csnav server status")]
+    [InlineData("csnav server start -s NightCodeForge.sln")]
+    [InlineData("csnav -s NightCodeForge.sln server reload")]
+    [InlineData("csnav server --format json status")]
+    [InlineData("csnav --help")]
+    public void ValidateCommand_CustomCommandRules_AllowsConfiguredSubcommandsAndNestedVerbs(string command)
+    {
+        var validator = CreateCsNavValidator();
+
+        var result = validator.ValidateCommand(command);
+        Assert.True(result.IsAllowed, $"Expected '{command}' to be allowed, but failed: {result.Reason}");
+    }
+
+    [Theory]
+    [InlineData("csnav skills install", "csnav")]
+    [InlineData("csnav server stop", "csnav server")]
+    [InlineData("csnav -s status skills install", "csnav")]
+    [InlineData("csnav server --format json stop", "csnav server")]
+    [InlineData("csnav --format -s skills status", "csnav")]
+    [InlineData("csnav -s -s skills status", "csnav")]
+    public void ValidateCommand_CustomCommandRules_BlocksDisallowedSubcommandsAndNestedVerbs(string command, string expectedCommandPath)
+    {
+        var validator = CreateCsNavValidator();
+
+        var result = validator.ValidateCommand(command);
+        Assert.False(result.IsAllowed, $"Expected '{command}' to be blocked, but was allowed.");
+        Assert.Contains($"for '{expectedCommandPath}'", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("csnav")]
+    [InlineData("csnav -s NightCodeForge.sln")]
+    [InlineData("csnav --unknown-flag")]
+    [InlineData("csnav server -s NightCodeForge.sln")]
+    public void ValidateCommand_CustomCommandRules_BlocksMissingSubcommandWhenNotHelpOrVersion(string command)
+    {
+        var validator = CreateCsNavValidator();
+
+        var result = validator.ValidateCommand(command);
+        Assert.False(result.IsAllowed, $"Expected '{command}' to be blocked, but was allowed.");
+        Assert.Contains("subcommand is required", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("sed -n \"1,20p\" file.txt", true)]
+    [InlineData("sed -E \"s/foo/bar/g\" file.txt", true)]
+    [InlineData("sed -i \"s/foo/bar/g\" file.txt", false)]
+    [InlineData("sed -i.bak \"s/foo/bar/g\" file.txt", false)]
+    [InlineData("sed -ni \"s/foo/bar/g\" file.txt", false)]
+    [InlineData("sed -Ei.bak \"s/foo/bar/g\" file.txt", false)]
+    [InlineData("sed --in-place \"s/foo/bar/g\" file.txt", false)]
+    [InlineData("sed --in-place=.bak \"s/foo/bar/g\" file.txt", false)]
+    public void ValidateCommand_SedAllowed_EnforcesDefaultInPlaceBlocksIncludingBundledFlags(string command, bool expectedAllowed)
+    {
+        var options = new ReadOnlyCommandValidatorOptions();
+        options.AllowedBinaries.Add("sed");
+        var validator = new ReadOnlyCommandValidator(options);
+
+        var result = validator.ValidateCommand(command);
+        Assert.Equal(expectedAllowed, result.IsAllowed);
+    }
+
+    [Fact]
+    public void ValidateCommand_MultiLevelNestedSubcommands_MergesParentFlagsWithArgs()
+    {
+        var options = new ReadOnlyCommandValidatorOptions();
+        options.AllowedBinaries.Add("mycli");
+        options.CommandRules["mycli"] = new CommandValidationRule
+        {
+            FlagsWithArgs = ["--env"],
+            AllowedSubcommands = ["cloud"],
+            NestedSubcommands =
+            {
+                ["cloud"] = new CommandValidationRule
+                {
+                    FlagsWithArgs = ["--region"],
+                    AllowedSubcommands = ["cluster"],
+                    NestedSubcommands =
+                    {
+                        ["cluster"] = new CommandValidationRule
+                        {
+                            AllowedSubcommands = ["list", "describe"]
+                        }
+                    }
+                }
+            }
+        };
+
+        var validator = new ReadOnlyCommandValidator(options);
+
+        // Both --env (level 1) and --region (level 2) should be recognized as taking arguments at level 3
+        Assert.True(validator.ValidateCommand("mycli cloud cluster --env prod --region eu-west-1 list").IsAllowed);
+        Assert.False(validator.ValidateCommand("mycli cloud cluster --env list --region describe delete").IsAllowed);
+    }
+
+    private static ReadOnlyCommandValidator CreateCsNavValidator()
+    {
+        var options = new ReadOnlyCommandValidatorOptions
+        {
+            Dialect = ShellDialect.Bash
+        };
+        options.AllowedBinaries.Add("csnav");
+        options.CommandRules["csnav"] = new CommandValidationRule
+        {
+            AllowedSubcommands =
+            [
+                "references", "refs",
+                "definition", "def",
+                "implementations", "impl",
+                "api-search", "apis",
+                "explore",
+                "decompile",
+                "sync",
+                "server"
+            ],
+            FlagsWithArgs = ["-s", "--solution", "--format"],
+            NestedSubcommands =
+            {
+                ["server"] = new CommandValidationRule
+                {
+                    AllowedSubcommands = ["status", "start", "reload"]
+                }
+            }
+        };
+
+        return new ReadOnlyCommandValidator(options);
     }
 }

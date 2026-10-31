@@ -12,30 +12,114 @@ public enum ShellDialect
 }
 
 /// <summary>
+/// Validation rule for a specific command or nested subcommand in <see cref="ReadOnlyCommandValidator"/>.
+/// </summary>
+public class CommandValidationRule
+{
+    private HashSet<string> _allowedSubcommands = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, CommandValidationRule> _nestedSubcommands = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Subcommands (verbs) permitted for this command or parent subcommand.
+    /// When empty and <see cref="NestedSubcommands"/> is empty, positional arguments are not restricted as subcommands.
+    /// </summary>
+    public HashSet<string> AllowedSubcommands
+    {
+        get => _allowedSubcommands;
+        set => _allowedSubcommands = value.Comparer == StringComparer.OrdinalIgnoreCase
+            ? value
+            : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Flags that consume the next token as their argument when scanning for a subcommand verb
+    /// (for example, <c>-C</c> or <c>--work-tree</c> for <c>git</c>, or <c>-s</c>, <c>--solution</c>, <c>--format</c> for <c>csnav</c>).
+    /// </summary>
+    public HashSet<string> FlagsWithArgs { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Flags or options prohibited at this command or subcommand level.
+    /// Long flags starting with <c>--</c> automatically match inline <c>--flag=value</c> forms.
+    /// Entries ending with <c>*</c> match prefix forms (such as <c>-c*</c> matching <c>-c</c> and <c>-ccore.pager=sh</c>, or <c>-O*</c> matching <c>-Osh</c>).
+    /// When subcommands are configured, short flags in <see cref="BlockedFlags"/> are enforced before the subcommand verb while long flags are enforced across the entire command; place subcommand-specific short flags in <see cref="NestedSubcommands"/>.
+    /// </summary>
+    public HashSet<string> BlockedFlags { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Nested validation rules keyed by subcommand name (for example, <c>branch</c> or <c>grep</c> under <c>git</c>, or <c>server</c> under <c>csnav</c>).
+    /// </summary>
+    public Dictionary<string, CommandValidationRule> NestedSubcommands
+    {
+        get => _nestedSubcommands;
+        set => _nestedSubcommands = value.Comparer == StringComparer.OrdinalIgnoreCase
+            ? value
+            : new Dictionary<string, CommandValidationRule>(value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Whether unconsumed positional arguments are permitted when <see cref="AllowedSubcommands"/> and <see cref="NestedSubcommands"/> are empty.
+    /// Set to <c>false</c> for commands where bare positional arguments mutate state (such as <c>git branch &lt;name&gt;</c> or <c>git tag &lt;name&gt;</c>).
+    /// Default: <c>true</c>.
+    /// </summary>
+    public bool AllowPositionalArguments { get; set; } = true;
+
+    /// <summary>
+    /// Whether invoking this command or subcommand without a subcommand token is permitted when <see cref="AllowedSubcommands"/> or <see cref="NestedSubcommands"/> is configured
+    /// (for example, <c>git remote</c> or <c>git remote -v</c>). When <c>false</c>, only help/version flags (<c>-h</c>, <c>--help</c>, <c>-v</c>, <c>--version</c>) are allowed without a subcommand.
+    /// Default: <c>false</c>.
+    /// </summary>
+    public bool AllowNoSubcommand { get; set; }
+}
+
+/// <summary>
 /// Configuration options for <see cref="ReadOnlyCommandValidator"/>.
 /// </summary>
 public class ReadOnlyCommandValidatorOptions
 {
-    /// <summary>Shell dialect being validated. Default: Bash.</summary>
-    public ShellDialect Dialect { get; set; } = ShellDialect.Bash;
-
-    /// <summary>Binaries permitted for execution in Bash dialect. Default: read-only utilities.</summary>
-    public HashSet<string> AllowedBinaries { get; set; } = new(StringComparer.OrdinalIgnoreCase)
+    private HashSet<string> _allowedBinaries = new(StringComparer.OrdinalIgnoreCase)
     {
         "find", "rg", "grep", "cat", "ls", "git", "head", "tail", "wc", "cd"
     };
 
-    /// <summary>Cmdlets permitted for execution in PowerShell dialect. Default: read-only cmdlets (aliases prohibited).</summary>
-    public HashSet<string> AllowedPowerShellCmdlets { get; set; } = new(StringComparer.OrdinalIgnoreCase)
+    private HashSet<string> _allowedPowerShellCmdlets = new(StringComparer.OrdinalIgnoreCase)
     {
         "Get-ChildItem", "Get-Content", "Select-String", "Set-Location", "cd"
     };
 
-    /// <summary>Default-deny git subcommands permitted when git binary is invoked.</summary>
-    public HashSet<string> AllowedGitSubcommands { get; set; } = new(StringComparer.Ordinal)
+    private Dictionary<string, CommandValidationRule> _commandRules = CreateDefaultCommandRules();
+
+    /// <summary>Shell dialect being validated. Default: Bash.</summary>
+    public ShellDialect Dialect { get; set; } = ShellDialect.Bash;
+
+    /// <summary>Binaries permitted for execution in Bash dialect. Default: read-only utilities.</summary>
+    public HashSet<string> AllowedBinaries
     {
-        "status", "log", "diff", "show", "blame", "ls-files", "grep", "rev-parse"
-    };
+        get => _allowedBinaries;
+        set => _allowedBinaries = value.Comparer == StringComparer.OrdinalIgnoreCase
+            ? value
+            : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Cmdlets permitted for execution in PowerShell dialect. Default: read-only cmdlets (aliases prohibited).</summary>
+    public HashSet<string> AllowedPowerShellCmdlets
+    {
+        get => _allowedPowerShellCmdlets;
+        set => _allowedPowerShellCmdlets = value.Comparer == StringComparer.OrdinalIgnoreCase
+            ? value
+            : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Per-command subcommand and flag validation rules keyed by binary/cmdlet name.
+    /// Pre-configured with default read-only rules for <c>git</c>, <c>find</c>, <c>rg</c>, and <c>sed</c>.
+    /// </summary>
+    public Dictionary<string, CommandValidationRule> CommandRules
+    {
+        get => _commandRules;
+        set => _commandRules = value.Comparer == StringComparer.OrdinalIgnoreCase
+            ? value
+            : new Dictionary<string, CommandValidationRule>(value, StringComparer.OrdinalIgnoreCase);
+    }
 
     /// <summary>Whether to block subshells and substitutions ($(), backticks, process substitutions). Default: true.</summary>
     public bool BlockSubshells { get; set; } = true;
@@ -48,6 +132,75 @@ public class ReadOnlyCommandValidatorOptions
 
     /// <summary>Whether to enforce that all chained/piped commands resolve to allowed binaries/cmdlets. Default: true.</summary>
     public bool BlockPipesToDisallowedBinaries { get; set; } = true;
+
+    /// <summary>
+    /// Creates the default command validation rules for <c>git</c>, <c>find</c>, <c>rg</c>, and <c>sed</c>.
+    /// </summary>
+    public static Dictionary<string, CommandValidationRule> CreateDefaultCommandRules() =>
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["find"] = new CommandValidationRule
+            {
+                BlockedFlags = ["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"]
+            },
+            ["rg"] = new CommandValidationRule
+            {
+                BlockedFlags = ["--pre", "--pre-glob", "--hostname-bin"]
+            },
+            ["sed"] = new CommandValidationRule
+            {
+                BlockedFlags = ["-i*", "--in-place"]
+            },
+            ["git"] = new CommandValidationRule
+            {
+                AllowedSubcommands =
+                [
+                    "status", "log", "diff", "show", "blame", "ls-files", "grep", "rev-parse",
+                    "branch", "tag", "ls-tree", "describe", "shortlog", "remote", "cat-file", "check-ref-format"
+                ],
+                FlagsWithArgs = ["-C", "--work-tree"],
+                BlockedFlags =
+                [
+                    "-c*", "--config-env", "--exec-path", "--upload-pack", "--paginate", "-p",
+                    "--output", "--ext-diff*", "--git-dir", "--namespace", "--super-prefix", "--bare"
+                ],
+                NestedSubcommands =
+                {
+                    ["branch"] = new CommandValidationRule
+                    {
+                        AllowPositionalArguments = false,
+                        FlagsWithArgs = ["-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"],
+                        BlockedFlags =
+                        [
+                            "-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy",
+                            "-f", "--force", "-u*", "--set-upstream*", "--unset-upstream", "--edit-description",
+                            "-t*", "--track*", "--create-reflog", "--no-create-reflog"
+                        ]
+                    },
+                    ["tag"] = new CommandValidationRule
+                    {
+                        AllowPositionalArguments = false,
+                        FlagsWithArgs = ["-l", "--list", "-v", "--verify", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"],
+                        BlockedFlags =
+                        [
+                            "-d", "-D", "--delete", "-a", "--annotate", "--no-annotate", "-s", "--sign", "--no-sign",
+                            "-f", "--force", "-u*", "--local-user", "-m*", "--message", "-F*", "--file",
+                            "-e", "--edit", "--no-edit", "--trailer", "--no-trailer", "--cleanup", "--no-cleanup",
+                            "--create-reflog", "--no-create-reflog"
+                        ]
+                    },
+                    ["remote"] = new CommandValidationRule
+                    {
+                        AllowNoSubcommand = true,
+                        AllowedSubcommands = ["show", "get-url"]
+                    },
+                    ["grep"] = new CommandValidationRule
+                    {
+                        BlockedFlags = ["-O*", "--open-files-in-pager"]
+                    }
+                }
+            }
+        };
 }
 
 /// <summary>
@@ -104,8 +257,8 @@ public class ReadOnlyCommandValidator
             return unquotedCheck;
         }
 
-        // Fast path for single commands without pipes, semicolons, or boolean chaining
-        if (commandLine.IndexOfAny(['|', ';', '&']) < 0)
+        // Fast path for single commands without pipes, semicolons, newlines, or boolean chaining
+        if (commandLine.IndexOfAny(['|', ';', '&', '\n', '\r']) < 0)
         {
             var trimmed = commandLine.Trim();
             if (string.IsNullOrEmpty(trimmed))
@@ -234,10 +387,15 @@ public class ReadOnlyCommandValidator
                     continue;
                 }
 
-                // Check variable expansion in double quotes or unquoted
-                if ((inDoubleQuote || !inSingleQuote) && c == '$')
+                // Check variable expansion and backtick subshells in double quotes or unquoted
+                if (inDoubleQuote || !inSingleQuote)
                 {
-                    if (i + 1 < command.Length)
+                    if (_options.BlockSubshells && c == '`')
+                    {
+                        return new CommandValidationResult(false, "Subshell execution ('`') is not permitted in read-only mode.", command);
+                    }
+
+                    if (c == '$' && i + 1 < command.Length)
                     {
                         char next = command[i + 1];
                         if (next == '(')
@@ -247,7 +405,11 @@ public class ReadOnlyCommandValidator
                                 return new CommandValidationResult(false, "Subshell execution ('$(') is not permitted in read-only mode.", command);
                             }
                         }
-                        else if (char.IsLetter(next) || next == '_' || next == '{')
+                        else if (!inDoubleQuote && (next == '\'' || next == '"'))
+                        {
+                            return new CommandValidationResult(false, "Shell dollar-quoting (\"$'...'\" or '$\"...\"') is not permitted in read-only mode.", command);
+                        }
+                        else if (char.IsLetterOrDigit(next) || next is '_' or '{' or '@' or '*' or '#' or '?' or '-' or '$' or '!')
                         {
                             return new CommandValidationResult(false, "Environment variable expansion ('$' or '${') is not permitted in read-only mode.", command);
                         }
@@ -257,6 +419,19 @@ public class ReadOnlyCommandValidator
                 // Outside quotes
                 if (!inSingleQuote && !inDoubleQuote)
                 {
+                    if (_options.BlockSubshells)
+                    {
+                        if ((c == '<' || c == '>') && i + 1 < command.Length && command[i + 1] == '(')
+                        {
+                            return new CommandValidationResult(false, $"Process substitution ('{c}(') is not permitted in read-only mode.", command);
+                        }
+
+                        if (c == '(' || c == ')')
+                        {
+                            return new CommandValidationResult(false, $"Subshell grouping ('{c}') is not permitted in read-only mode.", command);
+                        }
+                    }
+
                     if (_options.BlockRedirection)
                     {
                         if (c == '>')
@@ -270,30 +445,11 @@ public class ReadOnlyCommandValidator
                         }
                         if (c == '<')
                         {
-                            if (i + 1 < command.Length && command[i + 1] == '(')
-                            {
-                                if (_options.BlockSubshells)
-                                {
-                                    return new CommandValidationResult(false, "Process substitution ('<(') is not permitted in read-only mode.", command);
-                                }
-                            }
                             if (i + 1 < command.Length && command[i + 1] == '<')
                             {
                                 return new CommandValidationResult(false, "Here-doc ('<<') is not permitted in read-only mode.", command);
                             }
                             return new CommandValidationResult(false, "Input redirection ('<') is not permitted in read-only mode.", command);
-                        }
-                    }
-
-                    if (_options.BlockSubshells)
-                    {
-                        if (c == '`')
-                        {
-                            return new CommandValidationResult(false, "Subshell execution ('`') is not permitted in read-only mode.", command);
-                        }
-                        if (c == '>' && i + 1 < command.Length && command[i + 1] == '(')
-                        {
-                            return new CommandValidationResult(false, "Process substitution ('>(') is not permitted in read-only mode.", command);
                         }
                     }
 
@@ -348,7 +504,7 @@ public class ReadOnlyCommandValidator
                                 return new CommandValidationResult(false, $"PowerShell subexpression ('{c}(') is not permitted in read-only mode.", command);
                             }
                         }
-                        else if (char.IsLetter(next) || next == '_' || next == '{')
+                        else if (char.IsLetterOrDigit(next) || next is '_' or '{' or '?' or '^' or '$' or '`')
                         {
                             return new CommandValidationResult(false, $"PowerShell variable expansion ('{c}') is not permitted in read-only mode.", command);
                         }
@@ -360,6 +516,16 @@ public class ReadOnlyCommandValidator
                     if (c == '&')
                     {
                         return new CommandValidationResult(false, "PowerShell call operator ('&') is not permitted in read-only mode.", command);
+                    }
+
+                    if (_options.BlockSubshells && (c == '(' || c == ')'))
+                    {
+                        return new CommandValidationResult(false, $"PowerShell parenthetical expression ('{c}') is not permitted in read-only mode.", command);
+                    }
+
+                    if (c == '{' || c == '}')
+                    {
+                        return new CommandValidationResult(false, $"PowerShell script block ('{c}') is not permitted in read-only mode.", command);
                     }
 
                     if (_options.BlockRedirection && c == '>')
@@ -468,9 +634,13 @@ public class ReadOnlyCommandValidator
                     segments.Add(command.Substring(start, i - start));
                     start = i + 1;
                 }
-                else if (c == '\n')
+                else if (c == '\r' || c == '\n')
                 {
                     segments.Add(command.Substring(start, i - start));
+                    if (c == '\r' && i + 1 < command.Length && command[i + 1] == '\n')
+                    {
+                        i++;
+                    }
                     start = i + 1;
                 }
             }
@@ -554,8 +724,13 @@ public class ReadOnlyCommandValidator
         if (rawCmd.Contains('/') || rawCmd.Contains('\\'))
         {
             var clean = rawCmd.Replace('\\', '/');
-            if (!clean.StartsWith("/bin/", StringComparison.Ordinal) &&
-                !clean.StartsWith("/usr/bin/", StringComparison.Ordinal))
+            int prefixLen = clean.StartsWith("/bin/", StringComparison.Ordinal) ? "/bin/".Length
+                : clean.StartsWith("/usr/bin/", StringComparison.Ordinal) ? "/usr/bin/".Length
+                : -1;
+
+            if (prefixLen < 0 ||
+                clean.IndexOf('/', prefixLen) >= 0 ||
+                clean.AsSpan(prefixLen) is "" or "." or "..")
             {
                 return new CommandValidationResult(
                     false,
@@ -574,110 +749,9 @@ public class ReadOnlyCommandValidator
                 rawSegment);
         }
 
-        if (string.Equals(binary, "find", StringComparison.OrdinalIgnoreCase))
+        if (_options.CommandRules.TryGetValue(binary, out var rule))
         {
-            for (int i = 1; i < tokens.Count; i++)
-            {
-                var arg = tokens[i];
-                if (arg is "-exec" or "-execdir" or "-ok" or "-okdir" or "-delete" or "-fprint" or "-fprint0" or "-fprintf" or "-fls")
-                {
-                    return new CommandValidationResult(false, $"Dangerous find flag '{arg}' is not permitted.", rawSegment);
-                }
-            }
-        }
-        else if (string.Equals(binary, "rg", StringComparison.OrdinalIgnoreCase))
-        {
-            for (int i = 1; i < tokens.Count; i++)
-            {
-                var arg = tokens[i];
-                if (arg is "--pre" or "--hostname-bin" || arg.StartsWith("--pre=", StringComparison.Ordinal) || arg.StartsWith("--pre-glob=", StringComparison.Ordinal))
-                {
-                    return new CommandValidationResult(false, $"Dangerous rg flag '{arg}' is not permitted.", rawSegment);
-                }
-            }
-        }
-        else if (string.Equals(binary, "sed", StringComparison.OrdinalIgnoreCase))
-        {
-            for (int i = 1; i < tokens.Count; i++)
-            {
-                var arg = tokens[i];
-                if (arg is "-i" or "--in-place" || arg.StartsWith("-i", StringComparison.Ordinal) || arg.StartsWith("--in-place=", StringComparison.Ordinal))
-                {
-                    return new CommandValidationResult(false, $"Mutating sed in-place flag '{arg}' is not permitted.", rawSegment);
-                }
-            }
-        }
-        else if (string.Equals(binary, "git", StringComparison.OrdinalIgnoreCase))
-        {
-            return ValidateGitCommand(rawSegment, tokens);
-        }
-
-        return new CommandValidationResult(true);
-    }
-
-    private CommandValidationResult ValidateGitCommand(string rawSegment, List<string> tokens)
-    {
-        int i = 1;
-        while (i < tokens.Count)
-        {
-            var token = tokens[i];
-            if (token.StartsWith("-c", StringComparison.Ordinal) ||
-                token.StartsWith("--config-env", StringComparison.Ordinal) ||
-                token.StartsWith("--exec-path", StringComparison.Ordinal) ||
-                token.StartsWith("--upload-pack", StringComparison.Ordinal) ||
-                token is "--paginate")
-            {
-                return new CommandValidationResult(false, $"Dangerous git global flag '{token}' is not permitted.", rawSegment);
-            }
-
-            if (token is "-C" or "--work-tree")
-            {
-                i += 2;
-                continue;
-            }
-
-            if (token.StartsWith("-"))
-            {
-                i++;
-                continue;
-            }
-
-            break;
-        }
-
-        if (i >= tokens.Count)
-        {
-            // e.g. "git --version"
-            return new CommandValidationResult(true);
-        }
-
-        var subcommand = tokens[i];
-        if (!_options.AllowedGitSubcommands.Contains(subcommand))
-        {
-            return new CommandValidationResult(
-                false,
-                $"Git subcommand '{subcommand}' is not permitted in read-only mode. Allowed subcommands: {string.Join(", ", _options.AllowedGitSubcommands)}.",
-                rawSegment);
-        }
-
-        // Subcommand-specific option validation
-        for (int j = i + 1; j < tokens.Count; j++)
-        {
-            var arg = tokens[j];
-            if (arg is "--output" || arg.StartsWith("--output=", StringComparison.Ordinal))
-            {
-                return new CommandValidationResult(false, $"Git '{subcommand}' option '{arg}' writes to a file and is prohibited.", rawSegment);
-            }
-            if (arg is "--ext-diff" || arg.StartsWith("--ext-diff", StringComparison.Ordinal))
-            {
-                return new CommandValidationResult(false, $"Git '{subcommand}' option '{arg}' executes external binaries and is prohibited.", rawSegment);
-            }
-            if (subcommand == "grep" &&
-                (arg.StartsWith("--open-files-in-pager", StringComparison.Ordinal) ||
-                 (arg.StartsWith("-O", StringComparison.Ordinal) && !arg.StartsWith("--", StringComparison.Ordinal))))
-            {
-                return new CommandValidationResult(false, $"Git '{subcommand}' option '{arg}' executes an external pager and is prohibited.", rawSegment);
-            }
+            return ValidateCommandRule(rawSegment, binary, tokens, 1, rule, null);
         }
 
         return new CommandValidationResult(true);
@@ -733,7 +807,274 @@ public class ReadOnlyCommandValidator
             }
         }
 
+        if (_options.CommandRules.TryGetValue(cmdlet, out var rule))
+        {
+            return ValidateCommandRule(rawSegment, cmdlet, tokens, 1, rule, null);
+        }
+
         return new CommandValidationResult(true);
+    }
+
+    private static CommandValidationResult ValidateCommandRule(
+        string rawSegment,
+        string commandPath,
+        List<string> tokens,
+        int startIndex,
+        CommandValidationRule rule,
+        HashSet<string>? parentFlagsWithArgs)
+    {
+        bool hasSubcommands = rule.AllowedSubcommands.Count > 0 || rule.NestedSubcommands.Count > 0;
+        if (!hasSubcommands)
+        {
+            for (int j = startIndex; j < tokens.Count; j++)
+            {
+                var arg = tokens[j];
+                if (IsFlagBlocked(arg, rule.BlockedFlags))
+                {
+                    return new CommandValidationResult(
+                        false,
+                        $"Flag '{arg}' is not permitted for '{commandPath}' in read-only mode.",
+                        rawSegment);
+                }
+
+                if (!rule.AllowPositionalArguments)
+                {
+                    if (arg.Length <= 1 || arg[0] != '-' || arg == "--")
+                    {
+                        return new CommandValidationResult(
+                            false,
+                            $"Positional argument '{arg}' is not permitted for '{commandPath}' in read-only mode.",
+                            rawSegment);
+                    }
+
+                    if (rule.FlagsWithArgs.Contains(arg))
+                    {
+                        if (j + 1 < tokens.Count)
+                        {
+                            if (tokens[j + 1][0] == '-')
+                            {
+                                return new CommandValidationResult(
+                                    false,
+                                    $"Flag '{arg}' requires a non-flag argument for '{commandPath}' in read-only mode.",
+                                    rawSegment);
+                            }
+
+                            j++;
+                        }
+                    }
+                }
+            }
+
+            return new CommandValidationResult(true);
+        }
+
+        int i = startIndex;
+        while (i < tokens.Count)
+        {
+            var token = tokens[i];
+            if (token.Length <= 1 || token[0] != '-' || token == "--")
+            {
+                break;
+            }
+
+            if (IsFlagBlocked(token, rule.BlockedFlags))
+            {
+                return new CommandValidationResult(
+                    false,
+                    $"Flag '{token}' is not permitted for '{commandPath}' in read-only mode.",
+                    rawSegment);
+            }
+
+            if (rule.FlagsWithArgs.Contains(token) ||
+                (parentFlagsWithArgs != null && parentFlagsWithArgs.Contains(token)))
+            {
+                if (i + 1 >= tokens.Count || tokens[i + 1][0] == '-')
+                {
+                    return new CommandValidationResult(
+                        false,
+                        $"Flag '{token}' requires a non-flag argument for '{commandPath}' in read-only mode.",
+                        rawSegment);
+                }
+
+                i += 2;
+                continue;
+            }
+
+            i++;
+        }
+
+        if (i >= tokens.Count)
+        {
+            if (rule.AllowNoSubcommand)
+            {
+                return new CommandValidationResult(true);
+            }
+
+            if (startIndex < tokens.Count && AreAllHelpOrVersionFlags(tokens, startIndex))
+            {
+                // e.g. "git --version" or "csnav --help"
+                return new CommandValidationResult(true);
+            }
+
+            var allowedSubcommands = rule.AllowedSubcommands.Count > 0
+                ? string.Join(", ", rule.AllowedSubcommands)
+                : string.Join(", ", rule.NestedSubcommands.Keys);
+            return new CommandValidationResult(
+                false,
+                $"A subcommand is required for '{commandPath}' in read-only mode. Allowed subcommands: {allowedSubcommands}.",
+                rawSegment);
+        }
+
+        var subcommand = tokens[i];
+        bool isAllowed = rule.AllowedSubcommands.Count > 0
+            ? rule.AllowedSubcommands.Contains(subcommand)
+            : rule.NestedSubcommands.ContainsKey(subcommand);
+
+        if (!isAllowed)
+        {
+            var allowedList = rule.AllowedSubcommands.Count > 0
+                ? string.Join(", ", rule.AllowedSubcommands)
+                : string.Join(", ", rule.NestedSubcommands.Keys);
+            return new CommandValidationResult(
+                false,
+                $"Subcommand '{subcommand}' is not permitted for '{commandPath}' in read-only mode. Allowed subcommands: {allowedList}.",
+                rawSegment);
+        }
+
+        var subcommandPath = $"{commandPath} {subcommand}";
+
+        // Check command-level blocked long flags across remaining tokens
+        if (rule.BlockedFlags.Count > 0)
+        {
+            for (int j = i + 1; j < tokens.Count; j++)
+            {
+                var arg = tokens[j];
+                if (IsFlagBlocked(arg, rule.BlockedFlags, includeShortFlags: false))
+                {
+                    return new CommandValidationResult(
+                        false,
+                        $"Flag '{arg}' is not permitted for '{subcommandPath}' in read-only mode.",
+                        rawSegment);
+                }
+            }
+        }
+
+        if (rule.NestedSubcommands.TryGetValue(subcommand, out var nestedRule))
+        {
+            HashSet<string>? effectiveParentFlags;
+            if (rule.FlagsWithArgs.Count > 0 && parentFlagsWithArgs is { Count: > 0 })
+            {
+                effectiveParentFlags = new HashSet<string>(parentFlagsWithArgs, StringComparer.Ordinal);
+                effectiveParentFlags.UnionWith(rule.FlagsWithArgs);
+            }
+            else
+            {
+                effectiveParentFlags = rule.FlagsWithArgs.Count > 0 ? rule.FlagsWithArgs : parentFlagsWithArgs;
+            }
+
+            return ValidateCommandRule(rawSegment, subcommandPath, tokens, i + 1, nestedRule, effectiveParentFlags);
+        }
+
+        return new CommandValidationResult(true);
+    }
+
+    private static bool AreAllHelpOrVersionFlags(List<string> tokens, int startIndex)
+    {
+        for (int i = startIndex; i < tokens.Count; i++)
+        {
+            var token = tokens[i];
+            if (token is not ("-h" or "--help" or "-v" or "--version"))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsFlagBlocked(string token, HashSet<string> blockedFlags, bool includeShortFlags = true)
+    {
+        if (blockedFlags.Count == 0 || token.Length <= 1 || token[0] != '-')
+        {
+            return false;
+        }
+
+        bool isLongFlag = token.StartsWith("--", StringComparison.Ordinal);
+        if (!includeShortFlags && !isLongFlag)
+        {
+            return false;
+        }
+
+        if (blockedFlags.Contains(token))
+        {
+            return true;
+        }
+
+        // Check long flag inline assignment (--flag=value)
+        if (isLongFlag)
+        {
+            int eqIdx = token.IndexOf('=');
+            if (eqIdx > 2 && blockedFlags.Contains(token[..eqIdx]))
+            {
+                return true;
+            }
+        }
+
+        // Check wildcard prefix patterns (e.g. "-c*", "-O*", "-i*", "--ext-diff*") and bundled short flags
+        foreach (var pattern in blockedFlags)
+        {
+            if (pattern.Length > 1 && pattern[^1] == '*')
+            {
+                var prefix = pattern.AsSpan(0, pattern.Length - 1);
+                bool isShortPrefix = prefix.Length >= 1 && prefix[0] == '-' && (prefix.Length == 1 || prefix[1] != '-');
+                if (isShortPrefix)
+                {
+                    if (isLongFlag)
+                    {
+                        continue;
+                    }
+
+                    // Bundled short flag with optional inline argument (e.g. "-ni", "-Ei.bak", "-nOsh")
+                    if (prefix.Length == 2 && char.IsLetterOrDigit(prefix[1]) && token.Length > 2)
+                    {
+                        int charIdx = token.AsSpan(1).IndexOf(prefix[1]);
+                        if (charIdx >= 0 && IsAsciiLetterOrDigitSpan(token.AsSpan(1, charIdx)))
+                        {
+                            return true;
+                        }
+                    }
+                }
+
+                if (token.AsSpan().StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+            else if (!isLongFlag && token.Length > 2 && pattern.Length == 2 && pattern[0] == '-' && char.IsLetterOrDigit(pattern[1]))
+            {
+                // Bundled exact short flag (e.g. "-avD" matching "-D", or "-dlv1.0" matching "-d")
+                int charIdx = token.AsSpan(1).IndexOf(pattern[1]);
+                if (charIdx >= 0 && IsAsciiLetterOrDigitSpan(token.AsSpan(1, charIdx)))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsAsciiLetterOrDigitSpan(ReadOnlySpan<char> span)
+    {
+        for (int i = 0; i < span.Length; i++)
+        {
+            if (!char.IsLetterOrDigit(span[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static string NormalizeBinaryName(string raw)
