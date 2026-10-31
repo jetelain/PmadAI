@@ -35,13 +35,13 @@ public class HeuristicTokenEstimator
 
     /// <summary>
     /// Gets a preset fine-tuned for the Qwen model family (Qwen 3.5, Qwen 3.6, Qwen 3.8)
-    /// based on empirical tokenizer calibration (WordFactor=1.36, SymbolFactor=0.66, NonAsciiFactor=0.40, CharFloorFactor=3.8).
+    /// based on empirical tokenizer calibration (WordFactor=1.17, SymbolFactor=0.88, NonAsciiFactor=0.40, CharFloorFactor=3.5).
     /// </summary>
     public static HeuristicTokenEstimator Qwen { get; } = new(
-        wordFactor: 1.36,
-        symbolFactor: 0.66,
+        wordFactor: 1.17,
+        symbolFactor: 0.88,
         nonAsciiFactor: 0.40,
-        charFloorFactor: 3.8);
+        charFloorFactor: 3.5);
 
     /// <summary>
     /// Gets a preset fine-tuned for Google Gemma 4 models (E2B, E4B, 12B, 26B, 31B)

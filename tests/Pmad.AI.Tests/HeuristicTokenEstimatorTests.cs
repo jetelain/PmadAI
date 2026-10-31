@@ -20,10 +20,10 @@ public class HeuristicTokenEstimatorTests
     {
         var qwenEstimator = HeuristicTokenEstimator.Qwen;
         Assert.NotNull(qwenEstimator);
-        Assert.Equal(1.36, qwenEstimator.WordFactor);
-        Assert.Equal(0.66, qwenEstimator.SymbolFactor);
+        Assert.Equal(1.17, qwenEstimator.WordFactor);
+        Assert.Equal(0.88, qwenEstimator.SymbolFactor);
         Assert.Equal(0.40, qwenEstimator.NonAsciiFactor);
-        Assert.Equal(3.8, qwenEstimator.CharFloorFactor);
+        Assert.Equal(3.5, qwenEstimator.CharFloorFactor);
     }
 
     [Fact]
