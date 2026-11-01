@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
+using Pmad.AI.Common;
 using Pmad.AI.Tools;
 
 namespace Pmad.AI.Healing;
@@ -344,7 +345,43 @@ public static partial class ToolCallHealingTransform
             }
         }
 
+        // Last resort: if the payload is still not valid JSON, it is likely truncated (e.g. the model
+        // stopped emitting before the closing ']' or '}', or left a dangling key). Close the open
+        // structure so the payload can be parsed and the tool invoked with the data it did emit.
+        if (IsObjectPayload(s))
+        {
+            try
+            {
+                using var _ = JsonDocument.Parse(s);
+            }
+            catch (JsonException)
+            {
+                var repaired = JsonRepairUtilities.TryRepairTruncatedJson(s);
+                if (repaired != null)
+                {
+                    try
+                    {
+                        using var _ = JsonDocument.Parse(repaired);
+                        logger?.LogInformation("Repaired truncated JSON arguments of tool '{ToolName}'", toolName ?? "unknown");
+                        options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Truncated payload");
+                        s = repaired;
+                    }
+                    catch (JsonException)
+                    {
+                        // Not repairable; leave as-is so ParseArgumentsJson logs its usual warning.
+                    }
+                }
+            }
+        }
+
         return s;
+    }
+
+    private static bool IsObjectPayload(string s)
+    {
+        if (s.Length == 0) return false;
+        var first = s[0];
+        return first == '{' || first == '[';
     }
 
     private static string EscapeControlCharsInStrings(string s)

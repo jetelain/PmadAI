@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
+using Pmad.AI.Common;
 using Pmad.AI.Guardrails;
 using Pmad.AI.Tools;
 
@@ -821,13 +822,13 @@ public class LenientToolDispatcherTests
     [Fact]
     public void CasingHelpers_CorrectlyHandleWhitespaceAndMultipleSeparators()
     {
-        Assert.Equal("wild_tiger", LenientToolDispatcher.ToSnakeCase("wild tiger"));
-        Assert.Equal("wild_tiger", LenientToolDispatcher.ToSnakeCase("wild   tiger"));
-        Assert.Equal("wild_tiger", LenientToolDispatcher.ToSnakeCase("wild  _  tiger"));
-        Assert.Equal("wildTiger", LenientToolDispatcher.ToCamelCase("wild tiger"));
-        Assert.Equal("wildTiger", LenientToolDispatcher.ToCamelCase("wild   tiger"));
-        Assert.Equal("WildTiger", LenientToolDispatcher.ToPascalCase("wild tiger"));
-        Assert.Equal("WildTiger", LenientToolDispatcher.ToPascalCase("wild   tiger"));
+        Assert.Equal("wild_tiger", StringCaseConverter.ToSnakeCase("wild tiger"));
+        Assert.Equal("wild_tiger", StringCaseConverter.ToSnakeCase("wild   tiger"));
+        Assert.Equal("wild_tiger", StringCaseConverter.ToSnakeCase("wild  _  tiger"));
+        Assert.Equal("wildTiger", StringCaseConverter.ToCamelCase("wild tiger"));
+        Assert.Equal("wildTiger", StringCaseConverter.ToCamelCase("wild   tiger"));
+        Assert.Equal("WildTiger", StringCaseConverter.ToPascalCase("wild tiger"));
+        Assert.Equal("WildTiger", StringCaseConverter.ToPascalCase("wild   tiger"));
     }
 
     [Fact]
