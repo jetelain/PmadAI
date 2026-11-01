@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Pmad.AI.Guardrails;
 
 namespace Pmad.AI.Tests;
@@ -667,6 +668,56 @@ public class ReadOnlyCommandValidatorTests
         // Both --env (level 1) and --region (level 2) should be recognized as taking arguments at level 3
         Assert.True(validator.ValidateCommand("mycli cloud cluster --env prod --region eu-west-1 list").IsAllowed);
         Assert.False(validator.ValidateCommand("mycli cloud cluster --env list --region describe delete").IsAllowed);
+    }
+
+    [Theory]
+    [InlineData("mdfetch https://example.com", true)]
+    [InlineData("mdfetch https://example.com/docs/guide", true)]
+    [InlineData("mdfetch \"https://example.com/search?q=test&lang=en\"", true)]
+    [InlineData("mdfetch 'http://example.org/path'", true)]
+    [InlineData("mdfetch", false)]
+    [InlineData("mdfetch \"\"", false)]
+    [InlineData("mdfetch https://example.com https://example.org", false)]
+    [InlineData("mdfetch \"https://example.com https://example.org\"", false)]
+    [InlineData("mdfetch https://example.com \"\"", false)]
+    [InlineData("mdfetch -o output.md https://example.com", false)]
+    [InlineData("mdfetch https://example.com -o output.md", false)]
+    [InlineData("mdfetch file:///etc/passwd", false)]
+    public void ValidateCommand_ArgumentsRegex_EnforcesSingleUrlForMdfetch(string command, bool expectedAllowed)
+    {
+        var options = new ReadOnlyCommandValidatorOptions();
+        options.AllowedBinaries.Add("mdfetch");
+        options.CommandRules["mdfetch"] = new CommandValidationRule
+        {
+            ArgumentsRegex = new Regex(@"^https?://\S+$", RegexOptions.IgnoreCase)
+        };
+
+        var validator = new ReadOnlyCommandValidator(options);
+        var result = validator.ValidateCommand(command);
+
+        Assert.Equal(expectedAllowed, result.IsAllowed);
+        if (!expectedAllowed)
+        {
+            Assert.Contains("do not match the required pattern", result.Reason, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void ValidateCommand_ArgumentsRegex_OnSubcommandRule_ValidatesSubcommandArguments()
+    {
+        var options = new ReadOnlyCommandValidatorOptions();
+        options.AllowedBinaries.Add("tool");
+        options.CommandRules["tool"] = new CommandValidationRule
+        {
+            AllowedSubcommands = ["fetch"],
+            ArgumentsRegex = new Regex(@"^https?://\S+$", RegexOptions.IgnoreCase)
+        };
+
+        var validator = new ReadOnlyCommandValidator(options);
+
+        Assert.True(validator.ValidateCommand("tool fetch https://example.com/api").IsAllowed);
+        Assert.False(validator.ValidateCommand("tool fetch").IsAllowed);
+        Assert.False(validator.ValidateCommand("tool fetch https://example.com/a https://example.com/b").IsAllowed);
     }
 
     private static ReadOnlyCommandValidator CreateCsNavValidator()

@@ -1,4 +1,6 @@
+using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Pmad.AI.Guardrails;
 
@@ -69,6 +71,13 @@ public class CommandValidationRule
     /// Default: <c>false</c>.
     /// </summary>
     public bool AllowNoSubcommand { get; set; }
+
+    /// <summary>
+    /// Optional regular expression that the space-joined arguments following this command or subcommand must match
+    /// (for example, <c>new Regex(@"^https?://\S+$")</c> to require a single HTTP(S) URL argument for <c>mdfetch</c>).
+    /// Evaluated against the unquoted, single-space-delimited argument tokens at this command level.
+    /// </summary>
+    public Regex? ArgumentsRegex { get; set; }
 }
 
 /// <summary>
@@ -661,6 +670,7 @@ public class ReadOnlyCommandValidator
         bool inSingleQuote = false;
         bool inDoubleQuote = false;
         bool isEscaped = false;
+        bool hasTokenContent = false;
 
         for (int i = 0; i < segment.Length; i++)
         {
@@ -669,6 +679,7 @@ public class ReadOnlyCommandValidator
             if (isEscaped)
             {
                 sb.Append(c);
+                hasTokenContent = true;
                 isEscaped = false;
                 continue;
             }
@@ -683,26 +694,30 @@ public class ReadOnlyCommandValidator
             if (c == '\'' && !inDoubleQuote)
             {
                 inSingleQuote = !inSingleQuote;
+                hasTokenContent = true;
                 continue;
             }
 
             if (c == '"' && !inSingleQuote)
             {
                 inDoubleQuote = !inDoubleQuote;
+                hasTokenContent = true;
                 continue;
             }
 
             if (char.IsWhiteSpace(c) && !inSingleQuote && !inDoubleQuote)
             {
-                if (sb.Length > 0)
+                if (hasTokenContent)
                 {
                     tokens.Add(sb.ToString());
                     sb.Clear();
+                    hasTokenContent = false;
                 }
                 continue;
             }
 
             sb.Append(c);
+            hasTokenContent = true;
         }
 
         if (inSingleQuote || inDoubleQuote)
@@ -710,7 +725,7 @@ public class ReadOnlyCommandValidator
             return (false, tokens, "Command segment contains unclosed quote.");
         }
 
-        if (sb.Length > 0)
+        if (hasTokenContent)
         {
             tokens.Add(sb.ToString());
         }
@@ -851,7 +866,7 @@ public class ReadOnlyCommandValidator
                     {
                         if (j + 1 < tokens.Count)
                         {
-                            if (tokens[j + 1][0] == '-')
+                            if (tokens[j + 1].StartsWith('-'))
                             {
                                 return new CommandValidationResult(
                                     false,
@@ -862,6 +877,18 @@ public class ReadOnlyCommandValidator
                             j++;
                         }
                     }
+                }
+            }
+
+            if (rule.ArgumentsRegex is not null)
+            {
+                var argsText = JoinTokens(tokens, startIndex);
+                if (!rule.ArgumentsRegex.IsMatch(argsText))
+                {
+                    return new CommandValidationResult(
+                        false,
+                        $"Arguments for '{commandPath}' do not match the required pattern '{rule.ArgumentsRegex}'.",
+                        rawSegment);
                 }
             }
 
@@ -888,7 +915,7 @@ public class ReadOnlyCommandValidator
             if (rule.FlagsWithArgs.Contains(token) ||
                 (parentFlagsWithArgs != null && parentFlagsWithArgs.Contains(token)))
             {
-                if (i + 1 >= tokens.Count || tokens[i + 1][0] == '-')
+                if (i + 1 >= tokens.Count || tokens[i + 1].StartsWith('-'))
                 {
                     return new CommandValidationResult(
                         false,
@@ -907,6 +934,18 @@ public class ReadOnlyCommandValidator
         {
             if (rule.AllowNoSubcommand)
             {
+                if (rule.ArgumentsRegex is not null)
+                {
+                    var argsText = JoinTokens(tokens, startIndex);
+                    if (!rule.ArgumentsRegex.IsMatch(argsText))
+                    {
+                        return new CommandValidationResult(
+                            false,
+                            $"Arguments for '{commandPath}' do not match the required pattern '{rule.ArgumentsRegex}'.",
+                            rawSegment);
+                    }
+                }
+
                 return new CommandValidationResult(true);
             }
 
@@ -975,7 +1014,34 @@ public class ReadOnlyCommandValidator
             return ValidateCommandRule(rawSegment, subcommandPath, tokens, i + 1, nestedRule, effectiveParentFlags);
         }
 
+        if (rule.ArgumentsRegex is not null)
+        {
+            var argsText = JoinTokens(tokens, i + 1);
+            if (!rule.ArgumentsRegex.IsMatch(argsText))
+            {
+                return new CommandValidationResult(
+                    false,
+                    $"Arguments for '{subcommandPath}' do not match the required pattern '{rule.ArgumentsRegex}'.",
+                    rawSegment);
+            }
+        }
+
         return new CommandValidationResult(true);
+    }
+
+    private static string JoinTokens(List<string> tokens, int startIndex)
+    {
+        if (startIndex >= tokens.Count)
+        {
+            return string.Empty;
+        }
+
+        if (startIndex == tokens.Count - 1)
+        {
+            return tokens[startIndex];
+        }
+
+        return string.Join(' ', CollectionsMarshal.AsSpan(tokens)[startIndex..]);
     }
 
     private static bool AreAllHelpOrVersionFlags(List<string> tokens, int startIndex)

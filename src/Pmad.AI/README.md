@@ -303,6 +303,7 @@ if (streamCheck.IsLoopDetected)
 Enforce default-deny security policies on shell execution tools:
 
 ```csharp
+using System.Text.RegularExpressions;
 using Pmad.AI.Guardrails;
 
 var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
@@ -310,7 +311,7 @@ var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
     Dialect = ShellDialect.Bash,
     BlockSubshells = true,
     BlockRedirection = true,
-    AllowedBinaries = ["find", "rg", "grep", "cat", "ls", "git", "head", "tail", "wc", "cd", "csnav"],
+    AllowedBinaries = ["find", "rg", "grep", "cat", "ls", "git", "head", "tail", "wc", "cd", "csnav", "mdfetch"],
     CommandRules =
     {
         ["csnav"] = new CommandValidationRule
@@ -324,6 +325,10 @@ var validator = new ReadOnlyCommandValidator(new ReadOnlyCommandValidatorOptions
                     AllowedSubcommands = ["status", "start", "reload"]
                 }
             }
+        },
+        ["mdfetch"] = new CommandValidationRule
+        {
+            ArgumentsRegex = new Regex(@"^https?://\S+$", RegexOptions.IgnoreCase)
         }
     }
 });
