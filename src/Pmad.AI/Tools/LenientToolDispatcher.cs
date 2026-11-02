@@ -31,7 +31,6 @@ public class LenientToolDispatcher
     private readonly object _syncLock = new();
     private ToolDispatcherConfiguration _configuration = new();
     private readonly Dictionary<string, AIFunction> _registeredTools = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, string> _canonicalToolNames = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _aliasToCanonical = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ToolTranslation> _translationsBySource = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Dictionary<string, (string CanonicalName, JsonElement Schema)>> _toolSchemaProperties = new(StringComparer.OrdinalIgnoreCase);
@@ -71,7 +70,6 @@ public class LenientToolDispatcher
 
     private void RebuildLookupTables()
     {
-        _canonicalToolNames.Clear();
         _aliasToCanonical.Clear();
         _translationsBySource.Clear();
 
@@ -90,7 +88,10 @@ public class LenientToolDispatcher
         {
             foreach (var (canonical, mapping) in _configuration.Tools)
             {
-                _canonicalToolNames[canonical] = canonical;
+                // The flat alias -> canonical maps are an internal convention owned by the
+                // dispatcher: the canonical name maps to itself, every alias maps to it.
+                // Self-entries are added here so callers never have to set them up.
+                _aliasToCanonical[canonical] = canonical;
                 if (mapping.Aliases != null)
                 {
                     foreach (var alias in mapping.Aliases)
@@ -101,12 +102,28 @@ public class LenientToolDispatcher
                         }
                     }
                 }
+
+                NormalizeParameterAliasMap(mapping.ParameterAliases);
+                if (mapping.NestedParameterAliases != null)
+                {
+                    foreach (var inner in mapping.NestedParameterAliases.Values)
+                    {
+                        NormalizeParameterAliasMap(inner);
+                    }
+                }
+                if (mapping.ParameterValueAliases != null)
+                {
+                    foreach (var inner in mapping.ParameterValueAliases.Values)
+                    {
+                        NormalizeParameterAliasMap(inner);
+                    }
+                }
             }
         }
 
         foreach (var (toolName, tool) in _registeredTools)
         {
-            _canonicalToolNames[tool.Name] = tool.Name;
+            _aliasToCanonical[tool.Name] = tool.Name;
         }
     }
 
@@ -124,7 +141,7 @@ public class LenientToolDispatcher
 
     private void RegisterToolInternal(AIFunction tool)
     {
-        _canonicalToolNames[tool.Name] = tool.Name;
+        _aliasToCanonical[tool.Name] = tool.Name;
 
         if (_registeredTools.TryGetValue(tool.Name, out var existing))
         {
@@ -152,6 +169,16 @@ public class LenientToolDispatcher
 
     internal bool TryGetCachedSchemaProperties(string toolName, out Dictionary<string, (string CanonicalName, JsonElement Schema)>? properties)
         => _toolSchemaProperties.TryGetValue(toolName, out properties);
+
+    private static void NormalizeParameterAliasMap(Dictionary<string, string> flatAliasMap)
+    {
+        // Enforce the internal "canonical -> canonical" convention: every target value that is
+        // not itself a key must self-map, so callers never have to declare self-entries.
+        foreach (var target in flatAliasMap.Values.ToArray())
+        {
+            flatAliasMap.TryAdd(target, target);
+        }
+    }
 
     private void CacheToolSchema(AIFunction tool)
     {
@@ -215,7 +242,8 @@ public class LenientToolDispatcher
             // Inspect parameter schema properties
             var schemaProps = ExtractSchemaProperties(aiFunction.JsonSchema);
 
-            foreach (var (canonicalParam, aliases) in mapping.ParameterAliases)
+            // Inspect parameter alias map (flat alias -> canonical)
+            foreach (var (alias, canonicalParam) in mapping.ParameterAliases)
             {
                 if (schemaProps != null && !schemaProps.Contains(canonicalParam))
                 {
@@ -226,26 +254,13 @@ public class LenientToolDispatcher
                         $"Configured parameter alias targets non-existent parameter '{canonicalParam}' on tool '{toolName}'."));
                 }
 
-                // Check duplicate aliases within the same tool mapping
-                var aliasSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var alias in aliases)
+                if (string.IsNullOrWhiteSpace(alias) || string.IsNullOrWhiteSpace(canonicalParam))
                 {
-                    if (string.Equals(alias, canonicalParam, StringComparison.OrdinalIgnoreCase))
-                    {
-                        issues.Add(new ToolValidationIssue(
-                            ToolValidationSeverity.Warning,
-                            toolName,
-                            canonicalParam,
-                            $"Parameter alias '{alias}' on tool '{toolName}' is identical to the canonical parameter name."));
-                    }
-                    if (!aliasSet.Add(alias))
-                    {
-                        issues.Add(new ToolValidationIssue(
-                            ToolValidationSeverity.Error,
-                            toolName,
-                            canonicalParam,
-                            $"Duplicate parameter alias '{alias}' declared on tool '{toolName}'."));
-                    }
+                    issues.Add(new ToolValidationIssue(
+                        ToolValidationSeverity.Error,
+                        toolName,
+                        alias,
+                        $"Parameter alias entry with a blank alias or canonical target on tool '{toolName}'."));
                 }
             }
 
@@ -388,61 +403,49 @@ public class LenientToolDispatcher
             Telemetry?.Record(LenientDispatchEventType.CasingNormalized, toolName, canonicalTool, SessionId);
         }
 
-        // 3. Resolve parameter aliases
+        // 3. Resolve parameter aliases via the flat alias -> canonical map (O(1) per argument).
         var canonicalArgs = new AIFunctionArguments();
-        if (mapping != null && mapping.ParameterAliases.Count > 0)
+        var aliased = new List<(string Key, object? Value, string Canonical)>();
+        foreach (var (k, v) in rawArgs)
         {
-            var matchedRawKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var (canonicalParam, aliases) in mapping.ParameterAliases)
+            if (mapping != null && mapping.ParameterAliases.Count > 0 &&
+                mapping.ParameterAliases.TryGetValue(k, out var canonicalParam))
             {
-                // Exact match has highest precedence
-                if (rawArgs.TryGetValue(canonicalParam, out var exactVal))
-                {
-                    canonicalArgs[canonicalParam] = exactVal;
-                    matchedRawKeys.Add(canonicalParam);
-                    continue;
-                }
-
-                // Check case-insensitive match for canonical param
-                if (TryGetValueCaseInsensitive(rawArgs, canonicalParam, out var caseInsensitiveVal, out var matchedKey))
-                {
-                    canonicalArgs[canonicalParam] = caseInsensitiveVal;
-                    matchedRawKeys.Add(matchedKey!);
-                    if (!string.Equals(matchedKey, canonicalParam, StringComparison.Ordinal))
-                    {
-                        Telemetry?.Record(LenientDispatchEventType.CasingNormalized, matchedKey!, canonicalParam, SessionId);
-                    }
-                    continue;
-                }
-
-                // Check aliases
-                foreach (var alias in aliases)
-                {
-                    if (TryGetValueCaseInsensitive(rawArgs, alias, out var aliasVal, out var matchedAliasKey))
-                    {
-                        canonicalArgs[canonicalParam] = aliasVal;
-                        matchedRawKeys.Add(matchedAliasKey!);
-                        Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, matchedAliasKey!, canonicalParam, SessionId);
-                        break;
-                    }
-                }
+                aliased.Add((k, v, canonicalParam));
             }
-
-            // Include any remaining arguments that were not remapped
-            foreach (var (k, v) in rawArgs)
-            {
-                if (!matchedRawKeys.Contains(k))
-                {
-                    canonicalArgs[k] = v;
-                }
-            }
-        }
-        else
-        {
-            foreach (var (k, v) in rawArgs)
+            else
             {
                 canonicalArgs[k] = v;
+            }
+        }
+
+        // Deterministic precedence: when the model emits the canonical key and one or more of
+        // its aliases for the same parameter, the value supplied under the exact canonical key wins.
+        aliased.Sort(static (a, b) =>
+            (string.Equals(a.Key, a.Canonical, StringComparison.Ordinal) ? 0 : 1)
+                .CompareTo(string.Equals(b.Key, b.Canonical, StringComparison.Ordinal) ? 0 : 1));
+
+        foreach (var (key, value, canonicalParam) in aliased)
+        {
+            // First-wins after sorting: the exact canonical key (if present) takes precedence
+            // over any of its aliases; losing duplicates are dropped silently.
+            if (canonicalArgs.ContainsKey(canonicalParam))
+            {
+                continue;
+            }
+
+            canonicalArgs[canonicalParam] = value;
+            if (!string.Equals(canonicalParam, key, StringComparison.Ordinal))
+            {
+                if (string.Equals(canonicalParam, key, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(ToSnakeCase(canonicalParam), ToSnakeCase(key), StringComparison.OrdinalIgnoreCase))
+                {
+                    Telemetry?.Record(LenientDispatchEventType.CasingNormalized, key, canonicalParam, SessionId);
+                }
+                else
+                {
+                    Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, key, canonicalParam, SessionId);
+                }
             }
         }
 
@@ -591,12 +594,14 @@ public class LenientToolDispatcher
             object? val = null;
             if (!TryGetValueCaseInsensitive(rawArgs, paramName, out val))
             {
-                if (_configuration.Tools.TryGetValue(translation.SourceTool, out var sourceMapping) &&
-                    sourceMapping.ParameterAliases.TryGetValue(paramName, out var pAliases))
+                // Resolve via the flat parameter alias map: find every alias whose target is
+                // the placeholder parameter and probe the raw arguments (case-insensitively).
+                if (_configuration.Tools.TryGetValue(translation.SourceTool, out var sourceMapping))
                 {
-                    foreach (var alias in pAliases)
+                    foreach (var (alias, target) in sourceMapping.ParameterAliases)
                     {
-                        if (TryGetValueCaseInsensitive(rawArgs, alias, out val))
+                        if (string.Equals(target, paramName, StringComparison.OrdinalIgnoreCase) &&
+                            TryGetValueCaseInsensitive(rawArgs, alias, out val))
                         {
                             break;
                         }
@@ -741,57 +746,19 @@ public class LenientToolDispatcher
     {
         if (_registeredTools.TryGetValue(toolName, out var registeredTool))
         {
-            var canonical = registeredTool.Name;
-            _configuration.Tools.TryGetValue(canonical, out var mapping);
-            if (mapping == null && _aliasToCanonical.TryGetValue(canonical, out var aliasedConfigCanonical))
-            {
-                _configuration.Tools.TryGetValue(aliasedConfigCanonical, out mapping);
-            }
-            return (canonical, mapping, false);
+            _configuration.Tools.TryGetValue(registeredTool.Name, out var mapping);
+            return (registeredTool.Name, mapping, false);
         }
-
-        if (_canonicalToolNames.TryGetValue(toolName, out var configuredCanonical))
+        if (_aliasToCanonical.TryGetValue(toolName, out var configuredCanonical))
         {
+            var isAlias = !string.Equals(configuredCanonical, toolName, StringComparison.OrdinalIgnoreCase);
             _configuration.Tools.TryGetValue(configuredCanonical, out var mapping);
             if (_registeredTools.TryGetValue(configuredCanonical, out var rt))
             {
-                return (rt.Name, mapping, false);
+                return (rt.Name, mapping, isAlias);
             }
-            if (mapping != null)
-            {
-                foreach (var alias in mapping.Aliases)
-                {
-                    if (_registeredTools.TryGetValue(alias, out var aliasTool))
-                    {
-                        return (aliasTool.Name, mapping, false);
-                    }
-                }
-            }
-            return (configuredCanonical, mapping, false);
+            return (configuredCanonical, mapping, isAlias);
         }
-
-        if (_aliasToCanonical.TryGetValue(toolName, out var canonicalAlias))
-        {
-            _configuration.Tools.TryGetValue(canonicalAlias, out var mapping);
-            string targetTool = canonicalAlias;
-            if (_registeredTools.TryGetValue(canonicalAlias, out var rt))
-            {
-                targetTool = rt.Name;
-            }
-            else if (mapping != null)
-            {
-                foreach (var alias in mapping.Aliases)
-                {
-                    if (_registeredTools.TryGetValue(alias, out var aliasTool))
-                    {
-                        targetTool = aliasTool.Name;
-                        break;
-                    }
-                }
-            }
-            return (targetTool, mapping, true);
-        }
-
         return (toolName, null, false);
     }
 
@@ -1430,13 +1397,10 @@ public class LenientToolDispatcher
                 var nestedPath = canonicalParamName + "[]";
                 if (mapping.NestedParameterAliases.TryGetValue(nestedPath, out var nestedAliases))
                 {
-                    foreach (var (canonProp, aliases) in nestedAliases)
+                    foreach (var (alias, target) in nestedAliases)
                     {
-                        itemPropNames.Add(canonProp);
-                        foreach (var alias in aliases)
-                        {
-                            itemPropNames.Add(alias);
-                        }
+                        itemPropNames.Add(alias);
+                        itemPropNames.Add(target);
                     }
                 }
             }
@@ -1658,16 +1622,10 @@ public class LenientToolDispatcher
                 if (targetItemPropName == null && mapping?.NestedParameterAliases != null)
                 {
                     var nestedPath = canonicalParamName + "[]";
-                    if (mapping.NestedParameterAliases.TryGetValue(nestedPath, out var nestedAliases))
+                    if (mapping.NestedParameterAliases.TryGetValue(nestedPath, out var nestedAliases) &&
+                        nestedAliases.TryGetValue(rootKey, out var aliasedTarget))
                     {
-                        foreach (var (canonProp, aliases) in nestedAliases)
-                        {
-                            if (aliases.Contains(rootKey))
-                            {
-                                targetItemPropName = canonProp;
-                                break;
-                            }
-                        }
+                        targetItemPropName = aliasedTarget;
                     }
                 }
 
@@ -1704,12 +1662,12 @@ public class LenientToolDispatcher
                                           (itemDict.TryGetValue(ToPascalCase(targetItemPropName), out var v4) && v4 != null);
 
                         if (!alreadyHas && mapping?.NestedParameterAliases != null &&
-                            mapping.NestedParameterAliases.TryGetValue(canonicalParamName + "[]", out var nestedAliases) &&
-                            nestedAliases.TryGetValue(targetItemPropName, out var aliases))
+                            mapping.NestedParameterAliases.TryGetValue(canonicalParamName + "[]", out var nestedAliases))
                         {
-                            foreach (var a in aliases)
+                            foreach (var (alias, target) in nestedAliases)
                             {
-                                if (itemDict.TryGetValue(a, out var va) && va != null)
+                                if (string.Equals(target, targetItemPropName, StringComparison.OrdinalIgnoreCase) &&
+                                    itemDict.TryGetValue(alias, out var va) && va != null)
                                 {
                                     alreadyHas = true;
                                     break;

@@ -15,8 +15,11 @@ public class ToolMapping
     /// <summary>Alternative names by which the tool can be invoked.</summary>
     public HashSet<string> Aliases { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Parameter aliases mapping canonical parameter names to acceptable alternative names.</summary>
-    public Dictionary<string, HashSet<string>> ParameterAliases { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// Parameter aliases as a flat alias-to-canonical map (each alias, and the canonical name itself,
+    /// maps to the canonical parameter name). Enables O(1) resolution of any spelling a model may emit.
+    /// </summary>
+    public Dictionary<string, string> ParameterAliases { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Computed parameter factories evaluated when canonical parameters are missing.
@@ -25,15 +28,17 @@ public class ToolMapping
     public Dictionary<string, ParameterComputer> ComputedParameters { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Explicit nested property alias mappings (e.g. "edits[]" -> { "oldText": ["old_text", "search"] }).
+    /// Explicit nested property alias mappings (e.g. "edits[]" -> { "old_text" -> "oldText", "search" -> "oldText" }).
+    /// Each path maps to a flat alias-to-canonical dictionary.
     /// </summary>
-    public Dictionary<string, Dictionary<string, HashSet<string>>> NestedParameterAliases { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, Dictionary<string, string>> NestedParameterAliases { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Explicit parameter value aliases mapping parameter paths to canonical values and acceptable alternative synonyms/codes
-    /// (e.g. "species" -> { "wild tiger": ["wild tigers", "tiger", "tigers"] } or "resource_type" -> { "MemoryMb": ["memory", "ram"] }).
+    /// Explicit parameter value aliases mapping parameter paths to a flat alias-to-canonical value dictionary
+    /// (e.g. "species" -> { "wild tiger" -> "wild tiger", "tiger" -> "wild tiger", "tigers" -> "wild tiger" }
+    /// or "resource_type" -> { "MemoryMb" -> "MemoryMb", "memory" -> "MemoryMb", "ram" -> "MemoryMb" }).
     /// </summary>
-    public Dictionary<string, Dictionary<string, HashSet<string>>> ParameterValueAliases { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, Dictionary<string, string>> ParameterValueAliases { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Explicit list of root-level parameters that should be propagated to nested collection items.
@@ -61,16 +66,16 @@ public class ToolMapping
         {
             foreach (var alias in aliases)
             {
-                Aliases.Add(alias);
+                if (!string.IsNullOrWhiteSpace(alias))
+                {
+                    Aliases.Add(alias.Trim());
+                }
             }
         }
 
         if (parameterAliases != null)
         {
-            foreach (var (param, pAliases) in parameterAliases)
-            {
-                ParameterAliases[param] = new HashSet<string>(pAliases, StringComparer.OrdinalIgnoreCase);
-            }
+            ParameterAliases = ToFlatAliasMap(parameterAliases);
         }
 
         if (computedParameters != null)
@@ -85,12 +90,7 @@ public class ToolMapping
         {
             foreach (var (path, propDict) in nestedParameterAliases)
             {
-                var inner = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
-                foreach (var (prop, pAliases) in propDict)
-                {
-                    inner[prop] = new HashSet<string>(pAliases, StringComparer.OrdinalIgnoreCase);
-                }
-                NestedParameterAliases[path] = inner;
+                NestedParameterAliases[path] = ToFlatAliasMap(propDict);
             }
         }
 
@@ -98,12 +98,7 @@ public class ToolMapping
         {
             foreach (var (path, valDict) in parameterValueAliases)
             {
-                var inner = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
-                foreach (var (canonicalVal, vAliases) in valDict)
-                {
-                    inner[canonicalVal] = new HashSet<string>(vAliases, StringComparer.OrdinalIgnoreCase);
-                }
-                ParameterValueAliases[path] = inner;
+                ParameterValueAliases[path] = ToFlatAliasMap(valDict);
             }
         }
 
@@ -153,7 +148,9 @@ public class ToolMapping
 
     /// <summary>
     /// Registers alias names for a nested property of a collection item (e.g. mapping "optionsJson" -> "options").
-    /// The alias is registered in both directions so it can be resolved regardless of which spelling the model emits.
+    /// Each alias (plus its casing variants) maps to the canonical name, so resolution works regardless
+    /// of the spelling the model emits or the schema declares. The canonical -> canonical self-entry is
+    /// an internal convention added by the dispatcher at configure time.
     /// </summary>
     public ToolMapping AddNestedParameterAlias(string paramPath, string canonicalName, params string[] aliases)
     {
@@ -161,49 +158,35 @@ public class ToolMapping
         ArgumentException.ThrowIfNullOrWhiteSpace(canonicalName);
 
         var path = paramPath.Trim();
+        var canonical = canonicalName.Trim();
         if (!NestedParameterAliases.TryGetValue(path, out var inner))
         {
-            inner = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            inner = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             NestedParameterAliases[path] = inner;
         }
 
-        void AddSet(string key, IEnumerable<string> names)
+        void Add(string name, string target)
         {
-            if (!inner.TryGetValue(key, out var set))
+            if (string.IsNullOrWhiteSpace(name))
             {
-                set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                inner[key] = set;
+                return;
             }
-            foreach (var n in names)
-            {
-                if (!string.IsNullOrWhiteSpace(n))
-                {
-                    var trimmed = n.Trim();
-                    set.Add(trimmed);
-                    set.Add(StringCaseConverter.ToSnakeCase(trimmed));
-                    set.Add(StringCaseConverter.ToCamelCase(trimmed));
-                    set.Add(StringCaseConverter.ToPascalCase(trimmed));
-                }
-            }
+
+            var trimmed = name.Trim();
+            inner[trimmed] = target;
+            inner[StringCaseConverter.ToSnakeCase(trimmed)] = target;
+            inner[StringCaseConverter.ToCamelCase(trimmed)] = target;
+            inner[StringCaseConverter.ToPascalCase(trimmed)] = target;
         }
 
-        // Register canonicalName (and its casing variants) -> aliases so that whether the schema property
-        // uses canonicalName or an alias, any spelling/casing of the aliases resolves to canonicalName.
-        AddSet(canonicalName, aliases);
-        AddSet(StringCaseConverter.ToSnakeCase(canonicalName), aliases);
-        AddSet(StringCaseConverter.ToCamelCase(canonicalName), aliases);
-        AddSet(StringCaseConverter.ToPascalCase(canonicalName), aliases);
+        // Canonical name (and its casing variants) maps to itself: this self-entry is added
+        // automatically, callers never have to declare it.
+        Add(canonical, canonical);
 
+        // Every alias (and its casing variants) maps to the canonical name.
         foreach (var alias in aliases)
         {
-            if (!string.IsNullOrWhiteSpace(alias))
-            {
-                var trimmedAlias = alias.Trim();
-                AddSet(trimmedAlias, [canonicalName]);
-                AddSet(StringCaseConverter.ToSnakeCase(trimmedAlias), [canonicalName]);
-                AddSet(StringCaseConverter.ToCamelCase(trimmedAlias), [canonicalName]);
-                AddSet(StringCaseConverter.ToPascalCase(trimmedAlias), [canonicalName]);
-            }
+            Add(alias, canonical);
         }
 
         return this;
@@ -219,21 +202,21 @@ public class ToolMapping
 
         if (!ParameterValueAliases.TryGetValue(paramPath, out var valDict))
         {
-            valDict = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            valDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             ParameterValueAliases[paramPath] = valDict;
         }
 
-        if (!valDict.TryGetValue(canonicalValue, out var set))
-        {
-            set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            valDict[canonicalValue] = set;
-        }
+        var canonical = canonicalValue.Trim();
+
+        // Canonical value maps to itself: this self-entry is added automatically,
+        // callers never have to declare it.
+        valDict[canonical] = canonical;
 
         foreach (var a in aliases)
         {
             if (!string.IsNullOrWhiteSpace(a))
             {
-                set.Add(a.Trim());
+                valDict[a.Trim()] = canonical;
             }
         }
 
@@ -309,102 +292,42 @@ public class ToolMapping
     private bool FindValueAlias(string path, string rawValue, out string canonicalValue)
     {
         canonicalValue = rawValue;
-        if (!ParameterValueAliases.TryGetValue(path, out var valMap))
+        if (!ParameterValueAliases.TryGetValue(path, out var valMap) &&
+            !ParameterValueAliases.TryGetValue(StringCaseConverter.ToSnakeCase(path), out valMap) &&
+            !ParameterValueAliases.TryGetValue(StringCaseConverter.ToCamelCase(path), out valMap) &&
+            !ParameterValueAliases.TryGetValue(StringCaseConverter.ToPascalCase(path), out valMap))
         {
-            var snakePath = StringCaseConverter.ToSnakeCase(path);
-            if (!ParameterValueAliases.TryGetValue(snakePath, out valMap))
-            {
-                var camelPath = StringCaseConverter.ToCamelCase(path);
-                if (!ParameterValueAliases.TryGetValue(camelPath, out valMap))
-                {
-                    var pascalPath = StringCaseConverter.ToPascalCase(path);
-                    if (!ParameterValueAliases.TryGetValue(pascalPath, out valMap))
-                    {
-                        return false;
-                    }
-                }
-            }
+            return false;
         }
 
         // 1. Direct or registered alias match (case-insensitive)
-        foreach (var (canonical, aliases) in valMap)
+        if (valMap.TryGetValue(rawValue, out var target))
         {
-            if (string.Equals(canonical, rawValue, StringComparison.OrdinalIgnoreCase))
-            {
-                canonicalValue = canonical;
-                return true;
-            }
-            if (aliases.Contains(rawValue))
-            {
-                canonicalValue = canonical;
-                return true;
-            }
+            canonicalValue = target;
+            return true;
         }
 
-        // 2. Snake_case match (e.g. "memory_limit" vs "MemoryLimit" or "memoryLimit")
+        // 2. Plural / singular heuristic (e.g. "wild tigers" -> "wild tiger" or "tigers" -> "tiger")
+        var variant = rawValue.EndsWith("s", StringComparison.OrdinalIgnoreCase) && rawValue.Length > 1
+            ? rawValue.Substring(0, rawValue.Length - 1)
+            : rawValue + "s";
+        if (valMap.TryGetValue(variant, out target))
+        {
+            canonicalValue = target;
+            return true;
+        }
+
+        // 3. Snake_case normalization against every registered key
+        // (e.g. raw "memory_mb" matching registered "MemoryMb", or plural "wild_tigers" matching "wild tiger")
         var snakeRaw = StringCaseConverter.ToSnakeCase(rawValue);
-        foreach (var (canonical, aliases) in valMap)
+        var snakeVariant = StringCaseConverter.ToSnakeCase(variant);
+        foreach (var (key, value) in valMap)
         {
-            if (string.Equals(StringCaseConverter.ToSnakeCase(canonical), snakeRaw, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(StringCaseConverter.ToSnakeCase(key), snakeRaw, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(StringCaseConverter.ToSnakeCase(key), snakeVariant, StringComparison.OrdinalIgnoreCase))
             {
-                canonicalValue = canonical;
+                canonicalValue = value;
                 return true;
-            }
-            foreach (var alias in aliases)
-            {
-                if (string.Equals(StringCaseConverter.ToSnakeCase(alias), snakeRaw, StringComparison.OrdinalIgnoreCase))
-                {
-                    canonicalValue = canonical;
-                    return true;
-                }
-            }
-        }
-
-        // 3. Plural / singular heuristic (e.g. "wild tigers" -> "wild tiger" or "tigers" -> "tiger")
-        if (rawValue.EndsWith("s", StringComparison.OrdinalIgnoreCase) && rawValue.Length > 1)
-        {
-            var singular = rawValue.Substring(0, rawValue.Length - 1);
-            var snakeSingular = StringCaseConverter.ToSnakeCase(singular);
-            foreach (var (canonical, aliases) in valMap)
-            {
-                if (string.Equals(canonical, singular, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(StringCaseConverter.ToSnakeCase(canonical), snakeSingular, StringComparison.OrdinalIgnoreCase) ||
-                    aliases.Contains(singular))
-                {
-                    canonicalValue = canonical;
-                    return true;
-                }
-                foreach (var alias in aliases)
-                {
-                    if (string.Equals(StringCaseConverter.ToSnakeCase(alias), snakeSingular, StringComparison.OrdinalIgnoreCase))
-                    {
-                        canonicalValue = canonical;
-                        return true;
-                    }
-                }
-            }
-        }
-        else
-        {
-            var plural = rawValue + "s";
-            var snakePlural = StringCaseConverter.ToSnakeCase(plural);
-            foreach (var (canonical, aliases) in valMap)
-            {
-                if (string.Equals(canonical, plural, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(StringCaseConverter.ToSnakeCase(canonical), snakePlural, StringComparison.OrdinalIgnoreCase) ||
-                    aliases.Contains(plural))
-                {
-                    canonicalValue = canonical;
-                    return true;
-                }
-                foreach (var alias in aliases)
-                {
-                    if (string.Equals(StringCaseConverter.ToSnakeCase(alias), snakePlural, StringComparison.OrdinalIgnoreCase))
-                    {
-                        canonicalValue = canonical;
-                        return true;
-                    }
-                }
             }
         }
 
@@ -446,34 +369,53 @@ public class ToolMapping
 
     private bool FindNestedAlias(string path, string aliasOrKey, out string canonicalName)
     {
-        if (NestedParameterAliases.TryGetValue(path, out var propDict))
+        if (NestedParameterAliases.TryGetValue(path, out var aliasMap))
         {
-            // Prefer exact alias match before key-identity match so bidirectional aliases resolve to their target.
-            foreach (var (canonical, aliases) in propDict)
+            if (aliasMap.TryGetValue(aliasOrKey, out var canonical))
             {
-                if (!string.Equals(canonical, aliasOrKey, StringComparison.OrdinalIgnoreCase) &&
-                    aliases.Contains(aliasOrKey))
-                {
-                    canonicalName = canonical;
-                    return true;
-                }
+                canonicalName = canonical;
+                return true;
             }
 
-            foreach (var (canonical, aliases) in propDict)
+            // Casing-variant fallback (e.g. schema declares "OldText" but the map holds "oldText").
+            var snakeKey = StringCaseConverter.ToSnakeCase(aliasOrKey);
+            if (aliasMap.TryGetValue(snakeKey, out canonical))
             {
-                if (string.Equals(canonical, aliasOrKey, StringComparison.OrdinalIgnoreCase))
-                {
-                    canonicalName = canonical;
-                    return true;
-                }
-                if (aliases.Contains(aliasOrKey))
-                {
-                    canonicalName = canonical;
-                    return true;
-                }
+                canonicalName = canonical;
+                return true;
             }
         }
         canonicalName = aliasOrKey;
         return false;
+    }
+
+    /// <summary>
+    /// Converts a canonical-to-alias collection (as supplied by callers) into the flat alias-to-canonical
+    /// representation: the canonical name automatically maps to itself and every alias maps to it.
+    /// </summary>
+    private static Dictionary<string, string> ToFlatAliasMap(IDictionary<string, IEnumerable<string>> canonicalToAliases)
+    {
+        var flat = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (canonical, aliases) in canonicalToAliases)
+        {
+            if (string.IsNullOrWhiteSpace(canonical))
+            {
+                continue;
+            }
+
+            var trimmed = canonical.Trim();
+            flat[trimmed] = trimmed;
+            if (aliases != null)
+            {
+                foreach (var alias in aliases)
+                {
+                    if (!string.IsNullOrWhiteSpace(alias))
+                    {
+                        flat[alias.Trim()] = trimmed;
+                    }
+                }
+            }
+        }
+        return flat;
     }
 }

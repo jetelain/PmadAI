@@ -210,9 +210,11 @@ dispatcher.Configure(new ToolDispatcherConfiguration
         ["read_file"] = new ToolMapping
         {
             Aliases = ["read", "get_file", "cat"],
-            ParameterAliases = new Dictionary<string, HashSet<string>>
+            ParameterAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["path"] = ["file_path", "filePath", "target"]
+                ["file_path"] = "path",
+                ["filePath"] = "path",
+                ["target"] = "path"
             }
         }
     }

@@ -85,10 +85,10 @@ public static class Program
                 ["search"] = new ToolMapping
                 {
                     Aliases = ["find"],
-                    ParameterAliases = new Dictionary<string, HashSet<string>>
+                    ParameterAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                     {
-                        ["query"] = ["q"],
-                        ["count"] = ["limit"]
+                        ["q"] = "query",
+                        ["limit"] = "count"
                     }
                 }
             }

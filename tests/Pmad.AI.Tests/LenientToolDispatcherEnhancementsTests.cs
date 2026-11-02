@@ -291,40 +291,6 @@ public class LenientToolDispatcherEnhancementsTests
         Assert.Equal("Asked 2: Q1: Pick a DB; Q2: Enable caching", result?.ToString());
     }
 
-    [Fact]
-    public void ToolMapping_MutualAliasResolution_WorksInBothDirections()
-    {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
-        {
-            Tools =
-            {
-                ["run_command"] = new ToolMapping(
-                    aliases: ["bash"],
-                    parameterAliases: new Dictionary<string, IEnumerable<string>> { ["command"] = ["cmd"] }),
-                ["read_file"] = new ToolMapping(
-                    aliases: ["read", "view_file"],
-                    parameterAliases: new Dictionary<string, IEnumerable<string>> { ["path"] = ["filePath"] })
-            }
-        });
-
-        // Developer registers tool as "bash"
-        dispatcher.RegisterTool(AIFunctionFactory.Create((string command) => $"Ran: {command}", "bash"));
-
-        // Model invokes "run_command" with parameter alias "cmd"
-        var d1 = dispatcher.NormalizeCall("run_command", new Dictionary<string, object?> { ["cmd"] = "ls" });
-        Assert.Equal("bash", d1.CanonicalToolName);
-        Assert.Equal("ls", d1.Arguments["command"]);
-
-        // Developer registers tool as "read"
-        dispatcher.RegisterTool(AIFunctionFactory.Create((string path) => $"Read: {path}", "read"));
-
-        // Model invokes "view_file" with parameter alias "filePath"
-        var d2 = dispatcher.NormalizeCall("view_file", new Dictionary<string, object?> { ["filePath"] = "test.txt" });
-        Assert.Equal("read", d2.CanonicalToolName);
-        Assert.Equal("test.txt", d2.Arguments["path"]);
-    }
-
     public record TestBatchTaskItem(string Action, string? Author = null, bool DryRun = false);
     public record TestCustomNoteItem(string Content, int Priority = 0);
     public record TestMultiFieldItem(string Title, string Summary, string Details);

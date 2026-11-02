@@ -210,18 +210,125 @@ public class JsonRepairUtilitiesTests
     }
 
     [Fact]
-    public void AddNestedParameterAlias_SupportsBidirectionalAndCasingLookups()
+    public void ConvertJsonElementToClr_ValuesOutsideIntRange_MapToLong()
     {
-        var mapping = new Pmad.AI.Tools.ToolMapping()
-            .AddNestedParameterAlias("questions[]", "options", "optionsJson", "choices");
+        using var doc = JsonDocument.Parse("{\"big\":3000000000,\"small\":-3000000000,\"pi\":3.14}");
+        var obj = Assert.IsAssignableFrom<Dictionary<string, object?>>(JsonRepairUtilities.ConvertJsonElementToClr(doc.RootElement));
+        Assert.Equal(3000000000L, obj["big"]);
+        Assert.Equal(-3000000000L, obj["small"]);
+        Assert.Equal(3.14, Assert.IsType<double>(obj["pi"]));
+    }
 
-        Assert.True(mapping.TryGetNestedAlias("questions[]", "optionsJson", out var c1));
-        Assert.Equal("options", c1, ignoreCase: true);
+    [Fact]
+    public void ConvertJsonElementToClr_EmptyContainersAndPrimitives()
+    {
+        using var doc = JsonDocument.Parse("{\"o\":{},\"a\":[],\"x\":[true,false,null]}");
+        var obj = Assert.IsAssignableFrom<Dictionary<string, object?>>(JsonRepairUtilities.ConvertJsonElementToClr(doc.RootElement));
+        Assert.Empty((Dictionary<string, object?>)obj["o"]!);
+        Assert.Empty((List<object?>)obj["a"]!);
+        Assert.Equal(new object?[] { true, false, null }, (List<object?>)obj["x"]!);
+    }
 
-        Assert.True(mapping.TryGetNestedAlias("questions[]", "options_json", out var c2));
-        Assert.Equal("options", c2, ignoreCase: true);
+    [Fact]
+    public void TryParseStringifiedJson_TopLevelScalar_ParseDirectly()
+    {
+        Assert.Equal(42, JsonRepairUtilities.TryParseStringifiedJson("42", out var r1));
+        Assert.False(r1);
+        Assert.Equal("hi", JsonRepairUtilities.TryParseStringifiedJson("\"hi\"", out var r2));
+        Assert.False(r2);
+    }
 
-        Assert.True(mapping.TryGetNestedAlias("questions[]", "options", out var rev));
-        Assert.Contains(rev, new[] { "optionsJson", "choices" }, StringComparer.OrdinalIgnoreCase);
+    [Fact]
+    public void TryParseStringifiedJson_ValidJsonWithWhitespace_ParseDirectly()
+    {
+        var parsed = JsonRepairUtilities.TryParseStringifiedJson(" { \"a\" : 1 } ", out var repaired);
+        var dict = Assert.IsAssignableFrom<Dictionary<string, object?>>(parsed);
+        Assert.Equal(1, dict["a"]);
+        Assert.False(repaired);
+    }
+
+    [Fact]
+    public void TryParseStringifiedJson_UnrepairableMalformedJson_ReturnsNull()
+    {
+        // Missing comma: not a truncation the prefix repairer can fix, so no repair is applicable.
+        Assert.Null(JsonRepairUtilities.TryParseStringifiedJson("[1 2]", out var repaired));
+        Assert.False(repaired);
+    }
+
+    [Fact]
+    public void TryRepairTruncatedJson_NonJsonStart_ReturnsNull()
+    {
+        Assert.Null(JsonRepairUtilities.TryRepairTruncatedJson("42"));
+        Assert.Null(JsonRepairUtilities.TryRepairTruncatedJson("\"str\""));
+        Assert.Null(JsonRepairUtilities.TryRepairTruncatedJson("tru"));
+    }
+
+    [Fact]
+    public void TryRepairTruncatedJson_NestedArrayTruncation()
+    {
+        Assert.Equal("[1,[2]]", JsonRepairUtilities.TryRepairTruncatedJson("[1,[2"));
+        Assert.Equal("[[[]]]", JsonRepairUtilities.TryRepairTruncatedJson("[[["));
+    }
+
+    [Fact]
+    public void TryRepairTruncatedJson_KeyMissingColon_DropsKey()
+    {
+        Assert.Equal(
+            "{\"a\":1}",
+            JsonRepairUtilities.TryRepairTruncatedJson("{\"a\":1,\"b\""));
+    }
+
+    [Fact]
+    public void TryRepairTruncatedJson_TrailingCommaIsTrimmed()
+    {
+        Assert.Equal(
+            "{\"a\":1}",
+            JsonRepairUtilities.TryRepairTruncatedJson("{\"a\":1,"));
+    }
+
+    [Theory]
+    [InlineData("{\"k\":\"a\\\\\\",    "{\"k\":\"a\\\\\"}")] // three backslashes: last one dangling, stripped, string closed
+    [InlineData("{\"k\":\"a\\\\u\"",     "{\"k\":\"a\\\\u\"}")] // escaped backslash then 'u': no \\u escape to strip
+    [InlineData("{\"k\":\"a\\\\\\u00", "{\"k\":\"a\\\\\"}")] // escaped backslash + incomplete \\u00: escape stripped
+    [InlineData("{\"k\":\"a\\\\\\\\\"",  "{\"k\":\"a\\\\\\\\\"}")] // four backslashes: all complete, all kept
+    public void TryRepairTruncatedJson_EdgeCaseEscapesInValueString(string input, string expected)
+    {
+        var repaired = JsonRepairUtilities.TryRepairTruncatedJson(input);
+        Assert.Equal(expected, repaired);
+        using var _ = JsonDocument.Parse(repaired!);
+    }
+
+    [Fact]
+    public void TryRepairTruncatedJson_IncompleteUnicodeEscapeAfterEscapedBackslash()
+    {
+        var repaired = JsonRepairUtilities.TryRepairTruncatedJson("{\"k\":\"a\\\\u0");
+        Assert.Equal("{\"k\":\"a\\\\u0\"}", repaired);
+        using var doc = JsonDocument.Parse(repaired!);
+        Assert.Equal("a\\u0", doc.RootElement.GetProperty("k").GetString());
+    }
+
+    [Fact]
+    public void TryRepairTruncatedJson_PartialExponentScalarKeptOrDropped()
+    {
+        Assert.Equal("{\"a\": 1e1}", JsonRepairUtilities.TryRepairTruncatedJson("{\"a\": 1e1"));
+        Assert.Equal("{\"a\": 1}", JsonRepairUtilities.TryRepairTruncatedJson("{\"a\": 1e"));
+    }
+
+    [Fact]
+    public void TryRepairTruncatedJson_DeeplyNestedTruncation()
+    {
+        Assert.Equal(
+            "{\"a\":{\"b\":[{\"c\":1}]}}",
+            JsonRepairUtilities.TryRepairTruncatedJson("{\"a\":{\"b\":[{\"c\":1")); // truncated inside a number
+        Assert.Equal(
+            "{\"a\":{\"b\":[{\"c\":1}]}}",
+            JsonRepairUtilities.TryRepairTruncatedJson("{\"a\":{\"b\":[{\"c\":1}]}"));
+    }
+
+    [Fact]
+    public void TryRepairTruncatedJson_EmptyNestedObjectInArrayIsDropped()
+    {
+        // Cut right after the colon of the only property: the inner object has no completed field, so it is dropped.
+        Assert.Equal("[]", JsonRepairUtilities.TryRepairTruncatedJson("[{\"a\":"));
     }
 }
