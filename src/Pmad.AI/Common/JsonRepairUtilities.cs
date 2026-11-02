@@ -124,11 +124,13 @@ public static class JsonRepairUtilities
 
         var stack = new Stack<char>(8);
         var roles = new Stack<int>(8);
+        var openCuts = new Stack<int>(8); // safeCut before each container was opened
         int safeCut = 0;               // highest index that is a valid truncation point (end of last complete entry)
         bool inString = false;
         bool escaped = false;
         bool pendingStringIsKey = false;
         bool inScalar = false;
+        int scalarStart = -1;
 
         int TopRole() => roles.Count > 0 ? roles.Peek() : -1;
 
@@ -171,6 +173,11 @@ public static class JsonRepairUtilities
                 {
                     safeCut = i;         // cutting just before this char keeps the whole scalar
                     inScalar = false;
+                    if (roles.Count > 0)
+                    {
+                        roles.Pop();
+                        roles.Push(R_AFTER);
+                    }
                 }
                 else
                 {
@@ -187,9 +194,11 @@ public static class JsonRepairUtilities
                     pendingStringIsKey = TopRole() == R_KEY;
                     break;
                 case '{':
+                    openCuts.Push(safeCut);
                     stack.Push('{'); roles.Push(R_KEY); safeCut = i + 1;
                     break;
                 case '[':
+                    openCuts.Push(safeCut);
                     stack.Push('['); roles.Push(R_VALUE); safeCut = i + 1;
                     break;
                 case ':':
@@ -203,12 +212,12 @@ public static class JsonRepairUtilities
                     }
                     break;
                 case '}':
-                    if (stack.Count > 0 && stack.Peek() == '{') { stack.Pop(); roles.Pop(); }
+                    if (stack.Count > 0 && stack.Peek() == '{') { stack.Pop(); roles.Pop(); openCuts.Pop(); }
                     if (roles.Count > 0) { roles.Pop(); roles.Push(R_AFTER); }
                     safeCut = i + 1;
                     break;
                 case ']':
-                    if (stack.Count > 0 && stack.Peek() == '[') { stack.Pop(); roles.Pop(); }
+                    if (stack.Count > 0 && stack.Peek() == '[') { stack.Pop(); roles.Pop(); openCuts.Pop(); }
                     if (roles.Count > 0) { roles.Pop(); roles.Push(R_AFTER); }
                     safeCut = i + 1;
                     break;
@@ -217,6 +226,7 @@ public static class JsonRepairUtilities
                     if (TopRole() == R_VALUE)
                     {
                         inScalar = true;
+                        scalarStart = i;
                     }
                     break;
             }
@@ -228,17 +238,36 @@ public static class JsonRepairUtilities
         }
 
         int cut = json.Length;
+        string? scalarReplacement = null;
+        bool dropEmptyOpenContainers = false;
+
         if (inString)
         {
             // An unterminated string: drop it if it is a dangling key, otherwise keep and close it.
             if (pendingStringIsKey)
             {
                 cut = safeCut;
+                dropEmptyOpenContainers = true;
+            }
+            else
+            {
+                cut = TrimIncompleteStringEscape(json, cut, escaped);
             }
         }
         else if (inScalar)
         {
-            // Truncated inside a scalar: the digits seen so far form a valid value; keep as-is.
+            // Truncated inside a scalar: complete partial true/false/null or repair partial number;
+            // if the scalar cannot be salvaged (e.g. a lone '-' or key-value without digits), drop back to safeCut.
+            if (TryRepairPartialScalar(json.AsSpan(scalarStart, json.Length - scalarStart), out var repairedScalar))
+            {
+                cut = scalarStart;
+                scalarReplacement = repairedScalar;
+            }
+            else
+            {
+                cut = safeCut;
+                dropEmptyOpenContainers = true;
+            }
         }
         else
         {
@@ -246,12 +275,29 @@ public static class JsonRepairUtilities
             if (tr == R_KEY || tr == R_COLON || tr == R_VALUE)
             {
                 cut = safeCut; // dangling entry (missing key, missing value, or missing element)
+                dropEmptyOpenContainers = true;
+            }
+        }
+
+        // If dropping a dangling key left an inner object inside an array completely empty (e.g. `[{"prom` -> `[`),
+        // or left a `key: {` object property with no completed fields, pop that inner `{` so we don't emit a bogus `{}` element.
+        if (dropEmptyOpenContainers)
+        {
+            while (stack.Count > 1 && stack.Peek() == '{' && IsOnlyOpenObjectInArraySince(json, openCuts.Peek(), cut))
+            {
+                stack.Pop();
+                roles.Pop();
+                cut = openCuts.Pop();
             }
         }
 
         var sb = new StringBuilder(json.Length + 8);
         sb.Append(json, 0, cut);
-        if (inString && !pendingStringIsKey)
+        if (scalarReplacement != null)
+        {
+            sb.Append(scalarReplacement);
+        }
+        else if (inString && !pendingStringIsKey)
         {
             sb.Append('"');
         }
@@ -269,5 +315,117 @@ public static class JsonRepairUtilities
             sb.Append(open == '[' ? ']' : '}');
         }
         return sb.ToString();
+    }
+
+    private static bool IsOnlyOpenObjectInArraySince(string json, int prevSafeCut, int currentCut)
+    {
+        // Checks whether the region between prevSafeCut and currentCut only opened an object `{` as an array element
+        // (i.e. only whitespace/comma precedes `{` up to prevSafeCut, with no `:` from a parent object property).
+        bool sawOpenBrace = false;
+        for (int i = currentCut - 1; i >= prevSafeCut; i--)
+        {
+            char c = json[i];
+            if (c is ' ' or '\t' or '\r' or '\n') continue;
+            if (!sawOpenBrace && c == '{')
+            {
+                sawOpenBrace = true;
+                continue;
+            }
+            if (c == ',') continue;
+            return false;
+        }
+        return sawOpenBrace;
+    }
+
+    private static int TrimIncompleteStringEscape(string json, int cut, bool endsWithDanglingBackslash)
+    {
+        if (endsWithDanglingBackslash && cut > 0 && json[cut - 1] == '\\')
+        {
+            return cut - 1;
+        }
+
+        // Check for an incomplete \uXXXX escape at the tail of the string (1 to 3 hex digits after \u).
+        int maxLookback = Math.Min(5, cut);
+        for (int back = 2; back <= maxLookback; back++)
+        {
+            int idx = cut - back;
+            if (json[idx] == '\\' && idx + 1 < cut && json[idx + 1] == 'u')
+            {
+                // Count preceding consecutive backslashes to ensure this '\' is not itself escaped.
+                int slashes = 0;
+                for (int k = idx - 1; k >= 0 && json[k] == '\\'; k--)
+                {
+                    slashes++;
+                }
+                if ((slashes & 1) == 0)
+                {
+                    return idx;
+                }
+            }
+        }
+
+        return cut;
+    }
+
+    private static bool TryRepairPartialScalar(ReadOnlySpan<char> rawScalar, out string repaired)
+    {
+        var trimmed = rawScalar.Trim();
+        if (trimmed.IsEmpty)
+        {
+            repaired = string.Empty;
+            return false;
+        }
+
+        // Prefix of "true", "false", or "null"
+        if ("true".AsSpan().StartsWith(trimmed, StringComparison.Ordinal))
+        {
+            repaired = "true";
+            return true;
+        }
+        if ("false".AsSpan().StartsWith(trimmed, StringComparison.Ordinal))
+        {
+            repaired = "false";
+            return true;
+        }
+        if ("null".AsSpan().StartsWith(trimmed, StringComparison.Ordinal))
+        {
+            repaired = "null";
+            return true;
+        }
+
+        // Numeric scalar: strip trailing incomplete exponent ('e', 'E', 'e+', 'e-') or trailing decimal point '.'
+        var num = trimmed;
+        if (num[^1] is '+' or '-')
+        {
+            num = num[..^1];
+        }
+        if (!num.IsEmpty && num[^1] is 'e' or 'E')
+        {
+            num = num[..^1];
+        }
+        if (!num.IsEmpty && num[^1] == '.')
+        {
+            num = num[..^1];
+        }
+
+        // Must have at least one digit and parse as a valid JSON number
+        if (num.IsEmpty || (num.Length == 1 && num[0] == '-'))
+        {
+            repaired = string.Empty;
+            return false;
+        }
+
+        for (int i = 0; i < num.Length; i++)
+        {
+            char c = num[i];
+            if (!((c >= '0' && c <= '9') || c is '-' or '+' or '.' or 'e' or 'E'))
+            {
+                repaired = string.Empty;
+                return false;
+            }
+        }
+
+        repaired = num.ToString();
+        return true;
     }
 }

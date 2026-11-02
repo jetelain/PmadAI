@@ -64,6 +64,53 @@ public class JsonRepairUtilitiesTests
     }
 
     [Fact]
+    public void TryRepairTruncatedJson_DropsEmptyNestedObjectWhenTruncatedOnFirstKey()
+    {
+        // Truncated inside the very first key of a nested array item: should not leave a bogus `{}` element.
+        var input = "{\"questions\":[{\"prom";
+        Assert.Equal(
+            "{\"questions\":[]}",
+            JsonRepairUtilities.TryRepairTruncatedJson(input));
+
+        var input2 = "[{\"prompt\":\"Q1\"},{\"prom";
+        Assert.Equal(
+            "[{\"prompt\":\"Q1\"}]",
+            JsonRepairUtilities.TryRepairTruncatedJson(input2));
+    }
+
+    [Fact]
+    public void TryRepairTruncatedJson_TrimsDanglingBackslashAndIncompleteUnicodeEscapeInValueString()
+    {
+        // Trailing backslash at EOF inside a value string must not escape the closing quote.
+        var input = "{\"path\":\"C:\\\\foo\\";
+        var repaired = JsonRepairUtilities.TryRepairTruncatedJson(input);
+        Assert.Equal("{\"path\":\"C:\\\\foo\"}", repaired);
+        using var doc1 = JsonDocument.Parse(repaired!);
+        Assert.Equal("C:\\foo", doc1.RootElement.GetProperty("path").GetString());
+
+        // Incomplete \uXXXX escape at EOF inside a value string is stripped before closing quote.
+        var inputUnicode = "{\"text\":\"hello\\u00";
+        var repairedUnicode = JsonRepairUtilities.TryRepairTruncatedJson(inputUnicode);
+        Assert.Equal("{\"text\":\"hello\"}", repairedUnicode);
+        using var doc2 = JsonDocument.Parse(repairedUnicode!);
+        Assert.Equal("hello", doc2.RootElement.GetProperty("text").GetString());
+    }
+
+    [Theory]
+    [InlineData("{\"flag\": tru", "{\"flag\": true}")]
+    [InlineData("{\"flag\": fal", "{\"flag\": false}")]
+    [InlineData("{\"val\": nul", "{\"val\": null}")]
+    [InlineData("{\"num\": 12.", "{\"num\": 12}")]
+    [InlineData("{\"num\": 12.5e-", "{\"num\": 12.5}")]
+    [InlineData("{\"a\": 1, \"num\": -", "{\"a\": 1}")]
+    public void TryRepairTruncatedJson_RepairsOrDropsPartialScalars(string input, string expected)
+    {
+        var repaired = JsonRepairUtilities.TryRepairTruncatedJson(input);
+        Assert.Equal(expected, repaired);
+        using var _ = JsonDocument.Parse(repaired!);
+    }
+
+    [Fact]
     public void TryRepairTruncatedJson_KeepsTruncatedScalarValue()
     {
         var input = "{\"count\": 12";
@@ -160,5 +207,21 @@ public class JsonRepairUtilitiesTests
         Assert.Null(obj["z"]);
         var list = Assert.IsAssignableFrom<List<object?>>(obj["l"]);
         Assert.Equal(new object?[] { 1, 2.5, "x" }, list);
+    }
+
+    [Fact]
+    public void AddNestedParameterAlias_SupportsBidirectionalAndCasingLookups()
+    {
+        var mapping = new Pmad.AI.Tools.ToolMapping()
+            .AddNestedParameterAlias("questions[]", "options", "optionsJson", "choices");
+
+        Assert.True(mapping.TryGetNestedAlias("questions[]", "optionsJson", out var c1));
+        Assert.Equal("options", c1, ignoreCase: true);
+
+        Assert.True(mapping.TryGetNestedAlias("questions[]", "options_json", out var c2));
+        Assert.Equal("options", c2, ignoreCase: true);
+
+        Assert.True(mapping.TryGetNestedAlias("questions[]", "options", out var rev));
+        Assert.Contains(rev, new[] { "optionsJson", "choices" }, StringComparer.OrdinalIgnoreCase);
     }
 }

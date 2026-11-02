@@ -178,15 +178,33 @@ public class ToolMapping
             {
                 if (!string.IsNullOrWhiteSpace(n))
                 {
-                    set.Add(n.Trim());
+                    var trimmed = n.Trim();
+                    set.Add(trimmed);
+                    set.Add(StringCaseConverter.ToSnakeCase(trimmed));
+                    set.Add(StringCaseConverter.ToCamelCase(trimmed));
+                    set.Add(StringCaseConverter.ToPascalCase(trimmed));
                 }
             }
         }
 
+        // Register canonicalName (and its casing variants) -> aliases so that whether the schema property
+        // uses canonicalName or an alias, any spelling/casing of the aliases resolves to canonicalName.
         AddSet(canonicalName, aliases);
         AddSet(StringCaseConverter.ToSnakeCase(canonicalName), aliases);
         AddSet(StringCaseConverter.ToCamelCase(canonicalName), aliases);
         AddSet(StringCaseConverter.ToPascalCase(canonicalName), aliases);
+
+        foreach (var alias in aliases)
+        {
+            if (!string.IsNullOrWhiteSpace(alias))
+            {
+                var trimmedAlias = alias.Trim();
+                AddSet(trimmedAlias, [canonicalName]);
+                AddSet(StringCaseConverter.ToSnakeCase(trimmedAlias), [canonicalName]);
+                AddSet(StringCaseConverter.ToCamelCase(trimmedAlias), [canonicalName]);
+                AddSet(StringCaseConverter.ToPascalCase(trimmedAlias), [canonicalName]);
+            }
+        }
 
         return this;
     }
@@ -430,6 +448,17 @@ public class ToolMapping
     {
         if (NestedParameterAliases.TryGetValue(path, out var propDict))
         {
+            // Prefer exact alias match before key-identity match so bidirectional aliases resolve to their target.
+            foreach (var (canonical, aliases) in propDict)
+            {
+                if (!string.Equals(canonical, aliasOrKey, StringComparison.OrdinalIgnoreCase) &&
+                    aliases.Contains(aliasOrKey))
+                {
+                    canonicalName = canonical;
+                    return true;
+                }
+            }
+
             foreach (var (canonical, aliases) in propDict)
             {
                 if (string.Equals(canonical, aliasOrKey, StringComparison.OrdinalIgnoreCase))
