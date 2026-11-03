@@ -11,4 +11,9 @@ public class ToolDispatcherConfiguration
 
     /// <summary>Configured virtual-to-shell tool translations.</summary>
     public List<ToolTranslation> Translations { get; init; } = [];
+
+    internal ToolDispatcherConfigurationSnapshot Snapshot()
+    {
+        return new ToolDispatcherConfigurationSnapshot(Tools, Translations);
+    }
 }

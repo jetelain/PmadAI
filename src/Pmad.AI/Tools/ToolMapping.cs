@@ -126,6 +126,36 @@ public class ToolMapping
     }
 
     /// <summary>
+    /// Creates a deep copy of this mapping so that mutations to the clone (or to the original)
+    /// do not affect the other. Parameter computer delegates are shared by reference.
+    /// </summary>
+    public ToolMapping Clone()
+    {
+        return new ToolMapping
+        {
+            Aliases = new HashSet<string>(Aliases, StringComparer.OrdinalIgnoreCase),
+            ParameterAliases = new Dictionary<string, string>(ParameterAliases, StringComparer.OrdinalIgnoreCase),
+            ComputedParameters = new Dictionary<string, ParameterComputer>(ComputedParameters, StringComparer.OrdinalIgnoreCase),
+            NestedParameterAliases = CloneNestedDictionaries(NestedParameterAliases),
+            ParameterValueAliases = CloneNestedDictionaries(ParameterValueAliases),
+            PropagatedParameters = new HashSet<string>(PropagatedParameters, StringComparer.OrdinalIgnoreCase),
+            PrimaryCollectionProperties = new Dictionary<string, string>(PrimaryCollectionProperties, StringComparer.OrdinalIgnoreCase),
+        };
+    }
+
+    private static Dictionary<string, Dictionary<string, string>> CloneNestedDictionaries(
+        Dictionary<string, Dictionary<string, string>> source)
+    {
+        var copy = new Dictionary<string, Dictionary<string, string>>(source.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, inner) in source)
+        {
+            copy[key] = new Dictionary<string, string>(inner, StringComparer.OrdinalIgnoreCase);
+        }
+
+        return copy;
+    }
+
+    /// <summary>
     /// Adds a root-level parameter to propagate to nested collection items.
     /// </summary>
     public ToolMapping AddPropagatedParameter(string parameterName)

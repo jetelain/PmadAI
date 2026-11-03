@@ -525,4 +525,110 @@ public class ToolMappingTests
         Assert.False(m.TryResolveValueAlias("type", "a", out var canonical));
         Assert.Equal("a", canonical);
     }
+
+    // ---------------------------------------------------------------------
+    // Clone
+    // ---------------------------------------------------------------------
+
+    private static ToolMapping CreatePopulatedMapping()
+    {
+        ParameterComputer computer = args => args["a"];
+        return new ToolMapping(
+            aliases: new[] { "run", "execute" },
+            parameterAliases: new Dictionary<string, IEnumerable<string>>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["limit"] = new[] { "max", "cap" }
+            },
+            computedParameters: new Dictionary<string, ParameterComputer>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["count"] = computer
+            },
+            nestedParameterAliases: new Dictionary<string, IDictionary<string, IEnumerable<string>>>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["items[]"] = new Dictionary<string, IEnumerable<string>>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["oldText"] = new[] { "old_text", "search" }
+                }
+            },
+            parameterValueAliases: new Dictionary<string, IDictionary<string, IEnumerable<string>>>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["type"] = new Dictionary<string, IEnumerable<string>>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["fast"] = new[] { "quick" }
+                }
+            },
+            propagatedParameters: new[] { "owner" },
+            primaryCollectionProperties: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["questions[]"] = "text"
+            });
+    }
+
+    [Fact]
+    public void Clone_PopulatedMapping_PreservesAllData()
+    {
+        var original = CreatePopulatedMapping();
+        var clone = original.Clone();
+
+        Assert.NotSame(original, clone);
+        Assert.Equal(original.Aliases, clone.Aliases);
+        Assert.Equal(original.ParameterAliases, clone.ParameterAliases);
+        Assert.Equal(original.PropagatedParameters, clone.PropagatedParameters);
+        Assert.Equal(original.PrimaryCollectionProperties, clone.PrimaryCollectionProperties);
+        Assert.Equal(original.ComputedParameters.Keys, clone.ComputedParameters.Keys);
+        Assert.Same(original.ComputedParameters["count"], clone.ComputedParameters["count"]); // delegates are shared by reference
+        Assert.Equal(original.NestedParameterAliases.Keys, clone.NestedParameterAliases.Keys);
+        Assert.Equal(original.ParameterValueAliases.Keys, clone.ParameterValueAliases.Keys);
+        Assert.Equal(original.NestedParameterAliases["items[]"], clone.NestedParameterAliases["items[]"]);
+        Assert.Equal(original.ParameterValueAliases["type"], clone.ParameterValueAliases["type"]);
+    }
+
+    [Fact]
+    public void Clone_EmptyMapping_ProducesEmptyMapping()
+    {
+        var clone = new ToolMapping().Clone();
+
+        Assert.NotSame(new ToolMapping(), clone);
+        Assert.Empty(clone.Aliases);
+        Assert.Empty(clone.ParameterAliases);
+        Assert.Empty(clone.ComputedParameters);
+        Assert.Empty(clone.NestedParameterAliases);
+        Assert.Empty(clone.ParameterValueAliases);
+        Assert.Empty(clone.PropagatedParameters);
+        Assert.Empty(clone.PrimaryCollectionProperties);
+    }
+
+    [Fact]
+    public void Clone_MutatingClone_DoesNotAffectOriginal()
+    {
+        var original = CreatePopulatedMapping();
+        var clone = original.Clone();
+
+        clone.Aliases.Add("mutated");
+        clone.ParameterAliases["newParam"] = "canon";
+        clone.NestedParameterAliases["items[]"]["mutated"] = "x";
+        clone.ParameterValueAliases["type"]["mutated"] = "fast";
+        clone.PropagatedParameters.Add("mutated");
+        clone.PrimaryCollectionProperties["mutated[]"] = "prop";
+
+        Assert.DoesNotContain("mutated", original.Aliases);
+        Assert.False(original.ParameterAliases.ContainsKey("newParam"));
+        Assert.False(original.NestedParameterAliases["items[]"].ContainsKey("mutated"));
+        Assert.False(original.ParameterValueAliases["type"].ContainsKey("mutated"));
+        Assert.DoesNotContain("mutated", original.PropagatedParameters);
+        Assert.False(original.PrimaryCollectionProperties.ContainsKey("mutated[]"));
+    }
+
+    [Fact]
+    public void Clone_MutatingOriginal_DoesNotAffectClone()
+    {
+        var original = CreatePopulatedMapping();
+        var clone = original.Clone();
+
+        original.Aliases.Add("mutated");
+        original.NestedParameterAliases["items[]"]["mutated"] = "x";
+
+        Assert.DoesNotContain("mutated", clone.Aliases);
+        Assert.False(clone.NestedParameterAliases["items[]"].ContainsKey("mutated"));
+    }
 }

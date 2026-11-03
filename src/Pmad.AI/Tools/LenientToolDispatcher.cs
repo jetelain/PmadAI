@@ -30,11 +30,7 @@ public sealed record DispatchedToolCall(
 public class LenientToolDispatcher
 {
     private readonly LenientToolDispatcherOptions _options;
-    private readonly ToolDispatcherConfiguration _configuration;
-
-    // Build once, never change
-    private readonly Dictionary<string, string> _aliasToCanonical = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, ToolTranslation> _translationsBySource = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ToolDispatcherConfigurationSnapshot _configuration;
 
     // May mutate with on-the-fly tool registration
     private volatile RegistredToolsMetadata _registeredTools = new RegistredToolsMetadata(null);
@@ -58,16 +54,15 @@ public class LenientToolDispatcher
     }
 
     public LenientToolDispatcher(ToolDispatcherConfiguration? configuration = null, LenientToolDispatcherOptions? options = null, IEnumerable<AIFunction>? aIFunctions = null)
-        : this(configuration ?? new ToolDispatcherConfiguration(), options ?? new LenientToolDispatcherOptions(), new RegistredToolsMetadata(aIFunctions))
+        : this((configuration ?? new ToolDispatcherConfiguration()).Snapshot(), options ?? new LenientToolDispatcherOptions(), new RegistredToolsMetadata(aIFunctions))
     {
 
     }
 
-    private LenientToolDispatcher(ToolDispatcherConfiguration configuration, LenientToolDispatcherOptions options, RegistredToolsMetadata registeredTools)
+    private LenientToolDispatcher(ToolDispatcherConfigurationSnapshot configuration, LenientToolDispatcherOptions options, RegistredToolsMetadata registeredTools)
     {
-        _configuration = configuration ?? new ToolDispatcherConfiguration();
-        _options = options ?? new LenientToolDispatcherOptions();
-        BuildLookupTables();
+        _configuration = configuration;
+        _options = options;
         _registeredTools = registeredTools;
     }
 
@@ -98,56 +93,7 @@ public class LenientToolDispatcher
         return clone;
     }
 
-    private void BuildLookupTables()
-    {
-        if (_configuration.Translations != null)
-        {
-            foreach (var t in _configuration.Translations)
-            {
-                if (!string.IsNullOrWhiteSpace(t.SourceTool))
-                {
-                    _translationsBySource[t.SourceTool] = t;
-                }
-            }
-        }
-
-        if (_configuration.Tools != null)
-        {
-            foreach (var (canonical, mapping) in _configuration.Tools)
-            {
-                // The flat alias -> canonical maps are an internal convention owned by the
-                // dispatcher: the canonical name maps to itself, every alias maps to it.
-                // Self-entries are added here so callers never have to set them up.
-                _aliasToCanonical[canonical] = canonical;
-                if (mapping.Aliases != null)
-                {
-                    foreach (var alias in mapping.Aliases)
-                    {
-                        if (!string.IsNullOrWhiteSpace(alias))
-                        {
-                            _aliasToCanonical[alias] = canonical;
-                        }
-                    }
-                }
-
-                NormalizeParameterAliasMap(mapping.ParameterAliases);
-                if (mapping.NestedParameterAliases != null)
-                {
-                    foreach (var inner in mapping.NestedParameterAliases.Values)
-                    {
-                        NormalizeParameterAliasMap(inner);
-                    }
-                }
-                if (mapping.ParameterValueAliases != null)
-                {
-                    foreach (var inner in mapping.ParameterValueAliases.Values)
-                    {
-                        NormalizeParameterAliasMap(inner);
-                    }
-                }
-            }
-        }
-    }
+   
 
     /// <summary>
     /// Registers an executable <see cref="AIFunction"/> canonical tool.
@@ -166,17 +112,6 @@ public class LenientToolDispatcher
         ArgumentNullException.ThrowIfNull(tools);
         _registeredTools = _registeredTools.WithTools(tools);
     }
-
-    private static void NormalizeParameterAliasMap(Dictionary<string, string> flatAliasMap)
-    {
-        // Enforce the internal "canonical -> canonical" convention: every target value that is
-        // not itself a key must self-map, so callers never have to declare self-entries.
-        foreach (var target in flatAliasMap.Values.ToArray())
-        {
-            flatAliasMap.TryAdd(target, target);
-        }
-    }
-
 
     /// <summary>
     /// Validates the configured mappings and translations against registered tools and their schemas.
@@ -344,7 +279,7 @@ public class LenientToolDispatcher
         }
 
         // 1. Check if tool is a translation rule via O(1) lookup
-        if (_translationsBySource.TryGetValue(toolName, out var translation))
+        if (_configuration.TryGetTranslation(toolName, out var translation))
         {
             Telemetry?.Record(LenientDispatchEventType.ToolAliasResolved, toolName, translation.TargetTool, SessionId);
             return RenderTranslationCall(translation, rawArgs, rawToolName);
@@ -691,7 +626,7 @@ public class LenientToolDispatcher
         }
 
         // 1. Check if tool is a translation rule via O(1) lookup
-        if (_translationsBySource.TryGetValue(toolName, out var translation))
+        if (_configuration.TryGetTranslation(toolName, out var translation))
         {
             return translation.TargetTool;
         }
@@ -708,7 +643,7 @@ public class LenientToolDispatcher
             _configuration.Tools.TryGetValue(registeredTool.Name, out var mapping);
             return (registeredTool.Name, mapping, false);
         }
-        if (_aliasToCanonical.TryGetValue(toolName, out var configuredCanonical))
+        if (_configuration.TryGetAlias(toolName, out var configuredCanonical))
         {
             var isAlias = !string.Equals(configuredCanonical, toolName, StringComparison.OrdinalIgnoreCase);
             _configuration.Tools.TryGetValue(configuredCanonical, out var mapping);
