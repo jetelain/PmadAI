@@ -33,6 +33,6 @@ public sealed class BinaryValidationContext
     /// <summary>
     /// Opens a read stream for the target file. Returns null if stream access is not configured.
     /// </summary>
-    public Stream? OpenRead() => StreamOpener();
+    public Stream? OpenRead() => StreamOpener?.Invoke();
 }
 

@@ -230,5 +230,28 @@ public class DiffSplitterTests
         var chunks = DiffSplitter.SplitIntoChunks([]);
         Assert.Empty(chunks);
     }
+
+    [Fact]
+    public void SplitIntoChunks_OversizedFileWithoutHunks_DoesNotDropFile()
+    {
+        // Diff with large binary patch or header data but 0 hunks exceeding maxChunkBytes
+        var largeHeaderLines = new List<string> { "diff --git a/big.bin b/big.bin", "GIT binary patch" };
+        largeHeaderLines.AddRange(Enumerable.Range(1, 100).Select(n => "literal " + new string('A', 80)));
+
+        var file = new FileDiff
+        {
+            FilePath = "big.bin",
+            IsBinary = true,
+            HeaderLines = largeHeaderLines,
+            Hunks = []
+        };
+
+        int maxChunkBytes = 1000;
+        var chunks = DiffSplitter.SplitIntoChunks([file], maxChunkBytes);
+
+        var chunk = Assert.Single(chunks);
+        Assert.Equal("big.bin", Assert.Single(chunk.FilePaths));
+        Assert.Contains("GIT binary patch", chunk.Content);
+    }
 }
 

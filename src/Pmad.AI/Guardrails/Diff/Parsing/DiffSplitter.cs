@@ -157,6 +157,14 @@ public static class DiffSplitter
             {
                 FlushCurrentBatch();
 
+                if (file.Hunks.Count == 0)
+                {
+                    // No hunks to split (e.g. large binary patch or metadata header)
+                    currentBatch.Add(file);
+                    FlushCurrentBatch();
+                    continue;
+                }
+
                 var fileHeaderLines = file.HeaderLines;
                 int headerBytes = fileHeaderLines.Sum(h => Encoding.UTF8.GetByteCount(h) + 1);
 

@@ -156,7 +156,7 @@ public static partial class DiffParser
                 else if (line.StartsWith('-'))
                 {
                     var content = line.Length > 1 ? line[1..] : string.Empty;
-                    var deleted = new DiffDeletedLine(currentFile!.FilePath, currentOldLine, content);
+                    var deleted = new DiffDeletedLine(currentFile!.OldFilePath ?? currentFile!.FilePath, currentOldLine, content);
                     currentHunk.Lines.Add(line);
                     currentHunk.DeletedLines.Add(deleted);
                     currentFile.DeletedLines.Add(deleted);
@@ -406,36 +406,93 @@ public static partial class DiffParser
             return false;
         }
 
-        var sb = new StringBuilder(span.Length);
+        var byteList = new List<byte>(span.Length);
         for (int i = 1; i < span.Length; i++)
         {
             char c = span[i];
             if (c == '\\' && i + 1 < span.Length)
             {
-                char next = span[++i];
-                sb.Append(next switch
+                char next = span[i + 1];
+                if (next is >= '0' and <= '7')
                 {
-                    'n' => '\n',
-                    't' => '\t',
-                    'r' => '\r',
-                    '"' => '"',
-                    '\\' => '\\',
-                    _ => next
-                });
+                    // Octal escape \ooo (up to 3 octal digits) used by git core.quotepath
+                    i++;
+                    int octalVal = next - '0';
+                    if (i + 1 < span.Length && span[i + 1] is >= '0' and <= '7')
+                    {
+                        octalVal = (octalVal << 3) + (span[++i] - '0');
+                        if (i + 1 < span.Length && span[i + 1] is >= '0' and <= '7')
+                        {
+                            octalVal = (octalVal << 3) + (span[++i] - '0');
+                        }
+                    }
+                    byteList.Add((byte)octalVal);
+                }
+                else
+                {
+                    i++;
+                    switch (next)
+                    {
+                        case 'n':
+                            byteList.Add((byte)'\n');
+                            break;
+                        case 't':
+                            byteList.Add((byte)'\t');
+                            break;
+                        case 'r':
+                            byteList.Add((byte)'\r');
+                            break;
+                        case '"':
+                            byteList.Add((byte)'"');
+                            break;
+                        case '\\':
+                            byteList.Add((byte)'\\');
+                            break;
+                        default:
+                            AppendCharUtf8Bytes(byteList, next);
+                            break;
+                    }
+                }
             }
             else if (c == '"')
             {
-                unescaped = sb.ToString();
+                unescaped = Encoding.UTF8.GetString(byteList.ToArray());
                 remaining = span[(i + 1)..];
                 return true;
             }
+            else if (char.IsHighSurrogate(c) && i + 1 < span.Length && char.IsLowSurrogate(span[i + 1]))
+            {
+                AppendSurrogateUtf8Bytes(byteList, c, span[++i]);
+            }
             else
             {
-                sb.Append(c);
+                AppendCharUtf8Bytes(byteList, c);
             }
         }
 
         return false;
+    }
+
+    private static void AppendSurrogateUtf8Bytes(List<byte> list, char high, char low)
+    {
+        Span<char> surrogateChars = stackalloc char[2] { high, low };
+        Span<byte> buffer = stackalloc byte[4];
+        int written = Encoding.UTF8.GetBytes(surrogateChars, buffer);
+        for (int b = 0; b < written; b++)
+        {
+            list.Add(buffer[b]);
+        }
+    }
+
+    private static void AppendCharUtf8Bytes(List<byte> list, char c)
+    {
+        Span<char> chars = stackalloc char[1] { c };
+        Span<byte> buffer = stackalloc byte[4];
+        int written = Encoding.UTF8.GetBytes(chars, buffer);
+        for (int b = 0; b < written; b++)
+        {
+            list.Add(buffer[b]);
+        }
     }
 
     private static string StripDiffHeaderTimestamp(string raw)

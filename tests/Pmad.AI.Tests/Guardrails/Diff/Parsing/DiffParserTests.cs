@@ -185,6 +185,9 @@ public class DiffParserTests
         Assert.Single(file.Hunks);
         Assert.Single(file.AddedLines);
         Assert.Single(file.DeletedLines);
+        Assert.Equal("src/OldName.cs", file.DeletedLines[0].FilePath);
+        Assert.Equal("string name = \"old\";", file.DeletedLines[0].Content);
+        Assert.Equal("src/NewName.cs", file.AddedLines[0].FilePath);
         Assert.Equal("string name = \"new\";", file.AddedLines[0].Content);
     }
 
@@ -468,6 +471,55 @@ public class DiffParserTests
         Assert.Equal(2, files[0].AddedLines.Count);
         Assert.Equal("++i;", files[0].AddedLines[0].Content);
         Assert.Equal("-- new sql comment", files[0].AddedLines[1].Content);
+    }
+
+    [Fact]
+    public void Parse_QuotedPathWithOctalEscapes_DecodesUtf8Characters()
+    {
+        // Git core.quotepath encodes non-ASCII bytes as octal sequences, e.g. \303\251 for 'é'
+        var diff = """
+            diff --git "a/src/caf\303\251.cs" "b/src/caf\303\251.cs"
+            --- "a/src/caf\303\251.cs"
+            +++ "b/src/caf\303\251.cs"
+            @@ -1,1 +1,2 @@
+             int a;
+            +int b;
+            """;
+
+        var files = DiffParser.Parse(diff);
+
+        Assert.Single(files);
+        Assert.Equal("src/café.cs", files[0].FilePath);
+        Assert.Null(files[0].OldFilePath);
+        Assert.Single(files[0].AddedLines);
+        Assert.Equal("src/café.cs", files[0].AddedLines[0].FilePath);
+    }
+
+    [Fact]
+    public void Parse_DirectoryGlobWithTrailingSlash_ExcludesDirectoryAndNestedFiles()
+    {
+        var diff = """
+            diff --git a/bin/Release/app.dll b/bin/Release/app.dll
+            --- a/bin/Release/app.dll
+            +++ b/bin/Release/app.dll
+            @@ -1,1 +1,1 @@
+            +binary data
+            diff --git a/src/App.cs b/src/App.cs
+            --- a/src/App.cs
+            +++ b/src/App.cs
+            @@ -1,1 +1,1 @@
+            +clean code
+            """;
+
+        var options = new DiffRiskScannerOptions
+        {
+            ExcludedFileGlobs = ["bin/"]
+        };
+
+        var files = DiffParser.Parse(diff, options);
+
+        Assert.Single(files);
+        Assert.Equal("src/App.cs", files[0].FilePath);
     }
 }
 

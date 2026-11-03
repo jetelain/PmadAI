@@ -9,6 +9,8 @@ public sealed class DiffRiskScannerOptions
     private HashSet<string> _allowedIpAddresses = new(DiffRiskDefaults.AllowedIpAddresses, StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _wellKnownSafePackages = new(DiffRiskDefaults.WellKnownSafePackages, StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _allowedImageExtensions = new(DiffRiskDefaults.AllowedImageExtensions, StringComparer.OrdinalIgnoreCase);
+    private List<string> _excludedFileGlobs = [.. DiffRiskDefaults.ExcludedFileGlobs];
+    private List<ISafeBinaryValidator> _safeBinaryValidators = [];
 
     /// <summary>
     /// Whether to flag hardcoded public IP addresses and non-allowlisted URLs. Default: true.
@@ -123,9 +125,13 @@ public sealed class DiffRiskScannerOptions
     public HashSet<string> WellKnownSafeDomains
     {
         get => _wellKnownSafeDomains;
-        set => _wellKnownSafeDomains = value.Comparer == StringComparer.OrdinalIgnoreCase
-            ? value
-            : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _wellKnownSafeDomains = value.Comparer == StringComparer.OrdinalIgnoreCase
+                ? value
+                : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+        }
     }
 
     /// <summary>
@@ -135,9 +141,13 @@ public sealed class DiffRiskScannerOptions
     public HashSet<string> AllowedIpAddresses
     {
         get => _allowedIpAddresses;
-        set => _allowedIpAddresses = value.Comparer == StringComparer.OrdinalIgnoreCase
-            ? value
-            : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _allowedIpAddresses = value.Comparer == StringComparer.OrdinalIgnoreCase
+                ? value
+                : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+        }
     }
 
     /// <summary>
@@ -147,9 +157,13 @@ public sealed class DiffRiskScannerOptions
     public HashSet<string> WellKnownSafePackages
     {
         get => _wellKnownSafePackages;
-        set => _wellKnownSafePackages = value.Comparer == StringComparer.OrdinalIgnoreCase
-            ? value
-            : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _wellKnownSafePackages = value.Comparer == StringComparer.OrdinalIgnoreCase
+                ? value
+                : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+        }
     }
 
     /// <summary>
@@ -159,20 +173,40 @@ public sealed class DiffRiskScannerOptions
     public HashSet<string> AllowedImageExtensions
     {
         get => _allowedImageExtensions;
-        set => _allowedImageExtensions = value.Comparer == StringComparer.OrdinalIgnoreCase
-            ? value
-            : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _allowedImageExtensions = value.Comparer == StringComparer.OrdinalIgnoreCase
+                ? value
+                : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+        }
     }
 
     /// <summary>
     /// Glob patterns for files to exclude from diff parsing and scanning.
     /// </summary>
-    public List<string> ExcludedFileGlobs { get; set; } = [.. DiffRiskDefaults.ExcludedFileGlobs];
+    public List<string> ExcludedFileGlobs
+    {
+        get => _excludedFileGlobs;
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _excludedFileGlobs = value;
+        }
+    }
 
     /// <summary>
     /// Ordered chain of safe binary validators evaluated against added or modified binary files.
     /// </summary>
-    public List<ISafeBinaryValidator> SafeBinaryValidators { get; set; } = [];
+    public List<ISafeBinaryValidator> SafeBinaryValidators
+    {
+        get => _safeBinaryValidators;
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _safeBinaryValidators = value;
+        }
+    }
 
     /// <summary>
     /// Optional delegate for resolving a read-only stream to a target repository file during binary scanning.

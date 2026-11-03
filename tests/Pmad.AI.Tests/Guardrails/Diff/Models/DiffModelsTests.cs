@@ -78,4 +78,30 @@ public class DiffModelsTests
         var bytes = System.Text.Encoding.UTF8.GetByteCount(text);
         Assert.Equal(bytes, file.GetByteCount());
     }
+
+    [Fact]
+    public void DiffRiskScannerOptions_NullProperties_ThrowsArgumentNullException()
+    {
+        var options = new DiffRiskScannerOptions();
+
+        Assert.Throws<ArgumentNullException>(() => options.WellKnownSafeDomains = null!);
+        Assert.Throws<ArgumentNullException>(() => options.AllowedIpAddresses = null!);
+        Assert.Throws<ArgumentNullException>(() => options.WellKnownSafePackages = null!);
+        Assert.Throws<ArgumentNullException>(() => options.AllowedImageExtensions = null!);
+        Assert.Throws<ArgumentNullException>(() => options.ExcludedFileGlobs = null!);
+        Assert.Throws<ArgumentNullException>(() => options.SafeBinaryValidators = null!);
+    }
+
+    [Fact]
+    public void BinaryValidationContext_NullStreamOpener_OpenReadReturnsNull()
+    {
+        var context = new BinaryValidationContext
+        {
+            FilePath = "image.png",
+            Extension = ".png",
+            StreamOpener = null!
+        };
+
+        Assert.Null(context.OpenRead());
+    }
 }

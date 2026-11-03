@@ -16,9 +16,9 @@ internal static class GlobMatcher
         }
 
         path = path.Replace('\\', '/').Trim('/');
-        pattern = pattern.Replace('\\', '/').Trim('/');
+        pattern = pattern.Replace('\\', '/');
 
-        if (string.Equals(path, pattern, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(path, pattern.Trim('/'), StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
@@ -29,12 +29,15 @@ internal static class GlobMatcher
 
     private static Regex CreateRegex(string pattern)
     {
+        bool hadTrailingSlash = pattern.EndsWith('/');
+        pattern = pattern.Trim('/');
+
         var sb = new StringBuilder("^");
         bool hasSlash = pattern.Contains('/');
 
         if (!hasSlash)
         {
-            // Pattern like "*.txt" should match in root or any subfolder
+            // Pattern like "*.txt" or "bin/" should match in root or any subfolder
             sb.Append("(?:.*/)?");
         }
 
@@ -76,7 +79,15 @@ internal static class GlobMatcher
             }
         }
 
-        sb.Append('$');
+        if (hadTrailingSlash)
+        {
+            // Directory pattern (e.g. "bin/") matches the directory itself and any nested children
+            sb.Append("(?:/.*)?$");
+        }
+        else
+        {
+            sb.Append('$');
+        }
         return new Regex(sb.ToString(), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
     }
 }
