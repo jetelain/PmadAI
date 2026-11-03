@@ -192,18 +192,14 @@ Declare tools, aliases, and translations declaratively:
 using Microsoft.Extensions.AI;
 using Pmad.AI.Tools;
 
-var dispatcher = new LenientToolDispatcher();
-
 // 1. Register canonical tools
 var readFileTool = AIFunctionFactory.Create(
     (string path) => File.ReadAllText(path),
     "read_file",
     "Reads content from a file");
 
-dispatcher.RegisterTools([readFileTool]);
-
 // 2. Ingest mappings (can also be generated via [ToolAlias] source generator)
-dispatcher.Configure(new ToolDispatcherConfiguration
+var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
 {
     Tools = new Dictionary<string, ToolMapping>
     {
@@ -219,6 +215,7 @@ dispatcher.Configure(new ToolDispatcherConfiguration
         }
     }
 });
+dispatcher.RegisterTools([readFileTool]);
 
 // 3. Enforce startup validation (ensures zero typos or schema drift)
 dispatcher.Validate(throwOnError: true);
@@ -372,7 +369,7 @@ public static class AgentTools
 }
 ```
 
-The source generator emits `GeneratedToolMappings.Create()`, which can be passed directly to `dispatcher.Configure(GeneratedToolMappings.Create())`.
+The source generator emits `GeneratedToolMappings.Create()`, which can be passed directly to the dispatcher constructor: `new LenientToolDispatcher(GeneratedToolMappings.Create())`.
 
 ---
 
