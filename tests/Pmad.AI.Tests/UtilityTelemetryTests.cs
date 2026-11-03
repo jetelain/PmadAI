@@ -131,13 +131,7 @@ public class UtilityTelemetryTests
     public void LenientToolDispatcher_RecordsTelemetry_WhenAliasResolved()
     {
         var telemetry = new LenientDispatchTelemetry();
-        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions
-        {
-            Telemetry = telemetry,
-            SessionId = "disp-session"
-        });
-
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = new Dictionary<string, ToolMapping>(StringComparer.OrdinalIgnoreCase)
             {
@@ -148,7 +142,12 @@ public class UtilityTelemetryTests
                         ["location"] = ["city"]
                     })
             }
+        }, new LenientToolDispatcherOptions
+        {
+            Telemetry = telemetry,
+            SessionId = "disp-session"
         });
+
 
         var dispatched = dispatcher.NormalizeCall("get_current_weather", new Dictionary<string, object?> { ["city"] = "Paris" });
         Assert.Equal("get_weather", dispatched.CanonicalToolName);
@@ -164,13 +163,7 @@ public class UtilityTelemetryTests
     public void LenientToolDispatcher_NormalizesToolAndParameterCasing_AndRecordsTelemetry()
     {
         var telemetry = new LenientDispatchTelemetry();
-        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions
-        {
-            Telemetry = telemetry,
-            SessionId = "casing-session"
-        });
-
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = new Dictionary<string, ToolMapping>(StringComparer.OrdinalIgnoreCase)
             {
@@ -180,7 +173,12 @@ public class UtilityTelemetryTests
                         ["location"] = ["city"]
                     })
             }
+        }, new LenientToolDispatcherOptions
+        {
+            Telemetry = telemetry,
+            SessionId = "casing-session"
         });
+
 
         var dispatched = dispatcher.NormalizeCall("GET_WEATHER", new Dictionary<string, object?> { ["LOCATION"] = "Tokyo" });
         Assert.Equal("get_weather", dispatched.CanonicalToolName);
@@ -199,14 +197,13 @@ public class UtilityTelemetryTests
         var breakerTelemetry = new CircuitBreakerTelemetry();
         var dispatchTelemetry = new LenientDispatchTelemetry();
 
-        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions { Telemetry = dispatchTelemetry });
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = new Dictionary<string, ToolMapping>(StringComparer.OrdinalIgnoreCase)
             {
                 ["get_weather"] = new(aliases: ["weather"])
             }
-        });
+        }, new LenientToolDispatcherOptions { Telemetry = dispatchTelemetry });
 
         var builder = new ChatClientBuilder(new DummyMockClient());
         builder

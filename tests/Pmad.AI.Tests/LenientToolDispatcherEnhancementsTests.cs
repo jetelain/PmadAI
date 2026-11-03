@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Extensions.AI;
+using Pmad.AI.Common;
 using Pmad.AI.Tools;
 
 namespace Pmad.AI.Tests;
@@ -12,8 +13,8 @@ public class LenientToolDispatcherEnhancementsTests
     [Fact]
     public void CustomToolMapping_ComputesLimitFromEndLineAndStartLine()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(
+        new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -250,37 +251,44 @@ public class LenientToolDispatcherEnhancementsTests
     }
 
     [Fact]
-    public void ToolMapping_MutualAliasResolution_WorksInBothDirections()
+    public async Task StringifiedJson_TruncatedArray_RepairMissingClosingBracket()
     {
         var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var tool = AIFunctionFactory.Create(
+            (List<TestQuestionItem> questions) => $"Asked {questions.Count}: {string.Join("; ", questions.Select(q => q.Prompt))}",
+            "ask");
+
+        dispatcher.RegisterTool(tool);
+
+        // Model emits `questions` as a stringified JSON array but truncates it, dropping the final `]`.
+        // Before the repair this value would be treated as a lone string and wrapped into a single bogus QuestionItem.
+        var dispatched = dispatcher.NormalizeCall("ask", new Dictionary<string, object?>
         {
-            Tools =
-            {
-                ["run_command"] = new ToolMapping(
-                    aliases: ["bash"],
-                    parameterAliases: new Dictionary<string, IEnumerable<string>> { ["command"] = ["cmd"] }),
-                ["read_file"] = new ToolMapping(
-                    aliases: ["read", "view_file"],
-                    parameterAliases: new Dictionary<string, IEnumerable<string>> { ["path"] = ["filePath"] })
-            }
+            ["questions"] = "[{\"prompt\": \"Q1: Use SQLite or Postgres?\", \"options\": [\"SQLite\", \"Postgres\"]}, {\"prompt\": \"Q2: Enable caching?\"}"
         });
 
-        // Developer registers tool as "bash"
-        dispatcher.RegisterTool(AIFunctionFactory.Create((string command) => $"Ran: {command}", "bash"));
+        var result = await tool.InvokeAsync(dispatched.Arguments);
+        Assert.Equal("Asked 2: Q1: Use SQLite or Postgres?; Q2: Enable caching?", result?.ToString());
+    }
 
-        // Model invokes "run_command" with parameter alias "cmd"
-        var d1 = dispatcher.NormalizeCall("run_command", new Dictionary<string, object?> { ["cmd"] = "ls" });
-        Assert.Equal("bash", d1.CanonicalToolName);
-        Assert.Equal("ls", d1.Arguments["command"]);
+    [Fact]
+    public async Task StringifiedJson_TruncatedArray_UnderminatedString_Repaired()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (List<TestQuestionItem> questions) => $"Asked {questions.Count}: {string.Join("; ", questions.Select(q => q.Prompt))}",
+            "ask");
 
-        // Developer registers tool as "read"
-        dispatcher.RegisterTool(AIFunctionFactory.Create((string path) => $"Read: {path}", "read"));
+        dispatcher.RegisterTool(tool);
 
-        // Model invokes "view_file" with parameter alias "filePath"
-        var d2 = dispatcher.NormalizeCall("view_file", new Dictionary<string, object?> { ["filePath"] = "test.txt" });
-        Assert.Equal("read", d2.CanonicalToolName);
-        Assert.Equal("test.txt", d2.Arguments["path"]);
+        // Truncated mid-string: the last prompt is cut off and both the string and array closers are missing.
+        var dispatched = dispatcher.NormalizeCall("ask", new Dictionary<string, object?>
+        {
+            ["questions"] = "[{\"prompt\": \"Q1: Pick a DB\"}, {\"prompt\": \"Q2: Enable caching"
+        });
+
+        var result = await tool.InvokeAsync(dispatched.Arguments);
+        Assert.Equal("Asked 2: Q1: Pick a DB; Q2: Enable caching", result?.ToString());
     }
 
     public record TestBatchTaskItem(string Action, string? Author = null, bool DryRun = false);
@@ -373,8 +381,7 @@ public class LenientToolDispatcherEnhancementsTests
     [Fact]
     public async Task FindPrimaryStringProperty_UsesExplicitToolMappingConfiguration()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -543,5 +550,200 @@ public class LenientToolDispatcherEnhancementsTests
 
         var result = await tool.InvokeAsync(dispatched.Arguments);
         Assert.Equal("Single edit on README.md: hello->world", result?.ToString());
+    }
+
+    // ---------------------------------------------------------------------
+    // NightCodeForge parity: cases ported from NightCodeForge.Agents.Tests/
+    // LenientToolDispatcherTests.cs and NightCodeForge.Core.Tests/
+    // QuestionItemParserTests.cs to prove the PmadAI dispatcher supports the
+    // same malformed / non-canonical tool-call shapes.
+    // ---------------------------------------------------------------------
+    private LenientToolDispatcher CreateAskDispatcher(out AIFunction askTool)
+    {
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["ask"] = new ToolMapping()
+                    .SetPrimaryCollectionProperty("questions[]", "prompt")
+                    .AddNestedParameterAlias("questions[]", "options", "optionsJson", "choices")
+            }
+        }); 
+        var ask = AIFunctionFactory.Create(
+            (IReadOnlyList<TestQuestionItem> questions) => $"Asked {questions.Count}: {string.Join("; ", questions.Select(q => q.Prompt))}",
+            "ask");
+        askTool = ask;
+        dispatcher.RegisterTool(ask);
+        return dispatcher;
+    }
+
+    [Fact]
+    public async Task NCF_AskQuestionItems_ParameterAlias_RenamesToQuestions()
+    {
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["ask"] = new ToolMapping(parameterAliases: new Dictionary<string, IEnumerable<string>>
+                    { ["questions"] = ["question_items", "questionItems"] })
+            }
+        });
+        var tool = AIFunctionFactory.Create(
+            (IReadOnlyList<TestQuestionItem> questions) => $"Asked {questions.Count}: {string.Join("; ", questions.Select(q => q.Prompt))}",
+            "ask");
+        dispatcher.RegisterTool(tool);
+
+        // NightCodeForge: { "question_items": [...] } -> questions
+        var d1 = dispatcher.NormalizeCall("ask", "{\"question_items\": [{\"prompt\": \"Question 1\"}]}");
+        Assert.True(d1.Arguments.ContainsKey("questions"));
+        Assert.False(d1.Arguments.ContainsKey("question_items"));
+
+        // NightCodeForge: { "items": [...] } -> questions
+        dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["ask"] = new ToolMapping(parameterAliases: new Dictionary<string, IEnumerable<string>>
+                    { ["questions"] = ["question_items", "items"] })
+            }
+        });
+        dispatcher.RegisterTool(tool);
+        var d2 = dispatcher.NormalizeCall("ask", "{\"items\": [{\"prompt\": \"Question 2\"}]}");
+        Assert.True(d2.Arguments.ContainsKey("questions"));
+        Assert.False(d2.Arguments.ContainsKey("items"));
+
+        var result = await tool.InvokeAsync(d1.Arguments);
+        Assert.Equal("Asked 1: Question 1", result?.ToString());
+    }
+
+    [Fact]
+    public async Task NCF_AskWithOptionsJson_NestedAlias_ParsesOptions()
+    {
+        var dispatcher = CreateAskDispatcher(out var tool);
+
+        // NightCodeForge: nested "optionsJson" alias -> "options" (stringified JSON array)
+        var d = dispatcher.NormalizeCall("ask",
+            "{\"questions\": [{\"prompt\": \"Select caching layer\", \"optionsJson\": \"[\\\"Redis\\\", \\\"Memory\\\"]\"}]}");
+
+        var q = Assert.IsAssignableFrom<IEnumerable<object?>>(d.Arguments["questions"]).Cast<IDictionary<string, object?>>().Single();
+        var options = Assert.IsAssignableFrom<IEnumerable<object?>>(q["options"]).Cast<object?>().Select(o => o?.ToString()).ToList();
+        Assert.Equal("Redis", options[0]);
+        Assert.Equal("Memory", options[1]);
+        Assert.False(q.ContainsKey("optionsJson"));
+
+        var result = await tool.InvokeAsync(d.Arguments);
+        Assert.Equal("Asked 1: Select caching layer", result?.ToString());
+    }
+
+    [Fact]
+    public async Task NCF_AskWithStringifiedSingleQuestionObject_ParsesAsList()
+    {
+        var dispatcher = CreateAskDispatcher(out var tool);
+
+        // NightCodeForge: "questions" is a stringified SINGLE object (not array) -> wrapped into 1 item
+        var d = dispatcher.NormalizeCall("ask",
+            "{\"questions\": \"{\\\"prompt\\\": \\\"Confirm deploy to staging?\\\", \\\"options\\\": [\\\"Yes\\\", \\\"No\\\"]}\"}");
+
+        var questions = Assert.IsAssignableFrom<IEnumerable<object?>>(d.Arguments["questions"]).Cast<object?>().ToList();
+        Assert.Single(questions);
+        var result = await tool.InvokeAsync(d.Arguments);
+        Assert.Equal("Asked 1: Confirm deploy to staging?", result?.ToString());
+    }
+
+    [Fact]
+    public async Task NCF_AskWithTruncatedRawArgumentsJson_RepairedAtTopLevel()
+    {
+        var dispatcher = CreateAskDispatcher(out var tool);
+
+        // NightCodeForge: raw arguments JSON is itself truncated (missing "]}" at the end).
+        var d = dispatcher.NormalizeCall("ask", "{\"questions\": [{\"prompt\": \"Proceed?\"}");
+
+        var result = await tool.InvokeAsync(d.Arguments);
+        Assert.Equal("Asked 1: Proceed?", result?.ToString());
+    }
+
+    [Fact]
+    public async Task NCF_AskWithTruncatedDanglingKey_RepairedAtTopLevel()
+    {
+        var dispatcher = CreateAskDispatcher(out var tool);
+
+        // NightCodeForge: truncated mid-key ("ration") with no value -> dangling key dropped on repair.
+        var d = dispatcher.NormalizeCall("ask",
+            "{\"questions\": [{\"prompt\": \"Which DB?\", \"options\": [\"SQLite\", \"Postgres\"], \"ration");
+
+        var result = await tool.InvokeAsync(d.Arguments);
+        Assert.Equal("Asked 1: Which DB?", result?.ToString());
+    }
+
+    [Fact]
+    public async Task NCF_AskWithTruncatedNestedOptions_Repaired()
+    {
+        var dispatcher = CreateAskDispatcher(out var tool);
+
+        // NightCodeForge: inner "options" array truncated (missing "]") -> repaired and parsed.
+        var d = dispatcher.NormalizeCall("ask",
+            "{\"questions\": [{\"prompt\": \"Select target environment\", \"options\": \"[\\\"Staging\\\", \\\"Prod\\\"\"}]}");
+
+        var q = Assert.IsAssignableFrom<IEnumerable<object?>>(d.Arguments["questions"]).Cast<IDictionary<string, object?>>().Single();
+        var options = Assert.IsAssignableFrom<IEnumerable<object?>>(q["options"]).Cast<object?>().Select(o => o?.ToString()).ToList();
+        Assert.Equal("Staging", options[0]);
+        Assert.Equal("Prod", options[1]);
+
+        var result = await tool.InvokeAsync(d.Arguments);
+        Assert.Equal("Asked 1: Select target environment", result?.ToString());
+    }
+
+    [Fact]
+    public async Task NCF_AskWithBoxedJsonElementString_ParsesAndInvokes()
+    {
+        var dispatcher = CreateAskDispatcher(out var tool);
+
+        // NightCodeForge: "questions" arrives as a boxed JsonElement holding a JSON string.
+        using var doc = JsonDocument.Parse("[{\"prompt\": \"Choose environment\", \"options\": [\"Dev\", \"Prod\"]}]");
+        var d = dispatcher.NormalizeCall("ask", new Dictionary<string, object?>
+        {
+            ["questions"] = doc.RootElement.Clone()
+        });
+
+        var result = await tool.InvokeAsync(d.Arguments);
+        Assert.Equal("Asked 1: Choose environment", result?.ToString());
+    }
+
+    [Fact]
+    public void NCF_TryRepairTruncatedJson_SharedHelper_ClosesStructuresAndDropsDanglingKeys()
+    {
+        // Nested array missing its closing ']' (the original NighCodeForge repro).
+        Assert.Equal(
+            "[{\"prompt\":\"Q1\",\"options\":[\"A\",\"B\"]},{\"prompt\":\"Q2\",\"options\":[\"C\",\"D\"]}]",
+            JsonRepairUtilities.TryRepairTruncatedJson(
+                "[{\"prompt\":\"Q1\",\"options\":[\"A\",\"B\"]},{\"prompt\":\"Q2\",\"options\":[\"C\",\"D\"]}"));
+
+        // Full payload truncated before the closing "]}" -> both closed.
+        Assert.Equal(
+            "{\"questions\":[{\"prompt\":\"Proceed?\"}]}",
+            JsonRepairUtilities.TryRepairTruncatedJson(
+                "{\"questions\":[{\"prompt\":\"Proceed?\"}"));
+
+        // Unterminated value string is closed in place.
+        Assert.Equal(
+            "[{\"prompt\":\"Q1\"},{\"prompt\":\"Q2: Enable caching\"}]",
+            JsonRepairUtilities.TryRepairTruncatedJson(
+                "[{\"prompt\":\"Q1\"},{\"prompt\":\"Q2: Enable caching"));
+
+        // Dangling key (no value) is dropped.
+        Assert.Equal(
+            "{\"questions\":[{\"prompt\":\"Which DB?\",\"options\":[\"SQLite\",\"Postgres\"]}]}",
+            JsonRepairUtilities.TryRepairTruncatedJson(
+                "{\"questions\":[{\"prompt\":\"Which DB?\",\"options\":[\"SQLite\",\"Postgres\"],\"ration"));
+
+        // A key truncated mid-string is dropped (safe cut back to the previous entry).
+        Assert.Equal(
+            "{\"questions\":[{\"prompt\":\"Which DB?\"}]}",
+            JsonRepairUtilities.TryRepairTruncatedJson(
+                "{\"questions\":[{\"prompt\":\"Which DB?\",\"rat"));
+
+        // Already-balanced documents are left untouched (returns null).
+        Assert.Null(JsonRepairUtilities.TryRepairTruncatedJson("{\"a\":[1,2,3]}"));
+        Assert.Null(JsonRepairUtilities.TryRepairTruncatedJson("[1,2,3]"));
     }
 }

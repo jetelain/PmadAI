@@ -153,28 +153,35 @@ public static class UtilityMicroBenchmarks
     {
         Console.WriteLine("\n[3/5] Running Fuzzy & Aliased Tool Dispatch Benchmark (100 calls)...");
 
-        var dispatcher = new LenientToolDispatcher();
-        var canonicalFunc = AIFunctionFactory.Create(
-            (string query, int limit) => $"Found {limit} items for {query}",
-            "search_database",
-            "Searches database");
-
-        dispatcher.RegisterTools([canonicalFunc]);
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = new Dictionary<string, ToolMapping>
             {
                 ["search_database"] = new ToolMapping
                 {
                     Aliases = ["search", "find", "query_db", "lookup"],
-                    ParameterAliases = new Dictionary<string, HashSet<string>>
+                    ParameterAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                     {
-                        ["query"] = ["q", "pattern", "term", "filter"],
-                        ["limit"] = ["max", "count", "take", "top"]
+                        ["query"] = "query",
+                        ["q"] = "query",
+                        ["pattern"] = "query",
+                        ["term"] = "query",
+                        ["filter"] = "query",
+                        ["limit"] = "limit",
+                        ["max"] = "limit",
+                        ["count"] = "limit",
+                        ["take"] = "limit",
+                        ["top"] = "limit"
                     }
                 }
             }
         });
+        var canonicalFunc = AIFunctionFactory.Create(
+            (string query, int limit) => $"Found {limit} items for {query}",
+            "search_database",
+            "Searches database");
+
+        dispatcher.RegisterTools([canonicalFunc]);
         dispatcher.Validate(throwOnError: true);
 
         var sampleAliases = new[] { "search", "find", "query_db", "lookup", "workspace::search" };

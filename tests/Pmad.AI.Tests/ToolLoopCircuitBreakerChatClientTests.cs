@@ -440,8 +440,7 @@ public class ToolLoopCircuitBreakerChatClientTests
             ]));
         });
 
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = new()
             {
@@ -551,8 +550,7 @@ public class ToolLoopCircuitBreakerChatClientTests
             ])
         ])));
 
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Translations =
             [

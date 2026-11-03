@@ -345,8 +345,7 @@ public class ToolCallHealingChatClientTests
     [Fact]
     public async Task GetResponseAsync_WithLenientToolDispatcher_AliasIsPromotedAndDispatched()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -380,8 +379,7 @@ public class ToolCallHealingChatClientTests
     [Fact]
     public async Task GetResponseAsync_WithLenientToolDispatcher_VirtualTranslationIsPromoted()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Translations =
             [
@@ -443,8 +441,7 @@ public class ToolCallHealingChatClientTests
     [Fact]
     public async Task GetResponseAsync_WithPipeline_DispatcherPassedViaLenientToolDispatchChatClient()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {

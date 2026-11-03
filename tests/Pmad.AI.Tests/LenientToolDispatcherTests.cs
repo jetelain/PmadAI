@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
+using Pmad.AI.Common;
 using Pmad.AI.Guardrails;
 using Pmad.AI.Tools;
 
@@ -11,8 +12,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public void NormalizeCall_ResolvesToolAndParameterAliases()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -37,6 +37,53 @@ public class LenientToolDispatcherTests
     }
 
     [Fact]
+    public void Clone_ProducesStandaloneDispatcherWithSharedConfigurationAndTools()
+    {
+        var telemetry = new LenientDispatchTelemetry();
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["read"] = new ToolMapping(
+                    aliases: ["read_file", "view_file"],
+                    parameterAliases: new Dictionary<string, IEnumerable<string>>
+                    {
+                        ["path"] = ["filePath", "file_path", "filename"]
+                    })
+            }
+        }, new LenientToolDispatcherOptions { Telemetry = telemetry });
+        var readTool = AIFunctionFactory.Create(
+            ([Description("File path")] string path) => $"content of {path}",
+            "read"); 
+        dispatcher.RegisterTool(readTool);
+
+        var clone = dispatcher.Clone();
+
+        // Clone is a distinct instance with independent session state.
+        Assert.NotSame(dispatcher, clone);
+        Assert.Null(clone.SessionId);
+
+        // Configuration and registered tools are shared and resolvable on the clone.
+        Assert.True(clone.IsToolRegistered("view_file"));
+        Assert.True(clone.TryGetRegisteredTool("read", out _));
+
+        // Normalization behaves identically on the clone.
+        var dispatched = clone.NormalizeCall("view_file", "{\"filePath\": \"src/app.cs\"}");
+        Assert.Equal("read", dispatched.CanonicalToolName);
+        Assert.Equal("src/app.cs", dispatched.Arguments["path"]);
+
+        // Telemetry is shared by reference so events from the clone are observable.
+        Assert.Same(telemetry, clone.Telemetry);
+
+        // Mutating the clone's configuration does not affect the original dispatcher.
+        clone.RegisterTool(AIFunctionFactory.Create(
+            ([Description("File path")] string path) => $"content of {path}",
+            "read2"));
+        Assert.True(clone.IsToolRegistered("read2"));
+        Assert.False(dispatcher.IsToolRegistered("read2"));
+    }
+
+    [Fact]
     public void NormalizeCall_StripsNamespacePrefix()
     {
         var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions
@@ -53,8 +100,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public void NormalizeCall_RendersTranslationWithEscaping()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Translations =
             [
@@ -83,8 +129,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public void NormalizeCall_RejectsOptionInjectionInTranslation()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Translations =
             [
@@ -108,8 +153,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public void Validate_CatchesMissingToolAndInvalidParameterSchema()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -134,8 +178,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public async Task ExecuteAsync_NormalizesAndInvokesTargetTool()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -161,8 +204,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public async Task UseLenientToolDispatch_RewritesToolCallContentInPipeline()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -199,8 +241,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public void NormalizeCall_Translation_ResolvesCasingDifferencesAndParameterAliases()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -280,8 +321,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public void NormalizeCall_ConfiguredToolWithoutRegisteredInstance_ResolvesCanonicalToolAndMapping()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -367,8 +407,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public async Task NormalizeCall_DeepSchemaParsesStringifiedJsonAndRenamesNestedAliases()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -401,8 +440,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public void NormalizeCall_EvaluatesComputedParametersForLineSlicing()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -435,8 +473,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public async Task LenientAIFunction_NormalizesArgumentsBeforeDirectInvocation()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -534,8 +571,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public void NormalizeCall_ComputerExceptionSafetyAndCaseInsensitivity()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -571,8 +607,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public void Validate_DoesNotWarn_OnNestedPropertyPaths()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -622,8 +657,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public async Task LenientAIFunction_DispatchesToTargetTool_WhenTranslated()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Translations =
             [
@@ -668,10 +702,9 @@ public class LenientToolDispatcherTests
     [Fact]
     public void NormalizeCall_ResolvesEnumValueAliases_FromEnumAttributes()
     {
-        var dispatcher = new LenientToolDispatcher();
         var mapping = new ToolMapping();
         mapping.AddEnumAliases<TestResourceType>("resource_type");
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = { ["provision"] = mapping }
         });
@@ -696,11 +729,11 @@ public class LenientToolDispatcherTests
     [Fact]
     public void NormalizeCall_ResolvesStringValueAliases_ConfiguredOnToolMapping()
     {
-        var dispatcher = new LenientToolDispatcher();
         var mapping = new ToolMapping();
         mapping.AddParameterValueAlias("species", "wild tiger", "wild tigers", "tiger", "tigers");
         mapping.AddParameterValueAlias("species", "african elephant", "african elephants", "elephant");
-        dispatcher.Configure(new ToolDispatcherConfiguration
+
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = { ["calculate_effective_population_size"] = mapping }
         });
@@ -716,11 +749,10 @@ public class LenientToolDispatcherTests
     [Fact]
     public void NormalizeCall_ResolvesValueAliases_AcrossPathCasingAndSnakeCasePlurals()
     {
-        var dispatcher = new LenientToolDispatcher();
         var mapping = new ToolMapping();
         // Registered with camelCase path "targetSpecies"
         mapping.AddParameterValueAlias("targetSpecies", "wild tiger", "tiger");
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = { ["track_animal"] = mapping }
         });
@@ -737,7 +769,6 @@ public class LenientToolDispatcherTests
     [Fact]
     public async Task NormalizeCall_PerformsDeepObjectAndArrayNormalization()
     {
-        var dispatcher = new LenientToolDispatcher();
         var mapping = new ToolMapping(
             nestedParameterAliases: new Dictionary<string, IDictionary<string, IEnumerable<string>>>
             {
@@ -748,7 +779,7 @@ public class LenientToolDispatcherTests
                 }
             });
 
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = { ["apply_patch"] = mapping }
         });
@@ -785,10 +816,9 @@ public class LenientToolDispatcherTests
     [Fact]
     public async Task LenientToolDispatcher_ExecutesSilently_WithoutInjectingApologiesOrNotices()
     {
-        var dispatcher = new LenientToolDispatcher();
         var mapping = new ToolMapping();
         mapping.AddParameterValueAlias("species", "wild tiger", "wild tigers");
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = { ["lookup"] = mapping }
         });
@@ -821,13 +851,13 @@ public class LenientToolDispatcherTests
     [Fact]
     public void CasingHelpers_CorrectlyHandleWhitespaceAndMultipleSeparators()
     {
-        Assert.Equal("wild_tiger", LenientToolDispatcher.ToSnakeCase("wild tiger"));
-        Assert.Equal("wild_tiger", LenientToolDispatcher.ToSnakeCase("wild   tiger"));
-        Assert.Equal("wild_tiger", LenientToolDispatcher.ToSnakeCase("wild  _  tiger"));
-        Assert.Equal("wildTiger", LenientToolDispatcher.ToCamelCase("wild tiger"));
-        Assert.Equal("wildTiger", LenientToolDispatcher.ToCamelCase("wild   tiger"));
-        Assert.Equal("WildTiger", LenientToolDispatcher.ToPascalCase("wild tiger"));
-        Assert.Equal("WildTiger", LenientToolDispatcher.ToPascalCase("wild   tiger"));
+        Assert.Equal("wild_tiger", StringCaseConverter.ToSnakeCase("wild tiger"));
+        Assert.Equal("wild_tiger", StringCaseConverter.ToSnakeCase("wild   tiger"));
+        Assert.Equal("wild_tiger", StringCaseConverter.ToSnakeCase("wild  _  tiger"));
+        Assert.Equal("wildTiger", StringCaseConverter.ToCamelCase("wild tiger"));
+        Assert.Equal("wildTiger", StringCaseConverter.ToCamelCase("wild   tiger"));
+        Assert.Equal("WildTiger", StringCaseConverter.ToPascalCase("wild tiger"));
+        Assert.Equal("WildTiger", StringCaseConverter.ToPascalCase("wild   tiger"));
     }
 
     [Fact]
@@ -837,12 +867,12 @@ public class LenientToolDispatcherTests
         var tool = AIFunctionFactory.Create(([Description("File path")] string path) => path, "read");
 
         dispatcher.RegisterTool(tool);
-        Assert.True(dispatcher.TryGetCachedSchemaProperties("read", out var props1));
+        Assert.True(dispatcher.RegistredTools.TryGetCachedSchemaProperties("read", out var props1));
         Assert.NotNull(props1);
 
         // Register same instance again
         dispatcher.RegisterTool(tool);
-        Assert.True(dispatcher.TryGetCachedSchemaProperties("read", out var props2));
+        Assert.True(dispatcher.RegistredTools.TryGetCachedSchemaProperties("read", out var props2));
 
         Assert.Same(props1, props2);
     }
@@ -855,12 +885,12 @@ public class LenientToolDispatcherTests
         var tool2 = AIFunctionFactory.Create(([Description("Query string")] string query, [Description("Limit count")] int limit) => query, "search");
 
         dispatcher.RegisterTool(tool1);
-        Assert.True(dispatcher.TryGetCachedSchemaProperties("search", out var props1));
+        Assert.True(dispatcher.RegistredTools.TryGetCachedSchemaProperties("search", out var props1));
         Assert.NotNull(props1);
 
         // Register distinct instance with equivalent schema
         dispatcher.RegisterTool(tool2);
-        Assert.True(dispatcher.TryGetCachedSchemaProperties("search", out var props2));
+        Assert.True(dispatcher.RegistredTools.TryGetCachedSchemaProperties("search", out var props2));
 
         Assert.Same(props1, props2);
         Assert.True(dispatcher.TryGetRegisteredTool("search", out var activeTool));
@@ -872,7 +902,6 @@ public class LenientToolDispatcherTests
     {
         var dispatcher = new LenientToolDispatcher();
         var tool = AIFunctionFactory.Create((string location) => location, "get_weather");
-
         dispatcher.RegisterTool(tool);
 
         Assert.Equal("get_weather", dispatcher.ResolveCanonicalToolName("GET_WEATHER"));
@@ -882,7 +911,8 @@ public class LenientToolDispatcherTests
 
         // Normalizing tool call with casing drift records telemetry
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
+        dispatcher.RegisterTool(tool);
 
         var dispatched = dispatcher.NormalizeCall("GET_WEATHER", new Dictionary<string, object?> { ["Location"] = "Paris" });
         Assert.Equal("get_weather", dispatched.CanonicalToolName);
@@ -896,9 +926,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public async Task LenientToolDispatchChatClient_RegistersRequestTools_NonStreaming_NormalizesPropertiesAndCoercesTypes()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         var dynamicTool = AIFunctionFactory.Create(
             ([Description("Item identifier")] int id, [Description("Item label")] string label) => $"{id}:{label}",
@@ -941,9 +970,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public async Task LenientToolDispatchChatClient_RegistersRequestTools_Streaming_NormalizesToolAndPropertyNames()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         var dynamicTool = AIFunctionFactory.Create(
             ([Description("Query text")] string queryText) => queryText,
@@ -991,8 +1019,7 @@ public class LenientToolDispatcherTests
     [Fact]
     public async Task LenientToolDispatchChatClient_PreservesStaticConfig_AlongsideDynamicTools()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -1038,9 +1065,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_OrdinalCaseInsensitive_SnapsToUniqueCandidate()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         var candidates = new[] { "Development", "Staging", "Production" };
         var result = dispatcher.SnapEnumValue("production", candidates);
@@ -1055,9 +1081,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_ExactMatch_DoesNotRecordTelemetry()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         var candidates = new[] { "Development", "Staging", "Production" };
         var result = dispatcher.SnapEnumValue("Production", candidates);
@@ -1072,9 +1097,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_CaseInsensitiveTie_LeavesUntouched_AndRecordsUnmatched()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         var candidates = new[] { "foo", "FOO" };
         var result = dispatcher.SnapEnumValue("Foo", candidates);
@@ -1088,9 +1112,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_Normalization_CollapsesSeparatorsAndWhitespace()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         var candidates = new[] { "in_progress", "completed", "not_started" };
         Assert.Equal("in_progress", dispatcher.SnapEnumValue("  in-progress  ", candidates));
@@ -1105,9 +1128,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_NaivePluralStripping()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         var candidates = new[] { "wild_tiger", "african_elephant" };
         // Plural input -> singular candidate
@@ -1126,9 +1148,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_UniqueSubstringContainment()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         var candidates = new[] { "Battle of Stalingrad", "Battle of Midway", "Siege of Leningrad" };
         // Stalingrad uniquely contained in "Battle of Stalingrad"
@@ -1143,9 +1164,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_AmbiguousSubstringContainmentTie_LeavesUntouched()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         // "Stalingrad" matches both
         var candidates = new[] { "Battle of Stalingrad", "Siege of Stalingrad" };
@@ -1160,9 +1180,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_BoundedEditDistance_SnapsWhenWithinBound()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         var candidates = new[] { "pending", "approved", "rejected" };
         // "pedning" -> transposition of d/n (distance 1, len 7, 1/7 <= 0.25)
@@ -1182,9 +1201,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_BoundedEditDistance_RejectsWhenExceedingLengthBound()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         var candidates = new[] { "cat", "dog" };
         // distance 1 on length 3 is 33% > 25% bound -> rejected
@@ -1199,9 +1217,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_BoundedEditDistance_TieLeavesUntouched()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         // "cax1234" is distance 1 from both "cat1234" and "car1234"
         var candidates = new[] { "cat1234", "car1234" };
@@ -1216,9 +1233,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_PreventsFalseSubstringSnappingOnShortWords()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         // "connection" should NOT snap to "on" simply because "connection" contains "on"
         Assert.Equal("connection", dispatcher.SnapEnumValue("connection", ["on", "off"]));
@@ -1243,9 +1259,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_TokenAndAffixContainment_SnapsLegitimatePhrases()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         // Bounded delimiter tokens
         Assert.Equal("turn-on", dispatcher.SnapEnumValue("on", ["turn-on", "turn-off"]));
@@ -1258,9 +1273,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void SnapEnumValue_DirectCall_StripPluralSuffix_HandlesUpperCase()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         // Upper-case plural candidate/value snapping
         Assert.Equal("TIGER", dispatcher.SnapEnumValue("TIGERS", ["TIGER", "ELEPHANT"]));
@@ -1311,9 +1325,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public async Task NormalizeCall_EndToEnd_SnapsEnumParameterToAIFunction()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         var tool = AIFunctionFactory.Create(
             (ServerEnvironment env) => $"Deployed to {env}",
@@ -1348,9 +1361,8 @@ public class LenientToolDispatcherTests
     [Fact]
     public void NormalizeCall_EndToEnd_SnapsNestedObjectEnumProperty()
     {
-        var dispatcher = new LenientToolDispatcher();
         var telemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = telemetry;
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions() { Telemetry = telemetry });
 
         var tool = AIFunctionFactory.Create(
             (ComplexConfigItem config) => $"{config.Name}:{config.Env}",
