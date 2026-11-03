@@ -225,7 +225,13 @@ public class ToolMapping
 
     /// <summary>
     /// Discovers and registers <see cref="ToolValueAliasAttribute"/> aliases defined on enum members of <typeparamref name="TEnum"/>.
+    /// This method relies on runtime reflection over enum fields and custom attributes; in Native AOT /
+    /// trimmed deployments prefer the source-generated tool configuration path (see
+    /// <c>Pmad.AI.SourceGenerators</c>), which is reflection-free.
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.RequiresUnreferencedCode(
+        "Uses reflection (GetFields and Attribute.GetCustomAttribute) to discover [ToolValueAlias] members of TEnum; " +
+        "use the source-generated tool configuration in AOT/trimmed scenarios.")]
     public ToolMapping AddEnumAliases<TEnum>(string? paramPath = null) where TEnum : struct, Enum
     {
         var enumType = typeof(TEnum);

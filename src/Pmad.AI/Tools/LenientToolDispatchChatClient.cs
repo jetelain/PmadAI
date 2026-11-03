@@ -1,19 +1,25 @@
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace Pmad.AI.Tools;
 
 /// <summary>
 /// Delegating chat client middleware that normalizes <see cref="FunctionCallContent"/> items
 /// using <see cref="LenientToolDispatcher"/> so that downstream <c>FunctionInvokingChatClient</c> resolves canonical tools.
+/// The dispatcher holds per-session state (<see cref="LenientToolDispatcher.SessionId"/>); create one
+/// dispatcher per chat client (e.g. via <see cref="LenientToolDispatcher.Clone"/>) when serving
+/// multiple concurrent sessions to avoid cross-session telemetry corruption.
 /// </summary>
 public class LenientToolDispatchChatClient : DelegatingChatClient
 {
     private readonly LenientToolDispatcher _dispatcher;
+    private readonly ILogger? _logger;
 
-    public LenientToolDispatchChatClient(IChatClient innerClient, LenientToolDispatcher dispatcher)
+    public LenientToolDispatchChatClient(IChatClient innerClient, LenientToolDispatcher dispatcher, ILogger? logger = null)
         : base(innerClient)
     {
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
+        _logger = logger;
     }
 
     private void RegisterRequestTools(ChatOptions? options)
@@ -77,9 +83,25 @@ public class LenientToolDispatchChatClient : DelegatingChatClient
                             var dispatched = _dispatcher.NormalizeCall(fcc);
                             update.Contents[i] = new FunctionCallContent(fcc.CallId, dispatched.CanonicalToolName, dispatched.Arguments);
                         }
-                        catch (KeyNotFoundException)
+                        catch (KeyNotFoundException ex)
                         {
                             // In streaming, arguments might not be fully assembled yet for translations.
+                            _logger?.LogDebug(ex, "Skipping normalization of streamed tool call '{ToolName}' (missing parameter)", fcc.Name);
+                        }
+                        catch (ArgumentException ex)
+                        {
+                            // Option injection rejected or malformed arguments: stay lenient, do not abort the stream.
+                            _logger?.LogWarning(ex, "Normalization of streamed tool call '{ToolName}' failed; invoking raw call", fcc.Name);
+                        }
+                        catch (InvalidOperationException ex)
+                        {
+                            // Rendered command blocked by the validator: stay lenient, do not abort the stream.
+                            _logger?.LogWarning(ex, "Normalization of streamed tool call '{ToolName}' failed; invoking raw call", fcc.Name);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Unexpected failure (e.g. malformed arguments): stay lenient, do not abort the stream.
+                            _logger?.LogWarning(ex, "Normalization of streamed tool call '{ToolName}' failed; invoking raw call", fcc.Name);
                         }
                     }
                 }

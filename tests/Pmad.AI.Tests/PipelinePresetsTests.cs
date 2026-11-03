@@ -46,8 +46,7 @@ public class PipelinePresetsTests
     public async Task UseRecommendedSlmPipeline_AppliesExpectedDefaultsAndResolvesServices()
     {
         var inner = new DummyChatClient();
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = new Dictionary<string, ToolMapping>
             {

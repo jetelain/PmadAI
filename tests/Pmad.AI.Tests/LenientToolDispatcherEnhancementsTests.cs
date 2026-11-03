@@ -13,8 +13,8 @@ public class LenientToolDispatcherEnhancementsTests
     [Fact]
     public void CustomToolMapping_ComputesLimitFromEndLineAndStartLine()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(
+        new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -381,8 +381,7 @@ public class LenientToolDispatcherEnhancementsTests
     [Fact]
     public async Task FindPrimaryStringProperty_UsesExplicitToolMappingConfiguration()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -561,13 +560,7 @@ public class LenientToolDispatcherEnhancementsTests
     // ---------------------------------------------------------------------
     private LenientToolDispatcher CreateAskDispatcher(out AIFunction askTool)
     {
-        var dispatcher = new LenientToolDispatcher();
-        var ask = AIFunctionFactory.Create(
-            (IReadOnlyList<TestQuestionItem> questions) => $"Asked {questions.Count}: {string.Join("; ", questions.Select(q => q.Prompt))}",
-            "ask");
-        askTool = ask;
-        dispatcher.RegisterTool(ask);
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -575,19 +568,19 @@ public class LenientToolDispatcherEnhancementsTests
                     .SetPrimaryCollectionProperty("questions[]", "prompt")
                     .AddNestedParameterAlias("questions[]", "options", "optionsJson", "choices")
             }
-        });
+        }); 
+        var ask = AIFunctionFactory.Create(
+            (IReadOnlyList<TestQuestionItem> questions) => $"Asked {questions.Count}: {string.Join("; ", questions.Select(q => q.Prompt))}",
+            "ask");
+        askTool = ask;
+        dispatcher.RegisterTool(ask);
         return dispatcher;
     }
 
     [Fact]
     public async Task NCF_AskQuestionItems_ParameterAlias_RenamesToQuestions()
     {
-        var dispatcher = new LenientToolDispatcher();
-        var tool = AIFunctionFactory.Create(
-            (IReadOnlyList<TestQuestionItem> questions) => $"Asked {questions.Count}: {string.Join("; ", questions.Select(q => q.Prompt))}",
-            "ask");
-        dispatcher.RegisterTool(tool);
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -595,6 +588,10 @@ public class LenientToolDispatcherEnhancementsTests
                     { ["questions"] = ["question_items", "questionItems"] })
             }
         });
+        var tool = AIFunctionFactory.Create(
+            (IReadOnlyList<TestQuestionItem> questions) => $"Asked {questions.Count}: {string.Join("; ", questions.Select(q => q.Prompt))}",
+            "ask");
+        dispatcher.RegisterTool(tool);
 
         // NightCodeForge: { "question_items": [...] } -> questions
         var d1 = dispatcher.NormalizeCall("ask", "{\"question_items\": [{\"prompt\": \"Question 1\"}]}");
@@ -602,7 +599,7 @@ public class LenientToolDispatcherEnhancementsTests
         Assert.False(d1.Arguments.ContainsKey("question_items"));
 
         // NightCodeForge: { "items": [...] } -> questions
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -610,6 +607,7 @@ public class LenientToolDispatcherEnhancementsTests
                     { ["questions"] = ["question_items", "items"] })
             }
         });
+        dispatcher.RegisterTool(tool);
         var d2 = dispatcher.NormalizeCall("ask", "{\"items\": [{\"prompt\": \"Question 2\"}]}");
         Assert.True(d2.Arguments.ContainsKey("questions"));
         Assert.False(d2.Arguments.ContainsKey("items"));

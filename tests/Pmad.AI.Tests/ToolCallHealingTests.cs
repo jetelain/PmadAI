@@ -404,8 +404,7 @@ public class ToolCallHealingTests
     [Fact]
     public void ShouldPromoteToolCall_WithDeclaredToolsAndAlias_ReturnsTrueWhenDispatcherAware()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -426,8 +425,7 @@ public class ToolCallHealingTests
     [Fact]
     public void ShouldPromoteToolCall_WithDeclaredToolsAndTranslation_ReturnsTrueWhenDispatcherAware()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Translations =
             [
@@ -466,8 +464,7 @@ public class ToolCallHealingTests
     [Fact]
     public void ShouldPromoteToolCall_WithUndeclaredTool_ReturnsFalse()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -513,8 +510,7 @@ public class ToolCallHealingTests
     [Fact]
     public void ShouldPromoteToolCall_WithDeclaredAlias_ReturnsTrueForCanonical()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {
@@ -536,8 +532,7 @@ public class ToolCallHealingTests
     [Fact]
     public void HealResponseText_WithOptionsAndDispatcher_PromotesAliasedTool()
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools =
             {

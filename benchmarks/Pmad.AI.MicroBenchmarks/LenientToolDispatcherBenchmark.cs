@@ -20,25 +20,7 @@ public class LenientToolDispatcherBenchmark
     [GlobalSetup]
     public void Setup()
     {
-        _dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions
-        {
-            StripNamespacePrefixes = true
-        });
-
-        var readFileFunction = AIFunctionFactory.Create(
-            (string path, int? startLine, int? endLine) => "file content",
-            "read_file",
-            "Reads file contents.");
-
-        var bashFunction = AIFunctionFactory.Create(
-            (string command) => "command output",
-            "bash",
-            "Executes bash command.");
-
-        _dispatcher.RegisterTool(readFileFunction);
-        _dispatcher.RegisterTool(bashFunction);
-
-        _dispatcher.Configure(new ToolDispatcherConfiguration
+        _dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = new Dictionary<string, ToolMapping>(StringComparer.OrdinalIgnoreCase)
             {
@@ -60,7 +42,24 @@ public class LenientToolDispatcherBenchmark
                     EscapeMethod = ParameterEscapeMethod.Bash
                 }
             ]
+        },
+        new LenientToolDispatcherOptions
+        {
+            StripNamespacePrefixes = true
         });
+
+        var readFileFunction = AIFunctionFactory.Create(
+            (string path, int? startLine, int? endLine) => "file content",
+            "read_file",
+            "Reads file contents.");
+
+        var bashFunction = AIFunctionFactory.Create(
+            (string command) => "command output",
+            "bash",
+            "Executes bash command.");
+
+        _dispatcher.RegisterTool(readFileFunction);
+        _dispatcher.RegisterTool(bashFunction);
 
         _exactDictArgs = new Dictionary<string, object?>
         {

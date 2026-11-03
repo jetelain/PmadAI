@@ -129,8 +129,7 @@ public static class BenchmarkPipelineBuilder
             MaxIdenticalObservationStreak = 4,
             MaxConsecutiveToolErrors = 5
         });
-        var dispatcher = CreateConfiguredDispatcher();
-        dispatcher.Telemetry = dispatchTelemetry;
+        var dispatcher = CreateConfiguredDispatcher(dispatchTelemetry);
 
         var withBreaker = new ToolLoopCircuitBreakerChatClient(innerClient, breaker, dispatcher);
         return new LenientToolDispatchChatClient(withBreaker, dispatcher);
@@ -140,9 +139,8 @@ public static class BenchmarkPipelineBuilder
         IChatClient innerClient,
         CompactionTelemetry telemetry)
     {
-        var dispatcher = CreateConfiguredDispatcher();
         var dispatchTelemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = dispatchTelemetry;
+        var dispatcher = CreateConfiguredDispatcher(dispatchTelemetry);
 
         var healingTelemetry = new ToolCallHealingTelemetry();
         var breakerTelemetry = new CircuitBreakerTelemetry();
@@ -170,9 +168,8 @@ public static class BenchmarkPipelineBuilder
         IChatClient innerClient,
         CompactionTelemetry telemetry)
     {
-        var dispatcher = CreateConfiguredDispatcher();
         var dispatchTelemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = dispatchTelemetry;
+        var dispatcher = CreateConfiguredDispatcher(dispatchTelemetry);
 
         var healingTelemetry = new ToolCallHealingTelemetry();
         var breakerTelemetry = new CircuitBreakerTelemetry();
@@ -206,9 +203,8 @@ public static class BenchmarkPipelineBuilder
         ISpeculativeSummarizer? speculativeSummarizer,
         CompactionTelemetry telemetry)
     {
-        var dispatcher = CreateConfiguredDispatcher();
         var dispatchTelemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = dispatchTelemetry;
+        var dispatcher = CreateConfiguredDispatcher(dispatchTelemetry);
 
         var healingTelemetry = new ToolCallHealingTelemetry();
         var breakerTelemetry = new CircuitBreakerTelemetry();
@@ -239,9 +235,8 @@ public static class BenchmarkPipelineBuilder
 
     private static IChatClient BuildHealingLenientPipeline(IChatClient innerClient)
     {
-        var dispatcher = CreateConfiguredDispatcher();
         var dispatchTelemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = dispatchTelemetry;
+        var dispatcher = CreateConfiguredDispatcher(dispatchTelemetry);
 
         var healingTelemetry = new ToolCallHealingTelemetry();
         var breakerTelemetry = new CircuitBreakerTelemetry();
@@ -288,9 +283,8 @@ public static class BenchmarkPipelineBuilder
         ISpeculativeSummarizer? speculativeSummarizer,
         CompactionTelemetry telemetry)
     {
-        var dispatcher = CreateConfiguredDispatcher();
         var dispatchTelemetry = new LenientDispatchTelemetry();
-        dispatcher.Telemetry = dispatchTelemetry;
+        var dispatcher = CreateConfiguredDispatcher(dispatchTelemetry);
 
         var healingTelemetry = new ToolCallHealingTelemetry();
         var breakerTelemetry = new CircuitBreakerTelemetry();
@@ -328,10 +322,9 @@ public static class BenchmarkPipelineBuilder
         return current;
     }
 
-    private static LenientToolDispatcher CreateConfiguredDispatcher()
+    private static LenientToolDispatcher CreateConfiguredDispatcher(LenientDispatchTelemetry? telemetry = null)
     {
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = new Dictionary<string, ToolMapping>(StringComparer.OrdinalIgnoreCase)
             {
@@ -345,6 +338,10 @@ public static class BenchmarkPipelineBuilder
                 ["apply_patch"] = new(aliases: ["patch", "applyPatch", "git_apply"]),
                 ["query_database"] = new(aliases: ["queryDb", "sql_query", "database_query"])
             }
+        },
+        new LenientToolDispatcherOptions()
+        {
+            Telemetry = telemetry
         });
         return dispatcher;
     }

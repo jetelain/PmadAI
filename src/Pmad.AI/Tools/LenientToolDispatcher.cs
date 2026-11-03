@@ -23,26 +23,25 @@ public sealed record DispatchedToolCall(
 
 /// <summary>
 /// Configurable tool router with alias resolution, parameter translation, and schema validation.
-/// 100% Native AOT compatible and reflection-free.
+/// Native AOT compatible and reflection-free (except the opt-in
+/// <see cref="ToolMapping.AddEnumAliases{TEnum}"/>, which uses runtime reflection and is marked
+/// <see cref="System.Diagnostics.CodeAnalysis.RequiresUnreferencedCodeAttribute"/>).
 /// </summary>
 public class LenientToolDispatcher
 {
     private readonly LenientToolDispatcherOptions _options;
-    private readonly object _syncLock = new();
-    private ToolDispatcherConfiguration _configuration = new();
-    private readonly Dictionary<string, AIFunction> _registeredTools = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ToolDispatcherConfiguration _configuration;
+
+    // Build once, never change
     private readonly Dictionary<string, string> _aliasToCanonical = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ToolTranslation> _translationsBySource = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, Dictionary<string, (string CanonicalName, JsonElement Schema)>> _toolSchemaProperties = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, JsonElement> _toolRootSchemas = new(StringComparer.OrdinalIgnoreCase);
+
+    // May mutate with on-the-fly tool registration
+    private volatile RegistredToolsMetadata _registeredTools = new RegistredToolsMetadata(null);
 
     private static readonly Regex TemplatePlaceholderRegex = new(@"\{([a-zA-Z0-9_]+)(?::([^}]*))?\}", RegexOptions.Compiled);
 
-    public LenientDispatchTelemetry? Telemetry
-    {
-        get => _options.Telemetry;
-        set => _options.Telemetry = value;
-    }
+    public LenientDispatchTelemetry? Telemetry => _options.Telemetry;
 
     public string? SessionId
     {
@@ -50,29 +49,57 @@ public class LenientToolDispatcher
         set => _options.SessionId = value;
     }
 
-    public LenientToolDispatcher(LenientToolDispatcherOptions? options = null)
+    internal RegistredToolsMetadata RegistredTools => _registeredTools;
+
+    public LenientToolDispatcher(LenientToolDispatcherOptions options)
+        : this(null, options)
     {
+
+    }
+
+    public LenientToolDispatcher(ToolDispatcherConfiguration? configuration = null, LenientToolDispatcherOptions? options = null, IEnumerable<AIFunction>? aIFunctions = null)
+        : this(configuration ?? new ToolDispatcherConfiguration(), options ?? new LenientToolDispatcherOptions(), new RegistredToolsMetadata(aIFunctions))
+    {
+
+    }
+
+    private LenientToolDispatcher(ToolDispatcherConfiguration configuration, LenientToolDispatcherOptions options, RegistredToolsMetadata registeredTools)
+    {
+        _configuration = configuration ?? new ToolDispatcherConfiguration();
         _options = options ?? new LenientToolDispatcherOptions();
+        BuildLookupTables();
+        _registeredTools = registeredTools;
     }
 
     /// <summary>
-    /// Ingests a strongly-typed tool dispatcher configuration.
+    /// Creates a standalone copy of this dispatcher with an independent options holder, telemetry
+    /// session state, and freshly rebuilt lookup tables, so it can be safely owned by a single
+    /// chat client. The configuration and registered tools are shared by reference: configure and
+    /// register tools on one dispatcher before cloning, or keep calling <see cref="Configure"/> and
+    /// <see cref="RegisterTool(s)"/> on each clone as needed. Note that per-session state
+    /// (<see cref="SessionId"/>) must not be shared across concurrent sessions; create one
+    /// dispatcher per chat client (e.g. via this method) instead of reusing a single instance.
     /// </summary>
-    public void Configure(ToolDispatcherConfiguration configuration)
+    public LenientToolDispatcher Clone()
     {
-        ArgumentNullException.ThrowIfNull(configuration);
-        lock (_syncLock)
+        var clone = new LenientToolDispatcher(_configuration, new LenientToolDispatcherOptions
         {
-            _configuration = configuration;
-            RebuildLookupTables();
-        }
+            StripNamespacePrefixes = _options.StripNamespacePrefixes,
+            ValidateTranslationsWithReadOnlyValidator = _options.ValidateTranslationsWithReadOnlyValidator,
+            CommandValidator = _options.CommandValidator,
+            EnableParameterCoercion = _options.EnableParameterCoercion,
+            AutoPromoteFlattenedArrayParameters = _options.AutoPromoteFlattenedArrayParameters,
+            AutoPropagateCollectionParameters = _options.AutoPropagateCollectionParameters,
+            PropagatedParameters = new HashSet<string>(_options.PropagatedParameters, StringComparer.OrdinalIgnoreCase),
+            DefaultPrimaryStringProperties = new List<string>(_options.DefaultPrimaryStringProperties),
+            Telemetry = _options.Telemetry,
+            SessionId = null
+        }, _registeredTools);
+        return clone;
     }
 
-    private void RebuildLookupTables()
+    private void BuildLookupTables()
     {
-        _aliasToCanonical.Clear();
-        _translationsBySource.Clear();
-
         if (_configuration.Translations != null)
         {
             foreach (var t in _configuration.Translations)
@@ -120,11 +147,6 @@ public class LenientToolDispatcher
                 }
             }
         }
-
-        foreach (var (toolName, tool) in _registeredTools)
-        {
-            _aliasToCanonical[tool.Name] = tool.Name;
-        }
     }
 
     /// <summary>
@@ -133,42 +155,17 @@ public class LenientToolDispatcher
     public void RegisterTool(AIFunction tool)
     {
         ArgumentNullException.ThrowIfNull(tool);
-        lock (_syncLock)
-        {
-            RegisterToolInternal(tool);
-        }
+        _registeredTools = _registeredTools.WithTool(tool);
     }
 
-    private void RegisterToolInternal(AIFunction tool)
+    /// <summary>
+    /// Registers a collection of executable <see cref="AIFunction"/> canonical tools.
+    /// </summary>
+    public void RegisterTools(IEnumerable<AIFunction> tools)
     {
-        _aliasToCanonical[tool.Name] = tool.Name;
-
-        if (_registeredTools.TryGetValue(tool.Name, out var existing))
-        {
-            if (ReferenceEquals(existing, tool))
-            {
-                return;
-            }
-
-            if (_toolRootSchemas.TryGetValue(tool.Name, out var existingSchema) &&
-                AreSchemasEqual(existingSchema, tool.JsonSchema))
-            {
-                _registeredTools[tool.Name] = tool;
-                return;
-            }
-
-            _registeredTools[tool.Name] = tool;
-        }
-        else
-        {
-            _registeredTools[tool.Name] = tool;
-        }
-
-        CacheToolSchema(tool);
+        ArgumentNullException.ThrowIfNull(tools);
+        _registeredTools = _registeredTools.WithTools(tools);
     }
-
-    internal bool TryGetCachedSchemaProperties(string toolName, out Dictionary<string, (string CanonicalName, JsonElement Schema)>? properties)
-        => _toolSchemaProperties.TryGetValue(toolName, out properties);
 
     private static void NormalizeParameterAliasMap(Dictionary<string, string> flatAliasMap)
     {
@@ -180,43 +177,6 @@ public class LenientToolDispatcher
         }
     }
 
-    private void CacheToolSchema(AIFunction tool)
-    {
-        _toolRootSchemas[tool.Name] = tool.JsonSchema;
-        if (tool.JsonSchema.ValueKind == JsonValueKind.Object &&
-            tool.JsonSchema.TryGetProperty("properties", out var props) &&
-            props.ValueKind == JsonValueKind.Object)
-        {
-            var propDict = new Dictionary<string, (string CanonicalName, JsonElement Schema)>(StringComparer.OrdinalIgnoreCase);
-            foreach (var prop in props.EnumerateObject())
-            {
-                propDict[prop.Name] = (prop.Name, prop.Value);
-                propDict[ToSnakeCase(prop.Name)] = (prop.Name, prop.Value);
-                propDict[ToCamelCase(prop.Name)] = (prop.Name, prop.Value);
-                propDict[ToPascalCase(prop.Name)] = (prop.Name, prop.Value);
-            }
-            _toolSchemaProperties[tool.Name] = propDict;
-        }
-        else
-        {
-            _toolSchemaProperties.Remove(tool.Name);
-        }
-    }
-
-    /// <summary>
-    /// Registers a collection of executable <see cref="AIFunction"/> canonical tools.
-    /// </summary>
-    public void RegisterTools(IEnumerable<AIFunction> tools)
-    {
-        ArgumentNullException.ThrowIfNull(tools);
-        lock (_syncLock)
-        {
-            foreach (var t in tools)
-            {
-                RegisterToolInternal(t);
-            }
-        }
-    }
 
     /// <summary>
     /// Validates the configured mappings and translations against registered tools and their schemas.
@@ -478,8 +438,7 @@ public class LenientToolDispatcher
         }
 
         // 5. Deep schema-driven and mapping-driven normalization (nested property renaming, casing matching, stringified JSON parsing, value alias resolution)
-        _toolRootSchemas.TryGetValue(canonicalTool, out var rootSchema);
-        _toolSchemaProperties.TryGetValue(canonicalTool, out var propDict);
+        _registeredTools.TryGetSchema(canonicalTool, out var propDict, out var rootSchema);
 
         // 4.5. Flattened collection promotion & array-to-flat unpacking & replaceAll propagation
         if (_options.AutoPromoteFlattenedArrayParameters && propDict != null)
@@ -886,8 +845,7 @@ public class LenientToolDispatcher
         int count = arguments.Count;
         if (count == 0) return;
 
-        _toolSchemaProperties.TryGetValue(canonicalToolName, out var propDict);
-        _toolRootSchemas.TryGetValue(canonicalToolName, out var rootSchema);
+        _registeredTools.TryGetSchema(canonicalToolName, out var propDict, out var rootSchema);
         _configuration.Tools.TryGetValue(canonicalToolName, out var mapping);
 
         var keyArray = new string[count];

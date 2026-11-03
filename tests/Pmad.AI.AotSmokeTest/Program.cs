@@ -76,9 +76,7 @@ public static class Program
             "Search database",
             serializerOptions: serializerOptions);
 
-        var dispatcher = new LenientToolDispatcher();
-        dispatcher.RegisterTools([searchFunc]);
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = new Dictionary<string, ToolMapping>
             {
@@ -93,6 +91,7 @@ public static class Program
                 }
             }
         });
+        dispatcher.RegisterTools([searchFunc]);
         dispatcher.Validate(throwOnError: true);
 
         var dispatchedCall = dispatcher.NormalizeCall("find", new Dictionary<string, object?>
@@ -152,8 +151,7 @@ public static class Program
                     })
             }
         };
-        var customDispatcher = new LenientToolDispatcher();
-        customDispatcher.Configure(customConfig);
+        var customDispatcher = new LenientToolDispatcher(customConfig);
         var readNormalized = customDispatcher.NormalizeCall("view_file", new Dictionary<string, object?>
         {
             ["filePath"] = "test.txt",

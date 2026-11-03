@@ -153,14 +153,7 @@ public static class UtilityMicroBenchmarks
     {
         Console.WriteLine("\n[3/5] Running Fuzzy & Aliased Tool Dispatch Benchmark (100 calls)...");
 
-        var dispatcher = new LenientToolDispatcher();
-        var canonicalFunc = AIFunctionFactory.Create(
-            (string query, int limit) => $"Found {limit} items for {query}",
-            "search_database",
-            "Searches database");
-
-        dispatcher.RegisterTools([canonicalFunc]);
-        dispatcher.Configure(new ToolDispatcherConfiguration
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
         {
             Tools = new Dictionary<string, ToolMapping>
             {
@@ -183,6 +176,12 @@ public static class UtilityMicroBenchmarks
                 }
             }
         });
+        var canonicalFunc = AIFunctionFactory.Create(
+            (string query, int limit) => $"Found {limit} items for {query}",
+            "search_database",
+            "Searches database");
+
+        dispatcher.RegisterTools([canonicalFunc]);
         dispatcher.Validate(throwOnError: true);
 
         var sampleAliases = new[] { "search", "find", "query_db", "lookup", "workspace::search" };
