@@ -370,5 +370,104 @@ public class DiffParserTests
         Assert.Equal("b.cs", addedLines[1].FilePath);
         Assert.Equal("line 2", addedLines[1].Content);
     }
+
+    [Fact]
+    public void Parse_DiffEndingWithNewline_DoesNotAppendPhantomEmptyHunkLine()
+    {
+        var diff = "diff --git a/src/App.cs b/src/App.cs\n--- a/src/App.cs\n+++ b/src/App.cs\n@@ -1,1 +1,2 @@\n context\n+added\n";
+
+        var files = DiffParser.Parse(diff);
+
+        Assert.Single(files);
+        var hunk = Assert.Single(files[0].Hunks);
+        Assert.Equal([" context", "+added"], hunk.Lines);
+    }
+
+    [Fact]
+    public void Parse_PlainUnifiedDiffMultipleFilesWithTimestamps_ParsesCorrectlyWithoutSettingOldFilePath()
+    {
+        var diff =
+            "--- a/src/First.cs\t2026-11-03 21:00:00 +0100\n" +
+            "+++ b/src/First.cs\t2026-11-03 21:01:00 +0100\n" +
+            "@@ -1,1 +1,2 @@\n" +
+            " context\n" +
+            "+first added\n" +
+            "--- a/src/Second.cs\t2026-11-03 21:00:00 +0100\n" +
+            "+++ b/src/Second.cs\t2026-11-03 21:01:00 +0100\n" +
+            "@@ -1,1 +1,1 @@\n" +
+            "-second old\n" +
+            "+second new\n" +
+            "--- a/src/Deleted.cs\t2026-11-03 21:00:00 +0100\n" +
+            "+++ /dev/null\t2026-11-03 21:01:00 +0100\n" +
+            "@@ -1,1 +0,0 @@\n" +
+            "-deleted line\n";
+
+        var files = DiffParser.Parse(diff);
+
+        Assert.Equal(3, files.Count);
+
+        Assert.Equal("src/First.cs", files[0].FilePath);
+        Assert.Null(files[0].OldFilePath);
+        Assert.Single(files[0].AddedLines);
+        Assert.Equal("first added", files[0].AddedLines[0].Content);
+
+        Assert.Equal("src/Second.cs", files[1].FilePath);
+        Assert.Null(files[1].OldFilePath);
+        Assert.Single(files[1].AddedLines);
+        Assert.Equal("second new", files[1].AddedLines[0].Content);
+        Assert.Single(files[1].DeletedLines);
+        Assert.Equal("second old", files[1].DeletedLines[0].Content);
+
+        Assert.Equal("src/Deleted.cs", files[2].FilePath);
+        Assert.Null(files[2].OldFilePath);
+        Assert.True(files[2].IsDeletedFile);
+        Assert.Single(files[2].DeletedLines);
+    }
+
+    [Fact]
+    public void Parse_QuotedPathWithEscapedQuotes_UnescapesCorrectly()
+    {
+        var diff = """
+            diff --git "a/dir/file \"quoted\" name.cs" "b/dir/file \"quoted\" name.cs"
+            --- "a/dir/file \"quoted\" name.cs"
+            +++ "b/dir/file \"quoted\" name.cs"
+            @@ -1,1 +1,2 @@
+             int a;
+            +int b;
+            """;
+
+        var files = DiffParser.Parse(diff);
+
+        Assert.Single(files);
+        Assert.Equal("dir/file \"quoted\" name.cs", files[0].FilePath);
+        Assert.Null(files[0].OldFilePath);
+        Assert.Single(files[0].AddedLines);
+    }
+
+    [Fact]
+    public void Parse_HunkLinesStartingWithDoublePlusOrDoubleMinus_AreParsedAsCodeChanges()
+    {
+        var diff = """
+            diff --git a/query.sql b/query.sql
+            --- a/query.sql
+            +++ b/query.sql
+            @@ -1,2 +1,2 @@
+            --- old sql comment
+            -SELECT 1;
+            +++i;
+            +-- new sql comment
+            """;
+
+        var files = DiffParser.Parse(diff);
+
+        Assert.Single(files);
+        Assert.Equal(2, files[0].DeletedLines.Count);
+        Assert.Equal("-- old sql comment", files[0].DeletedLines[0].Content);
+        Assert.Equal("SELECT 1;", files[0].DeletedLines[1].Content);
+
+        Assert.Equal(2, files[0].AddedLines.Count);
+        Assert.Equal("++i;", files[0].AddedLines[0].Content);
+        Assert.Equal("-- new sql comment", files[0].AddedLines[1].Content);
+    }
 }
 

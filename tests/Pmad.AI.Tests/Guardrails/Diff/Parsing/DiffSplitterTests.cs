@@ -166,6 +166,65 @@ public class DiffSplitterTests
     }
 
     [Fact]
+    public void SplitIntoChunks_OversizedMultiByteUtf8LineAndSmallBudget_RespectsByteLimitAndPreservesDiffPrefix()
+    {
+        // 4-byte UTF-8 emojis (surrogate pairs in UTF-16) and 3-byte characters
+        var multiBytePayload = string.Concat(Enumerable.Repeat("🎉あ", 400));
+        var hunk = new DiffHunk
+        {
+            Header = "@@ -1,1 +1,1 @@",
+            Lines = ["+" + multiBytePayload]
+        };
+
+        var file = new FileDiff
+        {
+            FilePath = "Unicode.txt",
+            HeaderLines = ["diff --git a/Unicode.txt b/Unicode.txt"],
+            Hunks = [hunk]
+        };
+
+        int maxChunkBytes = 600;
+        var chunks = DiffSplitter.SplitIntoChunks([file], maxChunkBytes);
+
+        Assert.True(chunks.Count >= 5);
+        foreach (var chunk in chunks)
+        {
+            Assert.True(chunk.ByteSize <= maxChunkBytes, $"Chunk byte size {chunk.ByteSize} exceeded {maxChunkBytes}");
+            Assert.DoesNotContain('\uFFFD', chunk.Content);
+
+            var lines = chunk.Content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            // Line 0 is 'diff --git ...', Line 1 is '@@ ... [Part ...] @@', Line 2 is the sliced diff line
+            Assert.Equal(3, lines.Length);
+            Assert.StartsWith("+", lines[2]);
+        }
+    }
+
+    [Fact]
+    public void FilterDeletedLines_DeletedSqlCommentsStartingWithTripleDash_CompressesCorrectly()
+    {
+        var hunk = new DiffHunk
+        {
+            Header = "@@ -1,6 +1,1 @@",
+            Lines =
+            [
+                "--- comment 1",
+                "--- comment 2",
+                "--- comment 3",
+                "--- comment 4",
+                "--- comment 5",
+                "+SELECT 1;"
+            ]
+        };
+
+        var filtered = DiffSplitter.FilterDeletedLines(hunk, maxConsecutiveDeleted: 3);
+
+        Assert.Contains(filtered.Lines, l => l.Contains("suppressed to reduce tokens"));
+        Assert.Contains("--- comment 1", filtered.Lines);
+        Assert.Contains("--- comment 5", filtered.Lines);
+        Assert.DoesNotContain("--- comment 3", filtered.Lines);
+    }
+
+    [Fact]
     public void SplitIntoChunks_EmptyList_ReturnsEmpty()
     {
         var chunks = DiffSplitter.SplitIntoChunks([]);

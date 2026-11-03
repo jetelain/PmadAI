@@ -61,8 +61,7 @@ public static class DiffSplitter
 
         foreach (var line in hunk.Lines)
         {
-            // Note: '---' is a file header separator, not code deletion
-            if (line.StartsWith('-') && !line.StartsWith("---", StringComparison.Ordinal))
+            if (line.StartsWith('-'))
             {
                 deletedBlock.Add(line);
             }
@@ -185,7 +184,7 @@ public static class DiffSplitter
                             currentHunkGroupBytes = headerBytes;
                         }
 
-                        var subHunks = SplitLargeHunk(hunk, maxChunkBytes - headerBytes - 100);
+                        var subHunks = SplitLargeHunk(hunk, maxChunkBytes - headerBytes);
                         foreach (var subHunk in subHunks)
                         {
                             var partFile = new FileDiff
@@ -285,19 +284,22 @@ public static class DiffSplitter
         };
     }
 
-    private static List<DiffHunk> SplitLargeHunk(DiffHunk hunk, int maxBytes)
+    private static List<DiffHunk> SplitLargeHunk(DiffHunk hunk, int maxHunkBytes)
     {
-        maxBytes = Math.Max(maxBytes, 1000);
+        int rawHeaderBytes = Encoding.UTF8.GetByteCount(hunk.Header);
+        int partHeaderOverhead = rawHeaderBytes + 20; // Accounts for " [Part NNN]\n"
+        int maxPartContentBytes = Math.Max(64, maxHunkBytes - partHeaderOverhead);
+
         var subHunks = new List<DiffHunk>();
         var currentLines = new List<string>();
-        int currentBytes = Encoding.UTF8.GetByteCount(hunk.Header) + 1;
+        int currentBytes = 0;
         int part = 1;
 
         foreach (var line in hunk.Lines)
         {
             int lineBytes = Encoding.UTF8.GetByteCount(line) + 1;
 
-            if (lineBytes > maxBytes)
+            if (lineBytes > maxPartContentBytes)
             {
                 if (currentLines.Count > 0)
                 {
@@ -307,26 +309,29 @@ public static class DiffSplitter
                         Lines = new List<string>(currentLines)
                     });
                     currentLines.Clear();
-                    currentBytes = Encoding.UTF8.GetByteCount(hunk.Header) + 1;
+                    currentBytes = 0;
                 }
 
-                int maxLineChars = maxBytes / 2;
-                if (maxLineChars < 1) maxLineChars = 1;
+                string prefix = line.Length > 0 && line[0] is '+' or '-' or ' ' ? line[..1] : string.Empty;
+                ReadOnlySpan<char> payload = prefix.Length > 0 ? line.AsSpan(1) : line.AsSpan();
+                int segmentBudgetBytes = Math.Max(16, maxHunkBytes - (rawHeaderBytes + 56 + prefix.Length));
 
-                for (int start = 0; start < line.Length; start += maxLineChars)
+                int start = 0;
+                while (start < payload.Length)
                 {
-                    int length = Math.Min(maxLineChars, line.Length - start);
-                    var slice = line.Substring(start, length);
+                    int length = GetUtf8BoundedCharCount(payload[start..], segmentBudgetBytes);
+                    var slice = string.Concat(prefix, payload.Slice(start, length));
                     subHunks.Add(new DiffHunk
                     {
                         Header = $"{hunk.Header} [Part {part++} - Segment {start + 1}..{start + length}]",
                         Lines = [slice]
                     });
+                    start += length;
                 }
                 continue;
             }
 
-            if (currentBytes + lineBytes > maxBytes && currentLines.Count > 0)
+            if (currentBytes + lineBytes > maxPartContentBytes && currentLines.Count > 0)
             {
                 subHunks.Add(new DiffHunk
                 {
@@ -334,7 +339,7 @@ public static class DiffSplitter
                     Lines = new List<string>(currentLines)
                 });
                 currentLines.Clear();
-                currentBytes = Encoding.UTF8.GetByteCount(hunk.Header) + 1;
+                currentBytes = 0;
             }
 
             currentLines.Add(line);
@@ -351,6 +356,29 @@ public static class DiffSplitter
         }
 
         return subHunks;
+    }
+
+    private static int GetUtf8BoundedCharCount(ReadOnlySpan<char> span, int maxUtf8Bytes)
+    {
+        int offset = 0;
+        int utf8Bytes = 0;
+
+        while (offset < span.Length)
+        {
+            var status = Rune.DecodeFromUtf16(span[offset..], out var rune, out int charsConsumed);
+            int runeBytes = status == System.Buffers.OperationStatus.Done ? rune.Utf8SequenceLength : 3;
+            int stepChars = charsConsumed > 0 ? charsConsumed : 1;
+
+            if (utf8Bytes + runeBytes > maxUtf8Bytes && offset > 0)
+            {
+                break;
+            }
+
+            utf8Bytes += runeBytes;
+            offset += stepChars;
+        }
+
+        return Math.Max(1, offset);
     }
 }
 

@@ -55,7 +55,7 @@ internal static class GlobMatcher
                 else
                 {
                     // "**" at the end of pattern or trailing
-                    sb.Append("(?:/.*|.*)");
+                    sb.Append(".*");
                 }
             }
             else if (c == '*')
@@ -77,7 +77,7 @@ internal static class GlobMatcher
         }
 
         sb.Append('$');
-        return new Regex(sb.ToString(), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(250));
+        return new Regex(sb.ToString(), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
     }
 }
 

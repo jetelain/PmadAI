@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Pmad.AI.Guardrails.Diff;
@@ -38,7 +39,12 @@ public static partial class DiffParser
         }
 
         var globsList = excludedGlobs as IReadOnlyList<string> ?? excludedGlobs?.ToList();
-        var lines = diffText.Replace("\r\n", "\n").Split('\n');
+        var normalizedDiff = diffText.Replace("\r\n", "\n");
+        if (normalizedDiff.EndsWith('\n'))
+        {
+            normalizedDiff = normalizedDiff[..^1];
+        }
+        var lines = normalizedDiff.Split('\n');
 
         FileDiff? currentFile = null;
         DiffHunk? currentHunk = null;
@@ -83,12 +89,31 @@ public static partial class DiffParser
                 continue;
             }
 
+            // Detect plain unified diff file header (without 'diff --git')
+            if (line.StartsWith("--- ", StringComparison.Ordinal) &&
+                i + 1 < lines.Length &&
+                lines[i + 1].StartsWith("+++ ", StringComparison.Ordinal) &&
+                (currentFile == null || (currentHunk != null && i + 2 < lines.Length && HunkHeaderRegex().IsMatch(lines[i + 2]))))
+            {
+                FinalizeFile();
+                currentFile = new FileDiff { FilePath = string.Empty };
+                currentFile.HeaderLines.Add(line);
+                ProcessHeaderLine(line, currentFile);
+                continue;
+            }
+
             var hunkMatch = HunkHeaderRegex().Match(line);
             if (hunkMatch.Success)
             {
                 if (currentFile == null)
                 {
                     currentFile = new FileDiff { FilePath = "diff_chunk" };
+                }
+                else if (string.IsNullOrEmpty(currentFile.FilePath))
+                {
+                    currentFile.FilePath = !string.IsNullOrEmpty(currentFile.OldFilePath)
+                        ? currentFile.OldFilePath
+                        : "diff_chunk";
                 }
 
                 FinalizeHunk();
@@ -119,7 +144,7 @@ public static partial class DiffParser
 
             if (currentHunk != null)
             {
-                if (line.StartsWith('+') && !line.StartsWith("+++", StringComparison.Ordinal))
+                if (line.StartsWith('+'))
                 {
                     var content = line.Length > 1 ? line[1..] : string.Empty;
                     var added = new DiffAddedLine(currentFile!.FilePath, currentNewLine, content);
@@ -128,7 +153,7 @@ public static partial class DiffParser
                     currentFile.AddedLines.Add(added);
                     currentNewLine++;
                 }
-                else if (line.StartsWith('-') && !line.StartsWith("---", StringComparison.Ordinal))
+                else if (line.StartsWith('-'))
                 {
                     var content = line.Length > 1 ? line[1..] : string.Empty;
                     var deleted = new DiffDeletedLine(currentFile!.FilePath, currentOldLine, content);
@@ -163,7 +188,7 @@ public static partial class DiffParser
                 // Diff content before any 'diff --git' header
                 if (line.StartsWith("--- ", StringComparison.Ordinal) || line.StartsWith("+++ ", StringComparison.Ordinal))
                 {
-                    currentFile = new FileDiff { FilePath = "diff_chunk" };
+                    currentFile = new FileDiff { FilePath = string.Empty };
                     currentFile.HeaderLines.Add(line);
                     ProcessHeaderLine(line, currentFile);
                 }
@@ -253,7 +278,7 @@ public static partial class DiffParser
         }
         else if (line.StartsWith("--- ", StringComparison.Ordinal))
         {
-            var raw = line["--- ".Length..].Trim();
+            var raw = StripDiffHeaderTimestamp(line["--- ".Length..].Trim());
             if (raw == "/dev/null")
             {
                 currentFile.IsNewFile = true;
@@ -269,14 +294,23 @@ public static partial class DiffParser
         }
         else if (line.StartsWith("+++ ", StringComparison.Ordinal))
         {
-            var raw = line["+++ ".Length..].Trim();
+            var raw = StripDiffHeaderTimestamp(line["+++ ".Length..].Trim());
             if (raw == "/dev/null")
             {
                 currentFile.IsDeletedFile = true;
+                if (string.IsNullOrEmpty(currentFile.FilePath) && !string.IsNullOrEmpty(currentFile.OldFilePath))
+                {
+                    currentFile.FilePath = currentFile.OldFilePath;
+                    currentFile.OldFilePath = null;
+                }
             }
             else
             {
                 currentFile.FilePath = NormalizePrefixedPath(raw, "b/");
+                if (!currentFile.IsRenamedFile && string.Equals(currentFile.OldFilePath, currentFile.FilePath, StringComparison.Ordinal))
+                {
+                    currentFile.OldFilePath = null;
+                }
             }
         }
         else if (line.StartsWith("Binary files ", StringComparison.Ordinal) && line.EndsWith(" differ", StringComparison.Ordinal))
@@ -315,16 +349,18 @@ public static partial class DiffParser
 
         if (span[0] == '"')
         {
-            int endQuote = span[1..].IndexOf('"');
-            if (endQuote < 0) return false;
-            oldPath = span.Slice(1, endQuote).ToString();
-            span = span[(endQuote + 2)..].TrimStart();
+            if (!TryReadQuotedString(span, out oldPath, out var remaining))
+            {
+                return false;
+            }
 
+            span = remaining.TrimStart();
             if (span.Length > 0 && span[0] == '"')
             {
-                int secondEnd = span[1..].IndexOf('"');
-                if (secondEnd < 0) return false;
-                newPath = span.Slice(1, secondEnd).ToString();
+                if (!TryReadQuotedString(span, out newPath, out _))
+                {
+                    return false;
+                }
             }
             else
             {
@@ -360,10 +396,68 @@ public static partial class DiffParser
         return true;
     }
 
+    private static bool TryReadQuotedString(ReadOnlySpan<char> span, out string unescaped, out ReadOnlySpan<char> remaining)
+    {
+        unescaped = string.Empty;
+        remaining = default;
+
+        if (span.IsEmpty || span[0] != '"')
+        {
+            return false;
+        }
+
+        var sb = new StringBuilder(span.Length);
+        for (int i = 1; i < span.Length; i++)
+        {
+            char c = span[i];
+            if (c == '\\' && i + 1 < span.Length)
+            {
+                char next = span[++i];
+                sb.Append(next switch
+                {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '"' => '"',
+                    '\\' => '\\',
+                    _ => next
+                });
+            }
+            else if (c == '"')
+            {
+                unescaped = sb.ToString();
+                remaining = span[(i + 1)..];
+                return true;
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+
+        return false;
+    }
+
+    private static string StripDiffHeaderTimestamp(string raw)
+    {
+        if (string.IsNullOrEmpty(raw))
+        {
+            return string.Empty;
+        }
+
+        if (raw[0] == '"' && TryReadQuotedString(raw.AsSpan(), out var unquoted, out _))
+        {
+            return unquoted;
+        }
+
+        int tabIdx = raw.IndexOf('\t');
+        return tabIdx >= 0 ? raw[..tabIdx].Trim() : raw;
+    }
+
     private static string NormalizePrefixedPath(string raw, string prefix)
     {
         if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
-        var trimmed = raw.Trim().Trim('\"').Replace('\\', '/');
+        var trimmed = UnquoteAndNormalizeSlashes(raw);
         if (trimmed.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
         {
             return trimmed[prefix.Length..];
@@ -379,7 +473,21 @@ public static partial class DiffParser
     private static string NormalizePath(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
-        return raw.Trim().Trim('\"').Replace('\\', '/');
+        return UnquoteAndNormalizeSlashes(raw);
+    }
+
+    private static string UnquoteAndNormalizeSlashes(string raw)
+    {
+        var trimmed = raw.Trim();
+        if (trimmed.Length >= 2 && trimmed[0] == '"' && TryReadQuotedString(trimmed.AsSpan(), out var unquoted, out _))
+        {
+            trimmed = unquoted;
+        }
+        else
+        {
+            trimmed = trimmed.Trim('\"');
+        }
+        return trimmed.Replace('\\', '/');
     }
 
     private static bool IsExcluded(FileDiff file, IReadOnlyList<string>? globs)
