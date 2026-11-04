@@ -331,4 +331,136 @@ public class JsonRepairUtilitiesTests
         // Cut right after the colon of the only property: the inner object has no completed field, so it is dropped.
         Assert.Equal("[]", JsonRepairUtilities.TryRepairTruncatedJson("[{\"a\":"));
     }
+
+    [Fact]
+    public void ExtractBalancedJson_NullOrEmptyOrInvalidIndex_ReturnsNull()
+    {
+        Assert.Null(JsonRepairUtilities.ExtractBalancedJson(null!, 0, out var len1, out var trunc1));
+        Assert.Equal(0, len1);
+        Assert.False(trunc1);
+
+        Assert.Null(JsonRepairUtilities.ExtractBalancedJson("", 0, out var len2, out var trunc2));
+        Assert.Equal(0, len2);
+        Assert.False(trunc2);
+
+        Assert.Null(JsonRepairUtilities.ExtractBalancedJson("{}", -1, out var len3, out var trunc3));
+        Assert.Equal(0, len3);
+        Assert.False(trunc3);
+
+        Assert.Null(JsonRepairUtilities.ExtractBalancedJson("{}", 5, out var len4, out var trunc4));
+        Assert.Equal(0, len4);
+        Assert.False(trunc4);
+
+        Assert.Null(JsonRepairUtilities.ExtractBalancedJson("No json here at all", 0, out var len5, out var trunc5));
+        Assert.Equal(0, len5);
+        Assert.False(trunc5);
+    }
+
+    [Fact]
+    public void ExtractBalancedJson_CompleteObject_ExtractsCorrectly()
+    {
+        var text = "Prefix text {\"key\": \"value\", \"nested\": {\"inner\": 123}} suffix prose";
+        var result = JsonRepairUtilities.ExtractBalancedJson(text, 0, out var consumedLen, out var isTruncated);
+
+        Assert.NotNull(result);
+        Assert.Equal("{\"key\": \"value\", \"nested\": {\"inner\": 123}}", result);
+        Assert.False(isTruncated);
+        int lastCloseBrace = text.IndexOf("}}", StringComparison.Ordinal) + 2;
+        Assert.Equal(lastCloseBrace, consumedLen);
+    }
+
+    [Fact]
+    public void ExtractBalancedJson_CompleteArray_ExtractsCorrectly()
+    {
+        var text = "Result: [1, 2, [\"nested\", {\"a\": true}]] and done.";
+        var result = JsonRepairUtilities.ExtractBalancedJson(text, 0, out var consumedLen, out var isTruncated);
+
+        Assert.NotNull(result);
+        Assert.Equal("[1, 2, [\"nested\", {\"a\": true}]]", result);
+        Assert.False(isTruncated);
+        int expectedEnd = text.IndexOf("]]", StringComparison.Ordinal) + 2;
+        Assert.Equal(expectedEnd, consumedLen);
+    }
+
+    [Fact]
+    public void ExtractBalancedJson_HandlesBracesAndBracketsInsideStringLiteralsAndEscapes()
+    {
+        var json = """{"query": "SELECT * FROM t WHERE a = '}' AND b = \"}\" [0]", "count": 1}""";
+        var text = "Action Input: " + json + " trailing";
+        int start = text.IndexOf('{');
+        var result = JsonRepairUtilities.ExtractBalancedJson(text, start, out var consumedLen, out var isTruncated);
+
+        Assert.NotNull(result);
+        Assert.Equal(json, result);
+        Assert.False(isTruncated);
+        using var doc = JsonDocument.Parse(result);
+        Assert.Equal(1, doc.RootElement.GetProperty("count").GetInt32());
+    }
+
+    [Fact]
+    public void ExtractBalancedJson_PicksEarliestBetweenBraceAndBracket()
+    {
+        var text1 = "Array first [{\"a\": 1}]";
+        var res1 = JsonRepairUtilities.ExtractBalancedJson(text1, 0, out _, out var trunc1);
+        Assert.Equal("[{\"a\": 1}]", res1);
+        Assert.False(trunc1);
+
+        var text2 = "Object first {\"arr\": [1, 2]}";
+        var res2 = JsonRepairUtilities.ExtractBalancedJson(text2, 0, out _, out var trunc2);
+        Assert.Equal("{\"arr\": [1, 2]}", res2);
+        Assert.False(trunc2);
+    }
+
+    [Fact]
+    public void ExtractBalancedJson_TruncatedJson_RepairsUsingTryRepairTruncatedJson()
+    {
+        var text = "Action: ask\nAction Input: [{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"]}, {\"prompt\": \"Q2\"";
+        int start = text.IndexOf('[');
+        var result = JsonRepairUtilities.ExtractBalancedJson(text, start, out var consumedLen, out var isTruncated);
+
+        Assert.NotNull(result);
+        Assert.True(isTruncated);
+        Assert.Equal(text.Length - start, consumedLen);
+        Assert.Equal("[{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"]}, {\"prompt\": \"Q2\"}]", result);
+        using var doc = JsonDocument.Parse(result);
+        Assert.Equal(2, doc.RootElement.GetArrayLength());
+    }
+
+    [Fact]
+    public void ExtractBalancedJson_TruncatedJson_DanglingKeyIsDroppedDuringRepair()
+    {
+        var text = "Input: {\"name\": \"search\", \"params\": {\"query\": \"test\", \"optio";
+        int start = text.IndexOf('{');
+        var result = JsonRepairUtilities.ExtractBalancedJson(text, start, out var consumedLen, out var isTruncated);
+
+        Assert.NotNull(result);
+        Assert.True(isTruncated);
+        Assert.Equal("{\"name\": \"search\", \"params\": {\"query\": \"test\"}}", result);
+        using var doc = JsonDocument.Parse(result);
+        Assert.Equal("test", doc.RootElement.GetProperty("params").GetProperty("query").GetString());
+    }
+
+    [Fact]
+    public void ExtractBalancedJson_TruncatedJson_DanglingValueDropped()
+    {
+        var text = "Broken: {\"unrepairable\": ";
+        int start = text.IndexOf('{');
+        var result = JsonRepairUtilities.ExtractBalancedJson(text, start, out var consumedLen, out var isTruncated);
+
+        Assert.NotNull(result);
+        Assert.True(isTruncated);
+        Assert.Equal("{}", result);
+    }
+
+    [Fact]
+    public void ExtractBalancedJson_StartIndexOffsetRespected()
+    {
+        var text = "ignore first {\"first\": 1} and take second {\"second\": 2}";
+        int secondStart = text.IndexOf("{\"second\"", StringComparison.Ordinal);
+
+        var result = JsonRepairUtilities.ExtractBalancedJson(text, secondStart, out var consumedLen, out var isTruncated);
+        Assert.Equal("{\"second\": 2}", result);
+        Assert.False(isTruncated);
+        Assert.Equal("{\"second\": 2}".Length, consumedLen);
+    }
 }

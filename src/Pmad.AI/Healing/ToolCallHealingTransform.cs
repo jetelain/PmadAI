@@ -26,8 +26,8 @@ public static partial class ToolCallHealingTransform
     [GeneratedRegex(@"Action:\s*(?<name>[a-zA-Z0-9_\-\.]+)\s*\r?\nAction Input:\s*(?:```(?:json)?\s*)?")]
     private static partial Regex ActionHeaderRegex();
 
-    [GeneratedRegex(@"Action:\s*(?<name>[a-zA-Z0-9_\-\.]+)\s*\r?\nAction Input:\s*(?:```(?:json)?\s*)?(?<payload>\{[\s\S]*?\})(?:\s*```)?")]
-    private static partial Regex ActionToolCallRegex();
+
+
 
     [GeneratedRegex(@"^<(?:think|thought)>\s*([\s\S]*)$")]
     private static partial Regex UnclosedThinkRegex();
@@ -455,6 +455,13 @@ public static partial class ToolCallHealingTransform
     }
 
     /// <summary>
+    /// Sentinel key used by <see cref="ParseArgumentsJson"/> when the root JSON payload is a bare array
+    /// rather than an object, allowing <see cref="LenientToolDispatcher"/> to map it to the tool's
+    /// array parameter discovered from <c>AIFunction.JsonSchema</c> (or <c>"items"</c> via <c>ParameterAliases</c>).
+    /// </summary>
+    internal const string RootArraySentinelKey = "$rootArray";
+
+    /// <summary>
     /// Sanitizes and parses a JSON arguments string into a strongly-typed dictionary,
     /// safe for Native AOT without reflection.
     /// </summary>
@@ -486,6 +493,13 @@ public static partial class ToolCallHealingTransform
                     }
                     return quickDict;
                 }
+                if (quickDoc.RootElement.ValueKind == JsonValueKind.Array)
+                {
+                    return new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        [RootArraySentinelKey] = JsonRepairUtilities.ConvertJsonElementToClr(quickDoc.RootElement)
+                    };
+                }
             }
             catch (JsonException)
             {
@@ -505,99 +519,16 @@ public static partial class ToolCallHealingTransform
                     dict[prop.Name] = UnwrapJsonElement(prop.Value);
                 }
             }
+            else if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                dict[RootArraySentinelKey] = JsonRepairUtilities.ConvertJsonElementToClr(doc.RootElement);
+            }
         }
         catch (Exception ex)
         {
             logger?.LogWarning(ex, "Failed to parse sanitized JSON arguments for tool '{ToolName}'", toolName ?? "unknown");
         }
         return dict;
-    }
-
-    /// <summary>
-    /// Extracts a balanced JSON object starting from or after <paramref name="startIndex"/>.
-    /// Handles nested braces, string literals, and escape sequences, repairing truncated JSON if necessary.
-    /// </summary>
-    private static string? ExtractBalancedJson(string text, int startIndex, out int consumedLength, out bool isTruncated)
-    {
-        consumedLength = 0;
-        isTruncated = false;
-        if (string.IsNullOrEmpty(text) || startIndex < 0 || startIndex >= text.Length)
-        {
-            return null;
-        }
-
-        int startBrace = text.IndexOf('{', startIndex);
-        if (startBrace < 0)
-        {
-            return null;
-        }
-
-        int depth = 0;
-        bool inString = false;
-        bool escaped = false;
-
-        for (int i = startBrace; i < text.Length; i++)
-        {
-            char c = text[i];
-            if (escaped)
-            {
-                escaped = false;
-                continue;
-            }
-
-            if (c == '\\')
-            {
-                escaped = true;
-                continue;
-            }
-
-            if (c == '"')
-            {
-                inString = !inString;
-                continue;
-            }
-
-            if (!inString)
-            {
-                if (c == '{')
-                {
-                    depth++;
-                }
-                else if (c == '}')
-                {
-                    depth--;
-                    if (depth == 0)
-                    {
-                        consumedLength = (i - startIndex) + 1;
-                        isTruncated = false;
-                        return text.Substring(startBrace, i - startBrace + 1);
-                    }
-                }
-            }
-        }
-
-        if (depth > 0)
-        {
-            consumedLength = text.Length - startIndex;
-            isTruncated = true;
-            var raw = text.Substring(startBrace);
-            var sb = new StringBuilder(raw);
-            if (escaped)
-            {
-                sb.Append('\\');
-            }
-            if (inString)
-            {
-                sb.Append('"');
-            }
-            while (depth-- > 0)
-            {
-                sb.Append('}');
-            }
-            return sb.ToString();
-        }
-
-        return null;
     }
 
     /// <summary>
@@ -629,7 +560,7 @@ public static partial class ToolCallHealingTransform
         }
 
         int jsonStart = match.Index + match.Length;
-        var balancedJson = ExtractBalancedJson(content, jsonStart, out int consumedLen, out _);
+        var balancedJson = JsonRepairUtilities.ExtractBalancedJson(content, jsonStart, out int consumedLen, out _);
         if (string.IsNullOrEmpty(balancedJson))
         {
             return false;
@@ -786,7 +717,7 @@ public static partial class ToolCallHealingTransform
             {
                 var toolName = actionMatch.Groups["name"].Value.Trim();
                 int jsonStart = actionMatch.Index + actionMatch.Length;
-                var balancedJson = ExtractBalancedJson(content, jsonStart, out int consumedLen, out _);
+                var balancedJson = JsonRepairUtilities.ExtractBalancedJson(content, jsonStart, out int consumedLen, out _);
 
                 if (!string.IsNullOrEmpty(toolName) && !string.IsNullOrEmpty(balancedJson))
                 {
@@ -945,7 +876,7 @@ public static partial class ToolCallHealingTransform
                 var arguments = fcc.Arguments;
 
                 // If arguments contains a single "input" property with a string that looks like JSON
-                if (arguments is { Count: 1 } && arguments.TryGetValue("input", out var inputVal) && inputVal is string strInput && (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith("```")))
+                if (arguments is { Count: 1 } && arguments.TryGetValue("input", out var inputVal) && inputVal is string strInput && (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith('[') || strInput.TrimStart().StartsWith("```")))
                 {
                     var parsed = ParseArgumentsJson(strInput, logger, fcc.Name, options);
                     if (parsed.Count > 0)
