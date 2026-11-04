@@ -226,14 +226,15 @@ public class CliCommandParsingTests
             ForceLlmEnabled = true,
             LlmEnabled = true,
             LlmProvider = "ollama",
-            LlmModel = "qwen3:8b"
+            LlmModel = "qwen3:8b",
+            LlmApiKey = "system-locked-key"
         };
         var fakeLoader = new FakeConfigLoader(policy);
         var stderr = new StringWriter();
         var runner = new DiffGuardRunner(gitProvider: fakeGit, llmFactory: fakeLlm, stdout: new StringWriter(), stderr: stderr);
         var root = CommandLineConfiguration.CreateRootCommand(() => runner, fakeLoader, stderr);
 
-        int exitCode = await root.Parse("--staged --llm-provider none").InvokeAsync();
+        int exitCode = await root.Parse("--staged --llm-provider none --llm-api-key attacker-key").InvokeAsync();
 
         Assert.Equal(ExitCodes.Success, exitCode);
         Assert.Contains("[WARNING] LLM judge is enforced by system configuration", stderr.ToString());
@@ -241,6 +242,7 @@ public class CliCommandParsingTests
         Assert.True(fakeLlm.LastOptions!.EnableLlm);
         Assert.Equal(LlmProviderKind.Ollama, fakeLlm.LastOptions.LlmProvider);
         Assert.Equal("qwen3:8b", fakeLlm.LastOptions.LlmModel);
+        Assert.Equal("system-locked-key", fakeLlm.LastOptions.LlmApiKey);
     }
 
     [Theory]

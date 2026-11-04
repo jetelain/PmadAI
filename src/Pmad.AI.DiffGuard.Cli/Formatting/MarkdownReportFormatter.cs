@@ -8,7 +8,7 @@ public sealed class MarkdownReportFormatter : IReportFormatter
 {
     public static readonly MarkdownReportFormatter Instance = new();
 
-    public Task FormatAsync(DiffGuardReportModel report, TextWriter writer, CancellationToken cancellationToken = default)
+    public async Task FormatAsync(DiffGuardReportModel report, TextWriter writer, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(report);
         ArgumentNullException.ThrowIfNull(writer);
@@ -119,8 +119,7 @@ public sealed class MarkdownReportFormatter : IReportFormatter
             }
         }
 
-        writer.Write(sb.ToString());
-        return Task.CompletedTask;
+        await writer.WriteAsync(sb.ToString().AsMemory(), cancellationToken).ConfigureAwait(false);
     }
 
     private static string SeverityEmoji(DiffRiskSeverity severity) => severity switch

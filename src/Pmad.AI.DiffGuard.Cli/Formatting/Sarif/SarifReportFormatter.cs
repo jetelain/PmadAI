@@ -11,15 +11,14 @@ public sealed class SarifReportFormatter : IReportFormatter
 {
     public static readonly SarifReportFormatter Instance = new();
 
-    public Task FormatAsync(DiffGuardReportModel report, TextWriter writer, CancellationToken cancellationToken = default)
+    public async Task FormatAsync(DiffGuardReportModel report, TextWriter writer, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(report);
         ArgumentNullException.ThrowIfNull(writer);
 
         var log = BuildSarifLog(report);
         string json = JsonSerializer.Serialize(log, SarifJsonContext.Default.SarifLog);
-        writer.WriteLine(json);
-        return Task.CompletedTask;
+        await writer.WriteLineAsync(json.AsMemory(), cancellationToken).ConfigureAwait(false);
     }
 
     public static SarifLog BuildSarifLog(DiffGuardReportModel report)

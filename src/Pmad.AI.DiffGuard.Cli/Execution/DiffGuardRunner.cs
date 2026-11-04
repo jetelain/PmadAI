@@ -58,6 +58,7 @@ public sealed class DiffGuardRunner
             }
 
             // 2. Parse diff
+            var allDiffFiles = DiffParser.Parse(gitMeta.UnifiedDiffText);
             var files = DiffParser.Parse(gitMeta.UnifiedDiffText, options.ExcludedFileGlobs);
 
             int changedFilesCount = files.Count;
@@ -116,6 +117,9 @@ public sealed class DiffGuardRunner
 
             var allFindings = new List<DiffRiskFinding>();
             int llmChunksEvaluated = 0;
+
+            // 3b. Always flag changes to repository DiffGuard configuration files as Critical (requires human review)
+            CheckDiffGuardConfigModification(allDiffFiles, gitMeta.RepositoryRootPath ?? options.RepoPath, options.CustomConfigPath, allFindings);
 
             // 4. Run Deterministic Scanner
             if (options.EnableDeterministic || options.EnablePromptInjection)
@@ -259,4 +263,83 @@ public sealed class DiffGuardRunner
         OutputFormat.Sarif => SarifReportFormatter.Instance,
         _ => ConsoleReportFormatter.Instance
     };
+
+    private static void CheckDiffGuardConfigModification(
+        IReadOnlyList<FileDiff> allDiffFiles,
+        string repoRoot,
+        string? customConfigPath,
+        List<DiffRiskFinding> findings)
+    {
+        string? customRelPath = null;
+        if (!string.IsNullOrWhiteSpace(customConfigPath))
+        {
+            try
+            {
+                string fullRepo = Path.GetFullPath(repoRoot);
+                string fullCustom = Path.IsPathRooted(customConfigPath)
+                    ? Path.GetFullPath(customConfigPath)
+                    : Path.GetFullPath(Path.Combine(fullRepo, customConfigPath));
+                string rel = Path.GetRelativePath(fullRepo, fullCustom).Replace('\\', '/');
+                if (!rel.StartsWith("..", StringComparison.Ordinal))
+                {
+                    customRelPath = rel;
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        foreach (var file in allDiffFiles)
+        {
+            bool isNewConfig = IsRepoDiffGuardConfigFile(file.FilePath, customRelPath);
+            bool isOldConfig = IsRepoDiffGuardConfigFile(file.OldFilePath, customRelPath);
+
+            if (isNewConfig || isOldConfig)
+            {
+                string targetPath = !string.IsNullOrEmpty(file.FilePath) ? file.FilePath : (file.OldFilePath ?? ".diffguard.json");
+                int? firstLine = file.AddedLines.Count > 0 ? file.AddedLines[0].LineNumber : null;
+                string? snippet = file.AddedLines.Count > 0 ? file.AddedLines[0].Content : null;
+
+                findings.Add(new DiffRiskFinding(
+                    RuleId: "BD-CONFIG-001",
+                    Title: "DiffGuard Configuration Modified",
+                    Category: DiffRiskCategory.BackdoorPattern,
+                    Severity: DiffRiskSeverity.Critical,
+                    FilePath: targetPath,
+                    LineNumber: firstLine,
+                    Column: firstLine.HasValue ? 1 : null,
+                    Description: $"Repository DiffGuard configuration file '{targetPath}' was added, modified, renamed, or deleted. Changes to guardrail configuration require mandatory human review.",
+                    Snippet: snippet));
+            }
+        }
+    }
+
+    private static bool IsRepoDiffGuardConfigFile(string? path, string? customRelPath)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        string norm = path.Replace('\\', '/').TrimStart('/');
+
+        if (norm.Equals(".diffguard.json", StringComparison.OrdinalIgnoreCase) ||
+            norm.Equals("diffguard.json", StringComparison.OrdinalIgnoreCase) ||
+            norm.Equals(".config/diffguard.json", StringComparison.OrdinalIgnoreCase) ||
+            norm.Equals(".github/diffguard.json", StringComparison.OrdinalIgnoreCase) ||
+            norm.EndsWith("/.diffguard.json", StringComparison.OrdinalIgnoreCase) ||
+            norm.EndsWith("/diffguard.json", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrEmpty(customRelPath) &&
+            norm.Equals(customRelPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
+    }
 }

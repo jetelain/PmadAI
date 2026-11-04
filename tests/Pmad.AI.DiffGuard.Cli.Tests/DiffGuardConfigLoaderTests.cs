@@ -315,5 +315,32 @@ public class DiffGuardConfigLoaderTests
         Assert.True(policy.AllowLowerTierAllowlistAdditions);
         Assert.False(policy.ForceDeterministic);
     }
+
+    [Theory]
+    [InlineData("/repo/diffguard.json")]
+    [InlineData("/repo/.github/diffguard.json")]
+    public void LoadPolicy_AlternativeRepoConfigPaths_DiscoversCorrectly(string configPath)
+    {
+        var virtualFs = new Dictionary<string, string>
+        {
+            [configPath] = """
+                {
+                    "thresholds": { "maxChangedFiles": 33 }
+                }
+                """
+        };
+
+        var loader = new DiffGuardConfigLoader(
+            fileExists: virtualFs.ContainsKey,
+            readFile: p => virtualFs[p],
+            getEnv: _ => null,
+            customSystemPaths: [],
+            customUserPaths: []);
+
+        var policy = loader.LoadPolicy(repoRoot: "/repo");
+
+        Assert.True(policy.RepoConfigLoaded);
+        Assert.Equal(33, policy.MaxChangedFiles);
+    }
 }
 

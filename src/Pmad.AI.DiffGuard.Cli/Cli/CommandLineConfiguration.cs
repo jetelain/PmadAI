@@ -504,10 +504,12 @@ public static class CommandLineConfiguration
                 else
                 {
                     // Infer from environment
-                    string? apiKey = parseResult.GetValue(llmApiKeyOption)
-                                     ?? policy.LlmApiKey
-                                     ?? Environment.GetEnvironmentVariable("DIFFGUARD_API_KEY")
-                                     ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+                    string? apiKey = (policy.LockPolicy && !string.IsNullOrEmpty(policy.LlmApiKey))
+                        ? policy.LlmApiKey
+                        : (parseResult.GetValue(llmApiKeyOption)
+                           ?? policy.LlmApiKey
+                           ?? Environment.GetEnvironmentVariable("DIFFGUARD_API_KEY")
+                           ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY"));
                     var ep = (policy.LockPolicy && !string.IsNullOrEmpty(policy.LlmEndpoint))
                         ? policy.LlmEndpoint
                         : (parseResult.GetValue(llmEndpointOption) ?? policy.LlmEndpoint);
@@ -686,6 +688,10 @@ public static class CommandLineConfiguration
                 ? policy.LlmEndpoint
                 : (parseResult.GetValue(llmEndpointOption) ?? policy.LlmEndpoint);
 
+            string? resolvedApiKey = (policy.LockPolicy && !string.IsNullOrEmpty(policy.LlmApiKey))
+                ? policy.LlmApiKey
+                : (parseResult.GetValue(llmApiKeyOption) ?? policy.LlmApiKey);
+
             var options = new DiffGuardCliOptions
             {
                 Target = target,
@@ -731,7 +737,7 @@ public static class CommandLineConfiguration
                 LlmProvider = provider,
                 LlmModel = modelId,
                 LlmEndpoint = resolvedEndpoint,
-                LlmApiKey = parseResult.GetValue(llmApiKeyOption) ?? policy.LlmApiKey,
+                LlmApiKey = resolvedApiKey,
                 MaxChunkBytes = maxChunkBytes,
                 FilterDeletedLines = parseResult.GetValue(filterDeletedLinesOption) || policy.FilterDeletedLines,
                 MaxConsecutiveDeletedLines = policy.MaxConsecutiveDeletedLines,

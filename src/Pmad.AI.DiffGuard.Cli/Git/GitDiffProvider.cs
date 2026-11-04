@@ -26,6 +26,7 @@ public sealed class GitDiffProvider : IGitDiffProvider
         ArgumentNullException.ThrowIfNull(target);
 
         string repoFull = Path.GetFullPath(repoRoot);
+        string? resolvedRepoRoot = FindGitRepositoryRoot(repoFull);
 
         if (target is GitComparisonTarget.PatchFile patch)
         {
@@ -36,10 +37,11 @@ public sealed class GitDiffProvider : IGitDiffProvider
             }
 
             string diffText = await File.ReadAllTextAsync(patchFullPath, cancellationToken).ConfigureAwait(false);
+            string effectiveRoot = resolvedRepoRoot ?? repoFull;
             RepositoryBaselineStats? patchBaseline = null;
-            if (!skipBaseline && IsGitRepo(repoFull))
+            if (!skipBaseline && resolvedRepoRoot != null)
             {
-                patchBaseline = await TryComputeBaselineStatsAsync(repoFull, "HEAD", excludedGlobs, cancellationToken).ConfigureAwait(false);
+                patchBaseline = await TryComputeBaselineStatsAsync(effectiveRoot, "HEAD", excludedGlobs, cancellationToken).ConfigureAwait(false);
             }
 
             return new GitDiffMetadata
@@ -47,14 +49,16 @@ public sealed class GitDiffProvider : IGitDiffProvider
                 TargetDescription = $"patch file: {patch.FilePath}",
                 UnifiedDiffText = diffText,
                 BaselineStats = patchBaseline,
-                RepositoryRootPath = repoFull
+                RepositoryRootPath = effectiveRoot
             };
         }
 
-        if (!IsGitRepo(repoFull))
+        if (resolvedRepoRoot == null)
         {
             throw new InvalidOperationException($"Directory is not a Git repository: {repoFull}");
         }
+
+        repoFull = resolvedRepoRoot;
 
         string? baseRef = null;
         string? headRef = null;
@@ -139,7 +143,8 @@ public sealed class GitDiffProvider : IGitDiffProvider
         GitComparisonTarget target,
         string? headCommitSha)
     {
-        string repoFull = Path.GetFullPath(repoRoot);
+        string initialFull = Path.GetFullPath(repoRoot);
+        string repoFull = FindGitRepositoryRoot(initialFull) ?? initialFull;
         string rootWithSep = Path.TrimEndingDirectorySeparator(repoFull) + Path.DirectorySeparatorChar;
 
         return (file, ct) =>
@@ -229,8 +234,6 @@ public sealed class GitDiffProvider : IGitDiffProvider
             proc = Process.Start(psi);
             if (proc == null) return null;
 
-            _ = proc.StandardError.ReadToEndAsync();
-
             var baseStream = proc.StandardOutput.BaseStream;
             byte[] prefixBuffer = new byte[512];
             int totalRead = baseStream.ReadAtLeast(prefixBuffer, 512, throwOnEndOfStream: false);
@@ -248,6 +251,7 @@ public sealed class GitDiffProvider : IGitDiffProvider
                 return new MemoryStream(prefixBuffer, 0, totalRead, writable: false);
             }
 
+            _ = DrainStandardErrorSafeAsync(proc);
             return new GitProcessStream(prefixBuffer, totalRead, proc, baseStream);
         }
         catch
@@ -459,9 +463,41 @@ public sealed class GitDiffProvider : IGitDiffProvider
         }
     }
 
+    private static async Task DrainStandardErrorSafeAsync(Process proc)
+    {
+        try
+        {
+            await proc.StandardError.ReadToEndAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // Ignore if process is disposed before stderr closes
+        }
+    }
+
     private static bool IsGitRepo(string path)
     {
         return Directory.Exists(Path.Combine(path, ".git")) || File.Exists(Path.Combine(path, ".git"));
+    }
+
+    private static string? FindGitRepositoryRoot(string startPath)
+    {
+        try
+        {
+            var current = new DirectoryInfo(startPath);
+            while (current != null)
+            {
+                if (IsGitRepo(current.FullName))
+                {
+                    return current.FullName;
+                }
+                current = current.Parent;
+            }
+        }
+        catch
+        {
+        }
+        return null;
     }
 
     private static bool IsPathTraversal(string filePath)

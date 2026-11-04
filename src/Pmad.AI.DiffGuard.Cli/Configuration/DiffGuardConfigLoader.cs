@@ -236,24 +236,60 @@ public sealed class DiffGuardConfigLoader : IDiffGuardConfigLoader
 
         var root = string.IsNullOrWhiteSpace(repoRoot) ? Directory.GetCurrentDirectory() : repoRoot;
 
-        var repoCandidate1 = Path.Combine(root, ".diffguard.json");
-        if (_fileExists(repoCandidate1))
+        string? CheckDirectoryCandidates(string dir)
         {
-            return repoCandidate1;
-        }
-        if (_fileExists(repoCandidate1.Replace('\\', '/')))
-        {
-            return repoCandidate1.Replace('\\', '/');
+            string[] candidates =
+            [
+                Path.Combine(dir, ".diffguard.json"),
+                Path.Combine(dir, "diffguard.json"),
+                Path.Combine(dir, ".config", "diffguard.json"),
+                Path.Combine(dir, ".github", "diffguard.json")
+            ];
+
+            foreach (var candidate in candidates)
+            {
+                if (_fileExists(candidate))
+                {
+                    return candidate;
+                }
+                string forward = candidate.Replace('\\', '/');
+                if (_fileExists(forward))
+                {
+                    return forward;
+                }
+            }
+
+            return null;
         }
 
-        var repoCandidate2 = Path.Combine(root, ".config", "diffguard.json");
-        if (_fileExists(repoCandidate2))
+        var directMatch = CheckDirectoryCandidates(root);
+        if (directMatch != null)
         {
-            return repoCandidate2;
+            return directMatch;
         }
-        if (_fileExists(repoCandidate2.Replace('\\', '/')))
+
+        // If repoRoot is a subdirectory of a Git repository, also check parent directories up to the .git root
+        try
         {
-            return repoCandidate2.Replace('\\', '/');
+            var current = new DirectoryInfo(Path.GetFullPath(root));
+            while (current?.Parent != null)
+            {
+                current = current.Parent;
+                var parentMatch = CheckDirectoryCandidates(current.FullName);
+                if (parentMatch != null)
+                {
+                    return parentMatch;
+                }
+
+                if (_fileExists(Path.Combine(current.FullName, ".git")) ||
+                    Directory.Exists(Path.Combine(current.FullName, ".git")))
+                {
+                    break;
+                }
+            }
+        }
+        catch
+        {
         }
 
         var envVar = _getEnv("DIFFGUARD_CONFIG");

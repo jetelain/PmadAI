@@ -11,7 +11,8 @@
 
 | Project | NuGet | Description |
 |:---|:---:|:---|
-| [**`Pmad.AI`**](src/Pmad.AI/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.svg)](https://www.nuget.org/packages/Pmad.AI) | Core agent utilities: protocol-level tool call healing (`ToolCallHealingChatClient`), history compaction (`ThinkingTraceCompactionChatClient`, `ToolResultCompactor`), speculative SLM summarization (`OllamaSpeculativeSummarizer`, `OllamaApiClient`), loop circuit breaker (`ToolLoopCircuitBreaker`, `ToolLoopCircuitBreakerChatClient`), shell security validator (`ReadOnlyCommandValidator`), verbatim audit transcripts (`VerbatimTranscriptChatClient`), declarative tool dispatching (`LenientToolDispatcher`), and token heuristics. Native AOT ready (`IsAotCompatible = true`). |
+| [**`Pmad.AI`**](src/Pmad.AI/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.svg)](https://www.nuget.org/packages/Pmad.AI) | Core agent utilities: protocol-level tool call healing (`ToolCallHealingChatClient`), history compaction (`ThinkingTraceCompactionChatClient`, `ToolResultCompactor`), speculative SLM summarization (`OllamaSpeculativeSummarizer`, `OllamaApiClient`), loop circuit breaker (`ToolLoopCircuitBreaker`, `ToolLoopCircuitBreakerChatClient`), shell security validator (`ReadOnlyCommandValidator`), git diff security & blast-radius analyzers (`DeterministicDiffRiskScanner`, `LlmDiffSecurityJudge`), verbatim audit transcripts (`VerbatimTranscriptChatClient`), declarative tool dispatching (`LenientToolDispatcher`), and token heuristics. Native AOT ready (`IsAotCompatible = true`). |
+| [**`Pmad.AI.DiffGuard`**](src/Pmad.AI.DiffGuard.Cli/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.DiffGuard.svg)](https://www.nuget.org/packages/Pmad.AI.DiffGuard) | `.NET Global Tool` (`diffguard`) providing Git diff security, supply-chain, blast-radius, and cross-model LLM judge guardrails with Console, Markdown, and SARIF 2.1.0 reporting for pre-commit hooks and CI/CD pipelines. |
 | [**`Pmad.AI.SourceGenerators`**](src/Pmad.AI.SourceGenerators) | *Analyzer* | Roslyn incremental source generator and analyzers emitting compile-time diagnostics (`PMAD001`-`PMAD003`) and automatic tool mapping registries from `[ToolAlias]` attributes. |
 | [**`Pmad.AI.LlamaSharp`**](src/Pmad.AI.LlamaSharp/README.md) | [![NuGet](https://img.shields.io/nuget/v/Pmad.AI.LlamaSharp.svg)](https://www.nuget.org/packages/Pmad.AI.LlamaSharp) | High-performance in-process GGUF inference adapter implementing [`Microsoft.Extensions.AI.IChatClient`](https://learn.microsoft.com/dotnet/api/microsoft.extensions.ai.ichatclient) powered by [LLamaSharp](https://github.com/SciSharp/LLamaSharp) and [llama.cpp](https://github.com/ggerganov/llama.cpp). |
 | [**`Pmad.AI.Benchmark`**](benchmarks/Pmad.AI.Benchmark) | *Tool* | Evaluation suite measuring tool calling accuracy, compaction efficiency, loop breaker trips, and inference tok/s, latency, RAM, and GPU VRAM across CPU and Vulkan backends. |
@@ -24,11 +25,17 @@
   - Resilient tool call healing (`PrefixTriggered` & `FullBuffer`)
   - Loop circuit breaking (runaway streaming repetition & tool ping-pong via `UseToolLoopCircuitBreaker`)
   - Multi-dialect shell security validation (Bash & PowerShell default-deny policies)
+  - Git diff security, supply-chain, and blast-radius guardrails (`DeterministicDiffRiskScanner` & `LlmDiffSecurityJudge`)
   - Audit-grade verbatim Markdown transcript generation (`FlushAfterEachTurn`)
   - Conversation history compaction (reasoning traces and bulky tool outputs)
   - Speculative SLM summarization via lightweight Ollama HTTP client (`OllamaSpeculativeSummarizer`)
   - Declarative tool dispatching and Roslyn source generation
   - Zero-allocation heuristic token estimation
+- **Git Diff Security CLI (`diffguard`)**: [`src/Pmad.AI.DiffGuard.Cli/README.md`](src/Pmad.AI.DiffGuard.Cli/README.md)
+  - Deterministic payload, secret, backdoor, dependency, binary/image, prompt-injection, and blast-radius scanners
+  - Cross-model LLM security judge via Ollama or OpenAI-compatible endpoints
+  - 3-tier policy hierarchy (`System > User > Repository`) with policy locking
+  - SARIF 2.1.0, GitHub-Flavored Markdown, and Console reports for GitHub Code Scanning & CI/CD
 - **Local LLM Inference**: [`src/Pmad.AI.LlamaSharp/README.md`](src/Pmad.AI.LlamaSharp/README.md)
   - Backend setup (CPU, Vulkan, CUDA 12)
   - Quickstart: Basic completion, streaming, and tool calling with `AIFunction`
@@ -88,6 +95,25 @@ await foreach (var update in chatClient.GetStreamingResponseAsync("Why is the sk
 ```
 
 👉 *See the full [Pmad.AI.LlamaSharp Documentation](src/Pmad.AI.LlamaSharp/README.md) for installation, backend selection, multimodal vision, tool calling, and preset downloads.*
+
+---
+
+### 3. `Pmad.AI.DiffGuard`: Git Diff Security & Supply-Chain CLI (`diffguard`)
+
+Screen staged changes, commits, or pull request branch ranges using deterministic static analyzers and an optional LLM security judge:
+
+```bash
+# Install as a .NET Global Tool
+dotnet tool install -g Pmad.AI.DiffGuard
+
+# Scan staged changes before committing
+diffguard --staged
+
+# Scan a PR branch range with an LLM judge and export SARIF 2.1.0 for GitHub Code Scanning
+diffguard origin/main HEAD --ollama-model qwen3:8b --sarif diffguard-results.sarif
+```
+
+👉 *See the full [Pmad.AI.DiffGuard Documentation](src/Pmad.AI.DiffGuard.Cli/README.md) for CLI options, 3-tier policy configuration, and GitHub Actions SARIF integration.*
 
 ---
 

@@ -39,6 +39,7 @@ public static class SarifRules
         CreateRule("BD-AUTH-001", "HardcodedAuthBypass", "Potential authentication bypass using hardcoded credential comparison.", "error"),
         CreateRule("BD-EXEC-001", "DynamicCodeExecution", "Dynamic code evaluation, process execution, or runtime assembly loading detected.", "error"),
         CreateRule("BD-BUILD-001", "BuildOrHookTampering", "MSBuild task/exec injection, CI workflow modification, Git hook, or submodule tampering.", "error"),
+        CreateRule("BD-CONFIG-001", "DiffGuardConfigTampering", "Repository DiffGuard security configuration modified; requires mandatory human review.", "error"),
 
         // Secrets & Entropy
         CreateRule("PAY-SEC-001", "HardcodedApiToken", "Known cloud or API secret token signature detected.", "error"),

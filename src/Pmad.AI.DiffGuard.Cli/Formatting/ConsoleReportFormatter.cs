@@ -8,7 +8,7 @@ public sealed class ConsoleReportFormatter : IReportFormatter
 {
     public static readonly ConsoleReportFormatter Instance = new();
 
-    public Task FormatAsync(DiffGuardReportModel report, TextWriter writer, CancellationToken cancellationToken = default)
+    public async Task FormatAsync(DiffGuardReportModel report, TextWriter writer, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(report);
         ArgumentNullException.ThrowIfNull(writer);
@@ -111,8 +111,7 @@ public sealed class ConsoleReportFormatter : IReportFormatter
         }
         sb.AppendLine(new string('=', 60));
 
-        writer.Write(sb.ToString());
-        return Task.CompletedTask;
+        await writer.WriteAsync(sb.ToString().AsMemory(), cancellationToken).ConfigureAwait(false);
     }
 
     private static string FormatSeverityBadge(DiffRiskSeverity severity) => severity switch

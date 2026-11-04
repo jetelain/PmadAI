@@ -278,5 +278,42 @@ public class DiffGuardRunnerTests
         Assert.Equal(ExitCodes.Success, exitCode);
         Assert.Empty(stdout.ToString());
     }
+
+    [Theory]
+    [InlineData(".diffguard.json")]
+    [InlineData("diffguard.json")]
+    [InlineData(".config/diffguard.json")]
+    [InlineData(".github/diffguard.json")]
+    public async Task RunAsync_RepoDiffGuardConfigModified_AlwaysFlagsCriticalEvenWhenExcludedOrDeterministicDisabled(string configPath)
+    {
+        string diff = $$"""
+            diff --git a/{{configPath}} b/{{configPath}}
+            --- a/{{configPath}}
+            +++ b/{{configPath}}
+            @@ -1,1 +1,2 @@
+             {
+            +  "minimumRiskSeverity": "Critical"
+             }
+            """;
+
+        var gitProvider = new StubGitDiffProvider(diff);
+        var stdout = new StringWriter();
+        var runner = new DiffGuardRunner(gitProvider: gitProvider, stdout: stdout);
+
+        var options = new DiffGuardCliOptions
+        {
+            EnableDeterministic = false,
+            EnableLlm = false,
+            ExcludedFileGlobs = ["**/*.json", configPath],
+            MinimumRiskSeverity = DiffRiskSeverity.Critical
+        };
+
+        int exitCode = await runner.RunAsync(options);
+
+        Assert.Equal(ExitCodes.RisksDetected, exitCode);
+        string output = stdout.ToString();
+        Assert.Contains("[CRITICAL] [BD-CONFIG-001]", output);
+        Assert.Contains(configPath, output);
+    }
 }
 

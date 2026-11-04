@@ -220,5 +220,24 @@ public class GitDiffProviderTests : IDisposable
         await Assert.ThrowsAsync<ArgumentException>(() =>
             provider.GetDiffAsync(_tempRepoDir, target, skipBaseline: true, excludedGlobs: []));
     }
+
+    [Fact]
+    public async Task GetDiffAsync_FromSubdirectory_ResolvesTopLevelRepositoryRoot()
+    {
+        InitializeGitRepo();
+
+        string subDir = Path.Combine(_tempRepoDir, "src", "Module");
+        Directory.CreateDirectory(subDir);
+        File.WriteAllText(Path.Combine(subDir, "Service.cs"), "public class Service { }\n");
+        RunGit("add", ".");
+
+        var provider = new GitDiffProvider();
+        var target = new GitComparisonTarget.Staged();
+
+        var meta = await provider.GetDiffAsync(subDir, target, skipBaseline: true, excludedGlobs: []);
+
+        Assert.Equal(Path.GetFullPath(_tempRepoDir), meta.RepositoryRootPath, ignoreCase: true);
+        Assert.Contains("src/Module/Service.cs", meta.UnifiedDiffText);
+    }
 }
 
