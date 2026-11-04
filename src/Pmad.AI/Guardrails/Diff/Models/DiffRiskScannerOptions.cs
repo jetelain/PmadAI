@@ -10,7 +10,15 @@ public sealed class DiffRiskScannerOptions
     private HashSet<string> _wellKnownSafePackages = new(DiffRiskDefaults.WellKnownSafePackages, StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _allowedImageExtensions = new(DiffRiskDefaults.AllowedImageExtensions, StringComparer.OrdinalIgnoreCase);
     private List<string> _excludedFileGlobs = [.. DiffRiskDefaults.ExcludedFileGlobs];
-    private List<ISafeBinaryValidator> _safeBinaryValidators = [];
+    private List<ISafeBinaryValidator> _safeBinaryValidators;
+
+    /// <summary>
+    /// Initializes a new instance of <see cref="DiffRiskScannerOptions"/> with default settings and built-in validators.
+    /// </summary>
+    public DiffRiskScannerOptions()
+    {
+        _safeBinaryValidators = [new MagicByteImageValidator(this)];
+    }
 
     /// <summary>
     /// Whether to flag hardcoded public IP addresses and non-allowlisted URLs. Default: true.
@@ -218,4 +226,3 @@ public sealed class DiffRiskScannerOptions
     /// </summary>
     public string? RepositoryRootPath { get; set; }
 }
-
