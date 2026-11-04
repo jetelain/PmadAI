@@ -57,6 +57,7 @@ public sealed class DiffGuardPolicy
     public List<string> AllowedImageExtensions { get; set; } = [.. DiffRiskDefaults.AllowedImageExtensions];
     public List<string> MaxLineLengthExcludedExtensions { get; set; } = [.. DiffRiskDefaults.DefaultMaxLineLengthExcludedExtensions];
     public List<string> ExcludedFileGlobs { get; set; } = [.. DiffRiskDefaults.ExcludedFileGlobs];
+    public List<string> TestFileGlobs { get; set; } = [.. DiffRiskDefaults.DefaultTestFileGlobs];
 
     // LLM Judge
     public bool LlmEnabled { get; set; } = false;

@@ -258,7 +258,7 @@ public sealed partial class NetworkAndBackdoorScanner
                 // Non-allowlisted domain check (NET-URL-001)
                 if (!hasUserInfo && !IsSafeDomain(uri.IdnHost, _options.WellKnownSafeDomains))
                 {
-                    if (_options.EnableTestTolerance && DiffRiskDefaults.IsTestFile(line.FilePath))
+                    if (_options.EnableTestTolerance && _options.IsTestFile(line.FilePath))
                     {
                         if (!uri.IdnHost.Contains('.') ||
                             uri.IdnHost.Contains("test", StringComparison.OrdinalIgnoreCase) ||

@@ -33,6 +33,7 @@
   - Zero-allocation heuristic token estimation
 - **Git Diff Security CLI (`diffguard`)**: [`src/Pmad.AI.DiffGuard.Cli/README.md`](src/Pmad.AI.DiffGuard.Cli/README.md)
   - Deterministic payload, secret, backdoor, dependency, binary/image, prompt-injection, and blast-radius scanners
+  - Context-aware test tolerance with configurable test paths (`--test-path`, defaults to `test/**` and `tests/**`)
   - Cross-model LLM security judge via Ollama or OpenAI-compatible endpoints
   - 3-tier policy hierarchy (`System > User > Repository`) with policy locking
   - SARIF 2.1.0, GitHub-Flavored Markdown, and Console reports for GitHub Code Scanning & CI/CD

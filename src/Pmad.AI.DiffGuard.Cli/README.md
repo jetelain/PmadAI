@@ -19,7 +19,7 @@
   - **Blast Radius & Scope (`SCOPE-*`)**: Mass-file modifications, excessive line diffs, and whole-repository impact anomalies.
   - **Prompt Injection (`PI001`–`PI013`)**: Directive overrides, persona hijacks, control tokens, hidden comment injections, and output format coercion targeting AI code reviewers.
 - **Test Tolerance**:
-  - Context-aware filtering allows single-label mock hosts (`desktop:11434`), well-known test assertion packages (`xunit`, `NUnit`, `Moq`, `AwesomeAssertions`, etc.), and mock fixture keys without flagging false positives in test suites.
+  - Context-aware filtering for test files (restricted by default to `test/**` and `tests/**`, fully configurable via `--test-path` or `testFileGlobs`). Allows single-label mock hosts (`desktop:11434`), well-known test assertion packages (`xunit`, `NUnit`, `Moq`, `AwesomeAssertions`, etc.), and dummy fixture keys while strictly enforcing zero tolerance for real credentials, exfiltration endpoints, and backdoors.
 - **LLM Security Judge**:
   - Evaluates semantic diffs against backdoor patterns and prompt injections using local LLMs via **Ollama** or cloud models via **OpenAI / OpenAI-compatible** endpoints.
   - Streaming diff chunking with deleted-line compression.
@@ -147,6 +147,39 @@ jobs:
 
 ---
 
+## Test Tolerance
+
+Git diff security guardrails can produce noisy false positives on test code (e.g. mock hostnames, unit test assertion packages, test fixture placeholders). `diffguard` includes a built-in **Test Tolerance** subsystem enabled by default (`"enableTestTolerance": true` or `--enable-test-tolerance`).
+
+### Valid Test File Paths
+
+By default, test tolerance is **strictly restricted** to:
+- `test/**`
+- `tests/**`
+
+If your test suites or projects are located in other folders (such as `src/MyProject.Tests/**`, `spec/**`, `specs/**`, or `testing/**`), you must explicitly specify them using `--test-path <path_or_glob>` / `--test-glob <path_or_glob>` on the CLI or `"testFileGlobs"` in `.diffguard.json`. Both directory paths (e.g. `tests`, `src/App.Tests/`) and glob patterns (e.g. `src/*.Tests/**`, `specs/**`) are supported.
+
+### What Test Tolerance Permits in Test Files
+
+When a file matches a valid test path:
+1. **Mock Network Endpoints (`NET-URL-001`)**: Single-label hostnames without dots (e.g. `http://desktop:11434`, `http://myserver:8080`) and URLs targeting domains containing `test`, `mock`, `fake`, or `dummy` (e.g. `http://api.mock.local`, `https://fake-auth-provider.net`) are permitted.
+2. **Safe Test Dependencies (`DEP-NEW-001`)**: Newly added dependencies matching `wellKnownSafeTestPackages` (e.g. `xunit`, `NUnit`, `AwesomeAssertions`, `FluentAssertions`, `Moq`, `NSubstitute`, `MSTest.*`, `coverlet.*`, `Verify.*`, `Bogus`, `Microsoft.*`, `System.*`) are allowed in test files without triggering unverified package warnings.
+3. **Dummy Fixture Secrets (`PAY-SEC-003`)**: Hardcoded secret assignments containing fixture markers (`test`, `mock`, `fake`, `dummy`, `sample`, `example`, or `file-`) are permitted.
+
+### What Test Tolerance NEVER Permits
+
+Test tolerance is fail-closed for real security threats. Even within valid test files, the following are **strictly flagged**:
+- **Genuine Cloud API Credentials (`PAY-SEC-001`)**: Real tokens for OpenAI (`sk-...`), AWS (`AKIA...`), GitHub (`ghp_...`), Slack, Google, etc.
+- **Cryptographic Private Keys (`PAY-SEC-002`)**: `-----BEGIN ... PRIVATE KEY-----` blocks.
+- **Data Exfiltration & C2 Endpoints (`NET-URL-002`)**: Known exfiltration services (e.g. `webhook.site`, `ngrok-free.app`, `burpcollaborator.net`).
+- **Public IP Addresses (`NET-IP-002`)**: Raw public IPv4 and IPv6 addresses.
+- **Backdoors & CI Tampering (`BD-*`)**: Reverse shells, raw sockets, process execution, and build script tampering.
+- **Untrusted Package Feeds (`DEP-SRC-001`)**: Non-allowlisted or local file package sources.
+
+To disable all test exemptions entirely and enforce strict production rules across the entire codebase, pass `--no-test-tolerance` or set `"enableTestTolerance": false`.
+
+---
+
 ## Configuration (`.diffguard.json`)
 
 `diffguard` resolves configuration across a 3-tier hierarchy (**System &gt; User &gt; Repository**), where System configuration can lock security policies (`lockPolicy: true`) and disallow lower-tier allowlist additions (`allowLowerTierAllowlistAdditions: false`).
@@ -186,7 +219,8 @@ At the repository level, `diffguard` automatically discovers `.diffguard.json`, 
     "wellKnownSafeDomains": [ "example.com", "*.local", "internal.corp" ],
     "allowedIpAddresses": [ "127.0.0.1" ],
     "wellKnownSafePackages": [ "Microsoft.", "System.", "xunit" ],
-    "excludedFileGlobs": [ "**/*.Designer.cs", "**/package-lock.json" ]
+    "excludedFileGlobs": [ "**/*.Designer.cs", "**/package-lock.json" ],
+    "testFileGlobs": [ "test/**", "tests/**", "src/*.Tests/**" ]
   },
   "llmJudge": {
     "enabled": true,
@@ -239,6 +273,9 @@ At the repository level, `diffguard` automatically discovers `.diffguard.json`, 
 | `--allow-ip <ip>` | | Additional trusted IP address(es) appended to allowed IPs | |
 | `--allow-package <p>` | | Additional trusted package prefix(es) appended to safe packages | |
 | `--exclude <glob>` | | Additional file glob pattern(s) appended to excluded files | |
+| `--test-path <path>`, `--test-glob <glob>` | | Additional test file path or glob pattern(s) permitted for test tolerance | |
+| `--enable-test-tolerance` | | Enable safe tolerances for test files and projects | `true` |
+| `--no-test-tolerance` | | Disable safe tolerances for test files and projects | `false` |
 | `--max-changed-files <n>` | | Maximum changed files threshold for blast radius | `50` |
 | `--max-changed-lines <n>` | | Maximum changed lines threshold for blast radius | `3000` |
 | `--max-codebase-pct <n>` | | Maximum codebase impact percentage for blast radius | `10.0` |

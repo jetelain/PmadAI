@@ -357,6 +357,20 @@ public sealed class DiffGuardConfigLoader : IDiffGuardConfigLoader
             if (isSystemTier && s.ForcePromptInjectionRules.HasValue) policy.ForcePromptInjectionRules = s.ForcePromptInjectionRules.Value;
             if (s.FlagPrivateNetworkIps.HasValue) policy.FlagPrivateNetworkIps = s.FlagPrivateNetworkIps.Value;
             if (s.EnableTestTolerance.HasValue) policy.EnableTestTolerance = s.EnableTestTolerance.Value;
+            if (s.TestFileGlobs != null)
+            {
+                if (dto.Allowlists?.ReplaceDefaults == true)
+                {
+                    policy.TestFileGlobs.Clear();
+                }
+                foreach (var item in s.TestFileGlobs)
+                {
+                    if (DiffRiskDefaults.IsValidTestFileGlob(item) && !policy.TestFileGlobs.Contains(item, StringComparer.OrdinalIgnoreCase))
+                    {
+                        policy.TestFileGlobs.Add(item);
+                    }
+                }
+            }
             if (s.AllowUnverifiedImageExtensionsWhenStreamUnavailable.HasValue) policy.AllowUnverifiedImageExtensionsWhenStreamUnavailable = s.AllowUnverifiedImageExtensionsWhenStreamUnavailable.Value;
         }
 
@@ -462,6 +476,21 @@ public sealed class DiffGuardConfigLoader : IDiffGuardConfigLoader
                     }
                 }
             }
+
+            if (a.TestFileGlobs != null)
+            {
+                if (replace && dto.Scanners?.TestFileGlobs == null)
+                {
+                    policy.TestFileGlobs.Clear();
+                }
+                foreach (var item in a.TestFileGlobs)
+                {
+                    if (DiffRiskDefaults.IsValidTestFileGlob(item) && !policy.TestFileGlobs.Contains(item, StringComparer.OrdinalIgnoreCase))
+                    {
+                        policy.TestFileGlobs.Add(item);
+                    }
+                }
+            }
         }
 
         if (dto.LlmJudge != null)
@@ -499,6 +528,7 @@ public sealed class DiffGuardConfigLoader : IDiffGuardConfigLoader
             policy.AllowedImageExtensions = [.. DiffRiskDefaults.AllowedImageExtensions];
             policy.MaxLineLengthExcludedExtensions = [.. DiffRiskDefaults.DefaultMaxLineLengthExcludedExtensions];
             policy.ExcludedFileGlobs = [.. DiffRiskDefaults.ExcludedFileGlobs];
+            policy.TestFileGlobs = [.. DiffRiskDefaults.DefaultTestFileGlobs];
         }
 
         // If lockPolicy is true, purge lower-tier LLM endpoint/apiKey/provider/model so an untrusted .diffguard.json cannot redirect LLM calls
@@ -559,7 +589,10 @@ public sealed class DiffGuardConfigLoader : IDiffGuardConfigLoader
             policy.EnableBinaryFileRules = s?.EnableBinaryFileRules ?? true;
             policy.EnableDependencyRules = s?.EnableDependencyRules ?? true;
             policy.EnableBlastRadiusRules = s?.EnableBlastRadiusRules ?? true;
-            policy.EnableTestTolerance = s?.EnableTestTolerance ?? true;
+            if (s?.EnableTestTolerance.HasValue == true)
+            {
+                policy.EnableTestTolerance = s.EnableTestTolerance.Value;
+            }
             policy.AllowUnverifiedImageExtensionsWhenStreamUnavailable = s?.AllowUnverifiedImageExtensionsWhenStreamUnavailable ?? false;
 
             if (s?.ForcePromptInjectionRules == true || s?.EnablePromptInjectionRules == true)

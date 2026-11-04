@@ -342,5 +342,126 @@ public class DiffGuardConfigLoaderTests
         Assert.True(policy.RepoConfigLoaded);
         Assert.Equal(33, policy.MaxChangedFiles);
     }
-}
 
+    [Fact]
+    public void LoadPolicy_LoadsTestFileGlobsFromAllowlistsAndScanners_PreservesDefaultsAndMerges()
+    {
+        var virtualFs = new Dictionary<string, string>
+        {
+            ["/repo/.diffguard.json"] = """
+                {
+                    "scanners": {
+                        "enableTestTolerance": true,
+                        "testFileGlobs": ["spec/**", "tests-custom/**"]
+                    },
+                    "allowlists": {
+                        "testFileGlobs": ["specs/**"]
+                    }
+                }
+                """
+        };
+
+        var loader = new DiffGuardConfigLoader(
+            fileExists: virtualFs.ContainsKey,
+            readFile: p => virtualFs[p],
+            getEnv: _ => null,
+            customSystemPaths: [],
+            customUserPaths: []);
+
+        var policy = loader.LoadPolicy(repoRoot: "/repo");
+
+        Assert.True(policy.EnableTestTolerance);
+        Assert.Contains("test/**", policy.TestFileGlobs);
+        Assert.Contains("tests/**", policy.TestFileGlobs);
+        Assert.Contains("spec/**", policy.TestFileGlobs);
+        Assert.Contains("tests-custom/**", policy.TestFileGlobs);
+        Assert.Contains("specs/**", policy.TestFileGlobs);
+    }
+
+    [Fact]
+    public void LoadPolicy_AllowlistsReplaceDefaults_ReplacesTestFileGlobs()
+    {
+        var virtualFs = new Dictionary<string, string>
+        {
+            ["/repo/.diffguard.json"] = """
+                {
+                    "allowlists": {
+                        "replaceDefaults": true,
+                        "testFileGlobs": ["my-custom-tests/**"]
+                    }
+                }
+                """
+        };
+
+        var loader = new DiffGuardConfigLoader(
+            fileExists: virtualFs.ContainsKey,
+            readFile: p => virtualFs[p],
+            getEnv: _ => null,
+            customSystemPaths: [],
+            customUserPaths: []);
+
+        var policy = loader.LoadPolicy(repoRoot: "/repo");
+
+        Assert.Single(policy.TestFileGlobs);
+        Assert.Equal("my-custom-tests/**", policy.TestFileGlobs[0]);
+    }
+
+    [Fact]
+    public void LoadPolicy_RejectsBroadWildcardTestFileGlobs()
+    {
+        var virtualFs = new Dictionary<string, string>
+        {
+            ["/repo/.diffguard.json"] = """
+                {
+                    "allowlists": {
+                        "replaceDefaults": true,
+                        "testFileGlobs": ["*", "**", "**/*", "*.cs", "**/*.cs", "valid-tests/**"]
+                    }
+                }
+                """
+        };
+
+        var loader = new DiffGuardConfigLoader(
+            fileExists: virtualFs.ContainsKey,
+            readFile: p => virtualFs[p],
+            getEnv: _ => null,
+            customSystemPaths: [],
+            customUserPaths: []);
+
+        var policy = loader.LoadPolicy(repoRoot: "/repo");
+
+        Assert.Single(policy.TestFileGlobs);
+        Assert.Equal("valid-tests/**", policy.TestFileGlobs[0]);
+    }
+
+    [Fact]
+    public void LoadPolicy_SystemLocksDisabledTestTolerance_PreventsRepoFromEnabling()
+    {
+        var virtualFs = new Dictionary<string, string>
+        {
+            ["/repo/.diffguard.json"] = """
+                {
+                    "scanners": { "enableTestTolerance": true }
+                }
+                """,
+            ["/system/config.json"] = """
+                {
+                    "lockPolicy": true,
+                    "scanners": { "enableTestTolerance": false }
+                }
+                """
+        };
+
+        var loader = new DiffGuardConfigLoader(
+            fileExists: virtualFs.ContainsKey,
+            readFile: p => virtualFs[p],
+            getEnv: _ => null,
+            customSystemPaths: ["/system/config.json"],
+            customUserPaths: []);
+
+        var policy = loader.LoadPolicy(repoRoot: "/repo");
+
+        Assert.True(policy.LockPolicy);
+        Assert.False(policy.EnableTestTolerance);
+    }
+}

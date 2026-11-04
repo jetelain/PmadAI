@@ -274,4 +274,66 @@ public class CliCommandParsingTests
         Assert.Equal(ExitCodes.Error, exitCode);
         Assert.Contains("[ERROR]", stderr.ToString());
     }
+
+    [Fact]
+    public async Task Parse_TestPathAndToleranceOptions_BindsExpectedOptions()
+    {
+        var fakeGit = new FakeGitDiffProvider();
+        var fakeLlm = new FakeLlmJudgeClientFactory();
+        var fakeLoader = new FakeConfigLoader(new DiffGuardPolicy());
+        var runner = new DiffGuardRunner(gitProvider: fakeGit, llmFactory: fakeLlm, stdout: new StringWriter());
+        var root = CommandLineConfiguration.CreateRootCommand(() => runner, fakeLoader);
+
+        int exitCode = await root.Parse("--staged --openai-model gpt-4o --test-path custom_tests/** --test-glob specs/** --no-test-tolerance").InvokeAsync();
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.NotNull(fakeLlm.LastOptions);
+        Assert.False(fakeLlm.LastOptions!.EnableTestTolerance);
+        Assert.Contains("custom_tests/**", fakeLlm.LastOptions.TestFileGlobs);
+        Assert.Contains("specs/**", fakeLlm.LastOptions.TestFileGlobs);
+    }
+
+    [Fact]
+    public async Task Parse_SystemPolicyDisablesTestTolerance_CannotBeBypassedByEnableTestToleranceFlag()
+    {
+        var fakeGit = new FakeGitDiffProvider();
+        var fakeLlm = new FakeLlmJudgeClientFactory();
+        var policy = new DiffGuardPolicy
+        {
+            LockPolicy = true,
+            EnableTestTolerance = false
+        };
+        var fakeLoader = new FakeConfigLoader(policy);
+        var stderr = new StringWriter();
+        var runner = new DiffGuardRunner(gitProvider: fakeGit, llmFactory: fakeLlm, stdout: new StringWriter(), stderr: stderr);
+        var root = CommandLineConfiguration.CreateRootCommand(() => runner, fakeLoader, stderr);
+
+        int exitCode = await root.Parse("--staged --openai-model gpt-4o --enable-test-tolerance").InvokeAsync();
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("[WARNING] Test tolerance is disabled by system configuration and cannot be enabled.", stderr.ToString());
+        Assert.NotNull(fakeLlm.LastOptions);
+        Assert.False(fakeLlm.LastOptions!.EnableTestTolerance);
+    }
+
+    [Fact]
+    public async Task Parse_TestPathWithBroadWildcards_IgnoresInvalidPatternsAndEmitsWarning()
+    {
+        var fakeGit = new FakeGitDiffProvider();
+        var fakeLlm = new FakeLlmJudgeClientFactory();
+        var fakeLoader = new FakeConfigLoader(new DiffGuardPolicy());
+        var stderr = new StringWriter();
+        var runner = new DiffGuardRunner(gitProvider: fakeGit, llmFactory: fakeLlm, stdout: new StringWriter(), stderr: stderr);
+        var root = CommandLineConfiguration.CreateRootCommand(() => runner, fakeLoader, stderr);
+
+        int exitCode = await root.Parse("--staged --openai-model gpt-4o --test-path ** *.cs valid_tests/**").InvokeAsync();
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("[WARNING] Ignoring invalid or overly broad test path pattern '**'.", stderr.ToString());
+        Assert.Contains("[WARNING] Ignoring invalid or overly broad test path pattern '*.cs'.", stderr.ToString());
+        Assert.NotNull(fakeLlm.LastOptions);
+        Assert.DoesNotContain("**", fakeLlm.LastOptions!.TestFileGlobs);
+        Assert.DoesNotContain("*.cs", fakeLlm.LastOptions.TestFileGlobs);
+        Assert.Contains("valid_tests/**", fakeLlm.LastOptions.TestFileGlobs);
+    }
 }

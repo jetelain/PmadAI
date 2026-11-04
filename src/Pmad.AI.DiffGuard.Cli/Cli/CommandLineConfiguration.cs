@@ -208,6 +208,22 @@ public static class CommandLineConfiguration
             AllowMultipleArgumentsPerToken = true
         };
 
+        var testPathOption = new Option<string[]>("--test-path", "--test-glob")
+        {
+            Description = "Additional test file path or glob pattern(s) permitted for test tolerance.",
+            AllowMultipleArgumentsPerToken = true
+        };
+
+        var enableTestToleranceOption = new Option<bool>("--enable-test-tolerance")
+        {
+            Description = "Enable safe tolerances for test files and projects (mock hosts, test packages, test fixture secrets)."
+        };
+
+        var noTestToleranceOption = new Option<bool>("--no-test-tolerance")
+        {
+            Description = "Disable safe tolerances for test files and projects."
+        };
+
         var maxChangedFilesOption = new Option<int?>("--max-changed-files")
         {
             Description = "Maximum changed files threshold for blast radius."
@@ -266,6 +282,9 @@ public static class CommandLineConfiguration
             allowIpOption,
             allowPackageOption,
             excludeOption,
+            testPathOption,
+            enableTestToleranceOption,
+            noTestToleranceOption,
             maxChangedFilesOption,
             maxChangedLinesOption,
             maxCodebasePctOption,
@@ -401,6 +420,31 @@ public static class CommandLineConfiguration
                 {
                     enablePromptInjection = policy.EnablePromptInjectionRules;
                 }
+            }
+
+            // Resolve test tolerance
+            bool enableTestTolerance;
+            var noTestTolPassed = parseResult.GetResult(noTestToleranceOption) is { Implicit: false };
+            var enableTestTolPassed = parseResult.GetResult(enableTestToleranceOption) is { Implicit: false };
+            if (policy.LockPolicy && !policy.EnableTestTolerance)
+            {
+                if (enableTestTolPassed)
+                {
+                    await err.WriteLineAsync("[WARNING] Test tolerance is disabled by system configuration and cannot be enabled.").ConfigureAwait(false);
+                }
+                enableTestTolerance = false;
+            }
+            else if (noTestTolPassed)
+            {
+                enableTestTolerance = false;
+            }
+            else if (enableTestTolPassed)
+            {
+                enableTestTolerance = true;
+            }
+            else
+            {
+                enableTestTolerance = policy.EnableTestTolerance;
             }
 
             // 5. Resolve LLM judge
@@ -606,18 +650,21 @@ public static class CommandLineConfiguration
             var ips = new List<string>(policy.AllowedIpAddresses);
             var packages = new List<string>(policy.WellKnownSafePackages);
             var excludes = new List<string>(policy.ExcludedFileGlobs);
+            var testGlobs = new List<string>(policy.TestFileGlobs);
 
             var cliDomains = parseResult.GetValue(allowDomainOption);
             var cliIps = parseResult.GetValue(allowIpOption);
             var cliPackages = parseResult.GetValue(allowPackageOption);
             var cliExcludes = parseResult.GetValue(excludeOption);
+            var cliTestGlobs = parseResult.GetValue(testPathOption);
 
             bool allowAdditions = policy.AllowLowerTierAllowlistAdditions;
             if (!allowAdditions &&
                 ((cliDomains != null && cliDomains.Length > 0) ||
                  (cliIps != null && cliIps.Length > 0) ||
                  (cliPackages != null && cliPackages.Length > 0) ||
-                 (cliExcludes != null && cliExcludes.Length > 0)))
+                 (cliExcludes != null && cliExcludes.Length > 0) ||
+                 (cliTestGlobs != null && cliTestGlobs.Length > 0)))
             {
                 await err.WriteLineAsync("[WARNING] Custom allowlist additions are disallowed by system configuration.").ConfigureAwait(false);
             }
@@ -653,6 +700,25 @@ public static class CommandLineConfiguration
                     {
                         if (!string.IsNullOrWhiteSpace(ex) && !excludes.Contains(ex, StringComparer.OrdinalIgnoreCase))
                             excludes.Add(ex);
+                    }
+                }
+                if (cliTestGlobs != null)
+                {
+                    foreach (var tg in cliTestGlobs)
+                    {
+                        if (string.IsNullOrWhiteSpace(tg))
+                        {
+                            continue;
+                        }
+                        if (!DiffRiskDefaults.IsValidTestFileGlob(tg))
+                        {
+                            await err.WriteLineAsync($"[WARNING] Ignoring invalid or overly broad test path pattern '{tg}'.").ConfigureAwait(false);
+                            continue;
+                        }
+                        if (!testGlobs.Contains(tg, StringComparer.OrdinalIgnoreCase))
+                        {
+                            testGlobs.Add(tg);
+                        }
                     }
                 }
             }
@@ -715,7 +781,7 @@ public static class CommandLineConfiguration
                 EnableBlastRadiusRules = policy.EnableBlastRadiusRules,
                 EnablePromptInjection = enablePromptInjection,
                 FlagPrivateNetworkIps = parseResult.GetValue(flagPrivateIpsOption) || policy.FlagPrivateNetworkIps,
-                EnableTestTolerance = policy.EnableTestTolerance,
+                EnableTestTolerance = enableTestTolerance,
                 AllowUnverifiedImageExtensionsWhenStreamUnavailable = policy.AllowUnverifiedImageExtensionsWhenStreamUnavailable,
                 MaxChangedFiles = maxFiles,
                 MaxChangedLines = maxLines,
@@ -733,6 +799,7 @@ public static class CommandLineConfiguration
                 AllowedImageExtensions = policy.AllowedImageExtensions,
                 MaxLineLengthExcludedExtensions = policy.MaxLineLengthExcludedExtensions,
                 ExcludedFileGlobs = excludes,
+                TestFileGlobs = testGlobs,
                 EnableLlm = enableLlm,
                 LlmProvider = provider,
                 LlmModel = modelId,
