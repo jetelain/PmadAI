@@ -100,7 +100,7 @@ await foreach (var update in chatClient.GetStreamingResponseAsync("Why is the sk
 
 ### 3. `Pmad.AI.DiffGuard`: Git Diff Security & Supply-Chain CLI (`diffguard`)
 
-Screen staged changes, commits, or pull request branch ranges using deterministic static analyzers and an optional LLM security judge:
+Screen staged changes, commits, or pull request branch ranges using deterministic static analyzers and an optional LLM security judge. `Pmad.AI.DiffGuard` is not a full security solution and does not replace SAST or DAST tools—it is a fast first-pass checkup designed to help human reviewers quickly spot and focus on suspicious changes:
 
 ```bash
 # Install as a .NET Global Tool

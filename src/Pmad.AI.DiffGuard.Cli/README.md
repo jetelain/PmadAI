@@ -5,6 +5,8 @@
 
 `diffguard` is a high-performance Git diff security guardrail and supply-chain screener designed for local developer workflows and automated CI/CD pipelines. It combines zero-latency deterministic static analyzers with an LLM security judge to detect vulnerabilities, backdoors, credential leaks, and evasive payloads before code is merged.
 
+> **Scope & Purpose**: `Pmad.AI.DiffGuard` is **not** a comprehensive security solution and does **not** replace dedicated SAST (Static Application Security Testing) or DAST (Dynamic Application Security Testing) tools. Instead, it acts as a fast, lightweight first-pass checkup on Git diffs—especially useful for AI-assisted or automated pull requests—to surface suspicious changes, anomalous blast radius, or supply-chain edits so human reviewers know exactly where to focus their attention.
+
 ---
 
 ## Key Capabilities
