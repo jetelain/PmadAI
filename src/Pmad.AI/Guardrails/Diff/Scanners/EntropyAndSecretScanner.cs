@@ -93,7 +93,7 @@ public sealed partial class EntropyAndSecretScanner
         if (assignMatch.Success)
         {
             bool isTestPlaceholder = _options.EnableTestTolerance &&
-                                    DiffRiskDefaults.IsTestFile(line.FilePath) &&
+                                    _options.IsTestFile(line.FilePath) &&
                                     IsTestFixtureSecret(assignMatch.Value);
 
             if (!isTestPlaceholder)

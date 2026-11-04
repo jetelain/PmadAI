@@ -29,6 +29,7 @@ public sealed class DiffGuardScannersConfigDto
     public bool? ForcePromptInjectionRules { get; set; }
     public bool? FlagPrivateNetworkIps { get; set; }
     public bool? EnableTestTolerance { get; set; }
+    public List<string>? TestFileGlobs { get; set; }
     public bool? AllowUnverifiedImageExtensionsWhenStreamUnavailable { get; set; }
 }
 
@@ -55,6 +56,7 @@ public sealed class DiffGuardAllowlistsConfigDto
     public List<string>? AllowedImageExtensions { get; set; }
     public List<string>? MaxLineLengthExcludedExtensions { get; set; }
     public List<string>? ExcludedFileGlobs { get; set; }
+    public List<string>? TestFileGlobs { get; set; }
 }
 
 public sealed class DiffGuardLlmJudgeConfigDto

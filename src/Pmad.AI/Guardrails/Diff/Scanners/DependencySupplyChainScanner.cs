@@ -181,7 +181,7 @@ public sealed partial class DependencySupplyChainScanner
             {
                 // Newly added external package dependency (DEP-NEW-001)
                 bool isAllowedInTest = _options.EnableTestTolerance &&
-                                       DiffRiskDefaults.IsTestFile(added.FilePath) &&
+                                       _options.IsTestFile(added.FilePath) &&
                                        IsSafePackage(added.PackageId, _options.WellKnownSafeTestPackages);
                 if (!IsSafePackage(added.PackageId, _options.WellKnownSafePackages) && !isAllowedInTest)
                 {

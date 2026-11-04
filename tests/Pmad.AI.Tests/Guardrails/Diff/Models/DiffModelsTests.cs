@@ -89,6 +89,7 @@ public class DiffModelsTests
         Assert.Throws<ArgumentNullException>(() => options.WellKnownSafePackages = null!);
         Assert.Throws<ArgumentNullException>(() => options.AllowedImageExtensions = null!);
         Assert.Throws<ArgumentNullException>(() => options.ExcludedFileGlobs = null!);
+        Assert.Throws<ArgumentNullException>(() => options.TestFileGlobs = null!);
         Assert.Throws<ArgumentNullException>(() => options.SafeBinaryValidators = null!);
     }
 
@@ -103,5 +104,82 @@ public class DiffModelsTests
         };
 
         Assert.Null(context.OpenRead());
+    }
+
+    [Fact]
+    public void DiffRiskDefaults_IsTestFile_MatchesDefaultGlobs()
+    {
+        Assert.True(DiffRiskDefaults.IsTestFile("tests/ClientTests.cs"));
+        Assert.True(DiffRiskDefaults.IsTestFile("tests/subdir/DeepTests.cs"));
+        Assert.True(DiffRiskDefaults.IsTestFile("test/UnitTest.cs"));
+        Assert.True(DiffRiskDefaults.IsTestFile("tests/App.Tests.csproj"));
+        Assert.True(DiffRiskDefaults.IsTestFile("tests/App.test.props"));
+
+        Assert.False(DiffRiskDefaults.IsTestFile(null));
+        Assert.False(DiffRiskDefaults.IsTestFile(""));
+        Assert.False(DiffRiskDefaults.IsTestFile("src/Client.cs"));
+        Assert.False(DiffRiskDefaults.IsTestFile("src/contest/contest.cs"));
+        Assert.False(DiffRiskDefaults.IsTestFile("src/MyProject.Tests/UnitTest1.cs"));
+        Assert.False(DiffRiskDefaults.IsTestFile("MyProject.Tests/UnitTest1.cs"));
+    }
+
+    [Fact]
+    public void DiffRiskDefaults_IsTestFile_CustomGlobsAndDirectories()
+    {
+        var customGlobs = new[] { "spec/**", "custom_tests", "trailing_tests/", "src/exact-test.cs" };
+
+        Assert.True(DiffRiskDefaults.IsTestFile("spec/unit/suite.rb", customGlobs));
+        Assert.True(DiffRiskDefaults.IsTestFile("custom_tests/foo.py", customGlobs));
+        Assert.True(DiffRiskDefaults.IsTestFile("trailing_tests/bar.py", customGlobs));
+        Assert.True(DiffRiskDefaults.IsTestFile("src/exact-test.cs", customGlobs));
+
+        // Root-anchored directory patterns ("custom_tests" and "trailing_tests/") must not match nested subdirectories
+        Assert.False(DiffRiskDefaults.IsTestFile("src/custom_tests/foo.py", customGlobs));
+        Assert.False(DiffRiskDefaults.IsTestFile("src/trailing_tests/bar.py", customGlobs));
+        Assert.False(DiffRiskDefaults.IsTestFile("tests/ClientTests.cs", customGlobs));
+        Assert.False(DiffRiskDefaults.IsTestFile("src/Client.cs", customGlobs));
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    [InlineData("   ", false)]
+    [InlineData("/", false)]
+    [InlineData("*", false)]
+    [InlineData("**", false)]
+    [InlineData("**/*", false)]
+    [InlineData("*.*", false)]
+    [InlineData("*.cs", false)]
+    [InlineData("**/*.cs", false)]
+    [InlineData("test/**", true)]
+    [InlineData("tests/**", true)]
+    [InlineData("custom_tests", true)]
+    [InlineData("src/*.Tests/**", true)]
+    [InlineData("**/*.Tests.csproj", true)]
+    [InlineData("**/*.spec.ts", true)]
+    [InlineData("**/*Tests.cs", true)]
+    public void DiffRiskDefaults_IsValidTestFileGlob_ValidatesExpectedPatterns(string? pattern, bool expected)
+    {
+        Assert.Equal(expected, DiffRiskDefaults.IsValidTestFileGlob(pattern));
+    }
+
+    [Fact]
+    public void DiffRiskDefaults_IsTestFile_IgnoresInvalidBroadWildcardGlobs()
+    {
+        var broadGlobs = new[] { "*", "**", "**/*", "*.*", "*.cs", "**/*.cs" };
+
+        Assert.False(DiffRiskDefaults.IsTestFile("src/Client.cs", broadGlobs));
+        Assert.False(DiffRiskDefaults.IsTestFile("Program.cs", broadGlobs));
+    }
+
+    [Fact]
+    public void DiffRiskScannerOptions_TestFileGlobs_DefaultsAndProperties()
+    {
+        var options = new DiffRiskScannerOptions();
+        Assert.Equal(DiffRiskDefaults.DefaultTestFileGlobs, options.TestFileGlobs);
+
+        options.TestFileGlobs = ["my-test/**"];
+        Assert.True(options.IsTestFile("my-test/foo.cs"));
+        Assert.False(options.IsTestFile("tests/ClientTests.cs"));
     }
 }

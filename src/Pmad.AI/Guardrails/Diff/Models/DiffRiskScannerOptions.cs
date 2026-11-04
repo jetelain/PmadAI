@@ -12,6 +12,7 @@ public sealed class DiffRiskScannerOptions
     private HashSet<string> _allowedImageExtensions = new(DiffRiskDefaults.AllowedImageExtensions, StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _maxLineLengthExcludedExtensions = new(DiffRiskDefaults.DefaultMaxLineLengthExcludedExtensions, StringComparer.OrdinalIgnoreCase);
     private List<string> _excludedFileGlobs = [.. DiffRiskDefaults.ExcludedFileGlobs];
+    private List<string> _testFileGlobs = [.. DiffRiskDefaults.DefaultTestFileGlobs];
     private List<ISafeBinaryValidator> _safeBinaryValidators;
 
     /// <summary>
@@ -240,6 +241,26 @@ public sealed class DiffRiskScannerOptions
             _excludedFileGlobs = value;
         }
     }
+
+    /// <summary>
+    /// Glob patterns and path prefixes identifying test files and test projects permitted for test tolerance.
+    /// Defaults to <see cref="DiffRiskDefaults.DefaultTestFileGlobs"/>.
+    /// </summary>
+    public List<string> TestFileGlobs
+    {
+        get => _testFileGlobs;
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _testFileGlobs = value;
+        }
+    }
+
+    /// <summary>
+    /// Determines whether the specified file path is considered a test file under current options.
+    /// Returns true if <paramref name="filePath"/> matches any of <see cref="TestFileGlobs"/>.
+    /// </summary>
+    public bool IsTestFile(string? filePath) => DiffRiskDefaults.IsTestFile(filePath, _testFileGlobs);
 
     /// <summary>
     /// Ordered chain of safe binary validators evaluated against added or modified binary files.

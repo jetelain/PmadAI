@@ -385,4 +385,30 @@ public class NetworkAndBackdoorScannerTests
 
         Assert.Contains(findings, f => f.RuleId == "NET-URL-002");
     }
+    [Fact]
+    public void Scan_CustomTestPaths_ExemptsSingleLabelMockHostsInCustomTestPath()
+    {
+        var scanner = new NetworkAndBackdoorScanner(new DiffRiskScannerOptions
+        {
+            TestFileGlobs = ["custom_tests/**"]
+        });
+
+        var customTestLine = new DiffAddedLine("custom_tests/ClientTests.cs", 10, "var url = \"http://desktop:11434\";");
+        var defaultTestLine = new DiffAddedLine("tests/ClientTests.cs", 10, "var url = \"http://desktop:11434\";");
+
+        Assert.Empty(scanner.ScanLine(customTestLine));
+        Assert.Contains(scanner.ScanLine(defaultTestLine), f => f.RuleId == "NET-URL-001");
+    }
+
+    [Fact]
+    public void Scan_DisabledTestTolerance_FlagsSingleLabelMockHostEvenInTestFile()
+    {
+        var scanner = new NetworkAndBackdoorScanner(new DiffRiskScannerOptions
+        {
+            EnableTestTolerance = false
+        });
+
+        var line = new DiffAddedLine("tests/ClientTests.cs", 10, "var url = \"http://desktop:11434\";");
+        Assert.Contains(scanner.ScanLine(line), f => f.RuleId == "NET-URL-001");
+    }
 }

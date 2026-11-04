@@ -355,4 +355,26 @@ public class DependencySupplyChainScannerTests
 
         Assert.Contains(findings, f => f.RuleId == "DEP-NEW-001");
     }
+    [Fact]
+    public void Scan_CustomTestPaths_SafeTestPackageAllowedInCustomTestPath()
+    {
+        var scanner = new DependencySupplyChainScanner(new DiffRiskScannerOptions
+        {
+            TestFileGlobs = ["spec/**"]
+        });
+
+        var specDiff = new FileDiff
+        {
+            FilePath = "spec/App.Tests.csproj",
+            AddedLines = [new DiffAddedLine("spec/App.Tests.csproj", 8, "  <PackageReference Include=\"AwesomeAssertions\" Version=\"1.0.0\" />")]
+        };
+        var testsDiff = new FileDiff
+        {
+            FilePath = "tests/App.Tests.csproj",
+            AddedLines = [new DiffAddedLine("tests/App.Tests.csproj", 8, "  <PackageReference Include=\"AwesomeAssertions\" Version=\"1.0.0\" />")]
+        };
+
+        Assert.Empty(scanner.Scan([specDiff]));
+        Assert.Contains(scanner.Scan([testsDiff]), f => f.RuleId == "DEP-NEW-001");
+    }
 }

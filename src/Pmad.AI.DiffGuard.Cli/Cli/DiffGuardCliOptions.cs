@@ -66,6 +66,7 @@ public sealed class DiffGuardCliOptions
     public List<string> AllowedImageExtensions { get; set; } = [.. DiffRiskDefaults.AllowedImageExtensions];
     public List<string> MaxLineLengthExcludedExtensions { get; set; } = [.. DiffRiskDefaults.DefaultMaxLineLengthExcludedExtensions];
     public List<string> ExcludedFileGlobs { get; set; } = [.. DiffRiskDefaults.ExcludedFileGlobs];
+    public List<string> TestFileGlobs { get; set; } = [.. DiffRiskDefaults.DefaultTestFileGlobs];
 
     // Tracking metadata
     public IReadOnlyList<string> LoadedConfigPaths { get; set; } = [];

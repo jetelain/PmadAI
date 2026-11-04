@@ -103,6 +103,7 @@ public sealed class DiffGuardRunner
                 MinSuspiciousHexLength = options.MinSuspiciousHexLength,
                 MaxLineLength = options.MaxLineLength,
                 EnableTestTolerance = options.EnableTestTolerance,
+                TestFileGlobs = [.. options.TestFileGlobs],
                 MaxLineLengthExcludedExtensions = new HashSet<string>(options.MaxLineLengthExcludedExtensions, StringComparer.OrdinalIgnoreCase),
                 WellKnownSafeTestPackages = new HashSet<string>(options.WellKnownSafeTestPackages, StringComparer.OrdinalIgnoreCase),
                 RepositoryRootPath = gitMeta.RepositoryRootPath,
