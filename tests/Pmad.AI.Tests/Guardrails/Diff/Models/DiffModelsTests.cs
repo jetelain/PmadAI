@@ -107,23 +107,6 @@ public class DiffModelsTests
     }
 
     [Fact]
-    public void DiffRiskDefaults_IsTestFile_MatchesDefaultGlobs()
-    {
-        Assert.True(DiffRiskDefaults.IsTestFile("tests/ClientTests.cs"));
-        Assert.True(DiffRiskDefaults.IsTestFile("tests/subdir/DeepTests.cs"));
-        Assert.True(DiffRiskDefaults.IsTestFile("test/UnitTest.cs"));
-        Assert.True(DiffRiskDefaults.IsTestFile("tests/App.Tests.csproj"));
-        Assert.True(DiffRiskDefaults.IsTestFile("tests/App.test.props"));
-
-        Assert.False(DiffRiskDefaults.IsTestFile(null));
-        Assert.False(DiffRiskDefaults.IsTestFile(""));
-        Assert.False(DiffRiskDefaults.IsTestFile("src/Client.cs"));
-        Assert.False(DiffRiskDefaults.IsTestFile("src/contest/contest.cs"));
-        Assert.False(DiffRiskDefaults.IsTestFile("src/MyProject.Tests/UnitTest1.cs"));
-        Assert.False(DiffRiskDefaults.IsTestFile("MyProject.Tests/UnitTest1.cs"));
-    }
-
-    [Fact]
     public void DiffRiskDefaults_IsTestFile_CustomGlobsAndDirectories()
     {
         var customGlobs = new[] { "spec/**", "custom_tests", "trailing_tests/", "src/exact-test.cs" };

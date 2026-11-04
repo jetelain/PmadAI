@@ -177,15 +177,6 @@ public static class DiffRiskDefaults
     }
 
     /// <summary>
-    /// Determines whether a file path belongs to a test project, test directory, or test source file
-    /// using <see cref="DefaultTestFileGlobs"/>.
-    /// </summary>
-    public static bool IsTestFile(string? filePath)
-    {
-        return IsTestFile(filePath, DefaultTestFileGlobs);
-    }
-
-    /// <summary>
     /// Determines whether a file path matches any of the specified test file globs or path patterns.
     /// </summary>
     public static bool IsTestFile(string? filePath, IEnumerable<string>? testFileGlobs)
