@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Pmad.AI.DiffGuard.Cli/Pmad.AI.DiffGuard.Cli.csproj" />
     <Project Path="src/Pmad.AI.LlamaSharp/Pmad.AI.LlamaSharp.csproj" />
     <Project Path="src/Pmad.AI/Pmad.AI.csproj" Id="ca0054a3-672d-45ba-92b6-d727b56fc42d" />
     <Project Path="src/Pmad.AI.SourceGenerators/Pmad.AI.SourceGenerators.csproj" />
@@ -10,6 +11,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Pmad.AI.Benchmark.Tests/Pmad.AI.Benchmark.Tests.csproj" />
+    <Project Path="tests/Pmad.AI.DiffGuard.Cli.Tests/Pmad.AI.DiffGuard.Cli.Tests.csproj" />
     <Project Path="tests/Pmad.AI.LlamaSharp.Tests/Pmad.AI.LlamaSharp.Tests.csproj" />
     <Project Path="tests/Pmad.AI.Tests/Pmad.AI.Tests.csproj" Id="8b15ea52-1fe3-4ed6-8ee0-4a22b44e579c" />
     <Project Path="tests/Pmad.AI.AotSmokeTest/Pmad.AI.AotSmokeTest.csproj" />
