@@ -344,5 +344,45 @@ public class NetworkAndBackdoorScannerTests
 
         Assert.Contains(findings, f => f.RuleId == expectedRuleId && f.Category == DiffRiskCategory.PromptInjection);
     }
-}
 
+    [Theory]
+    [InlineData("https://api.example.com/v1/resource")]
+    [InlineData("https://example.org/spec")]
+    [InlineData("https://sub.example.net/doc")]
+    [InlineData("https://onnx.pmad.net/model")]
+    [InlineData("http://internal.service.local/api")]
+    public void Scan_NewSafeDomains_AreExempt(string safeUrl)
+    {
+        var line = new DiffAddedLine("app.cs", 10, $"var uri = \"{safeUrl}\";");
+        var findings = _scanner.ScanLine(line);
+
+        Assert.DoesNotContain(findings, f => f.RuleId == "NET-URL-001");
+    }
+
+    [Fact]
+    public void Scan_TestTolerance_ExemptsSingleLabelMockHostsInTests()
+    {
+        var line = new DiffAddedLine("tests/ClientTests.cs", 10, "var url = \"http://desktop:11434\";");
+        var findings = _scanner.ScanLine(line);
+
+        Assert.DoesNotContain(findings, f => f.RuleId == "NET-URL-001");
+    }
+
+    [Fact]
+    public void Scan_SingleLabelMockHost_FlaggedInNonTestFile()
+    {
+        var line = new DiffAddedLine("src/Client.cs", 10, "var url = \"http://desktop:11434\";");
+        var findings = _scanner.ScanLine(line);
+
+        Assert.Contains(findings, f => f.RuleId == "NET-URL-001");
+    }
+
+    [Fact]
+    public void Scan_ExfiltrationUrl_FlaggedEvenInTestFile()
+    {
+        var line = new DiffAddedLine("tests/ClientTests.cs", 10, "var url = \"https://webhook.site/test-leak\";");
+        var findings = _scanner.ScanLine(line);
+
+        Assert.Contains(findings, f => f.RuleId == "NET-URL-002");
+    }
+}

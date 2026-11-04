@@ -323,4 +323,36 @@ public class DependencySupplyChainScannerTests
 
         Assert.Contains(findings, f => f.RuleId == "DEP-SRC-001" && f.Severity == DiffRiskSeverity.Critical);
     }
+
+    [Theory]
+    [InlineData("AwesomeAssertions")]
+    [InlineData("xunit")]
+    [InlineData("Moq")]
+    [InlineData("FluentAssertions")]
+    public void Scan_SafeTestPackages_AllowedInTestProjects(string testPkg)
+    {
+        var diff = new FileDiff
+        {
+            FilePath = "tests/App.Tests.csproj",
+            AddedLines = [new DiffAddedLine("tests/App.Tests.csproj", 8, $"  <PackageReference Include=\"{testPkg}\" Version=\"1.0.0\" />")]
+        };
+
+        var findings = _scanner.Scan([diff]);
+
+        Assert.DoesNotContain(findings, f => f.RuleId == "DEP-NEW-001");
+    }
+
+    [Fact]
+    public void Scan_TestPackage_FlaggedInProductionProject()
+    {
+        var diff = new FileDiff
+        {
+            FilePath = "src/App.csproj",
+            AddedLines = [new DiffAddedLine("src/App.csproj", 8, "  <PackageReference Include=\"AwesomeAssertions\" Version=\"9.6.0\" />")]
+        };
+
+        var findings = _scanner.Scan([diff]);
+
+        Assert.Contains(findings, f => f.RuleId == "DEP-NEW-001");
+    }
 }

@@ -256,5 +256,156 @@ public class BinaryAndImageScannerTests
             return ValueTask.FromResult(BinaryValidationResult.Valid());
         }
     }
-}
 
+    [Fact]
+    public async Task ScanAsync_BlobStreamProvider_ResolvesAsyncBlobStream()
+    {
+        byte[] pngHeader = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00];
+        string? observedSha = null;
+
+        var options = new DiffRiskScannerOptions
+        {
+            BlobStreamProvider = (file, _) =>
+            {
+                observedSha = file.NewBlobSha;
+                return ValueTask.FromResult<Stream?>(new MemoryStream(pngHeader));
+            }
+        };
+        var scanner = new BinaryAndImageScanner(options);
+        var diff = new FileDiff
+        {
+            FilePath = "assets/logo.png",
+            NewBlobSha = "abcdef1234567890",
+            IsBinary = true
+        };
+
+        var findings = await scanner.ScanAsync([diff]);
+
+        Assert.Empty(findings);
+        Assert.Equal("abcdef1234567890", observedSha);
+    }
+
+    [Fact]
+    public async Task ScanAsync_UncheckedOutGitBranch_ReadsTargetBranchBlobInsteadOfBenignWorkingTreeCopy()
+    {
+        string tempRepo = Path.Combine(Path.GetTempPath(), "git_bin_test_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRepo);
+
+        static void RunGit(string dir, params string[] args)
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "git",
+                WorkingDirectory = dir,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            foreach (var a in args) psi.ArgumentList.Add(a);
+            using var p = System.Diagnostics.Process.Start(psi)!;
+            p.WaitForExit();
+            if (p.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"git {string.Join(" ", args)} failed: {p.StandardError.ReadToEnd()}");
+            }
+        }
+
+        try
+        {
+            RunGit(tempRepo, "init", "-b", "main");
+            RunGit(tempRepo, "config", "user.name", "Test");
+            RunGit(tempRepo, "config", "user.email", "test@example.com");
+            RunGit(tempRepo, "config", "commit.gpgSign", "false");
+
+            // Commit a valid PNG on main
+            byte[] validPng = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D];
+            string imgPath = Path.Combine(tempRepo, "logo.png");
+            File.WriteAllBytes(imgPath, validPng);
+            RunGit(tempRepo, "add", ".");
+            RunGit(tempRepo, "commit", "-m", "Add benign logo.png");
+
+            // On feature/evil, replace logo.png with a disguised MZ executable
+            RunGit(tempRepo, "checkout", "-b", "feature/evil");
+            byte[] disguisedMz = [0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00];
+            File.WriteAllBytes(imgPath, disguisedMz);
+            RunGit(tempRepo, "add", ".");
+            RunGit(tempRepo, "commit", "-m", "Replace logo.png with MZ executable");
+
+            // Switch back to main so working tree on disk has the benign valid PNG!
+            RunGit(tempRepo, "checkout", "main");
+            Assert.Equal(validPng, File.ReadAllBytes(imgPath));
+
+            var options = new DiffRiskScannerOptions
+            {
+                RepositoryRootPath = tempRepo,
+                TargetGitRef = "feature/evil"
+            };
+            var scanner = new BinaryAndImageScanner(options);
+            var diff = new FileDiff
+            {
+                FilePath = "logo.png",
+                IsBinary = true
+            };
+
+            var findings = await scanner.ScanAsync([diff]);
+
+            var finding = Assert.Single(findings);
+            Assert.Equal("PAY-BIN-002", finding.RuleId);
+            Assert.Equal(DiffRiskSeverity.Critical, finding.Severity);
+            Assert.Contains("MZ", finding.Description);
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(tempRepo))
+                {
+                    foreach (var f in Directory.EnumerateFiles(tempRepo, "*", SearchOption.AllDirectories))
+                    {
+                        File.SetAttributes(f, FileAttributes.Normal);
+                    }
+                    Directory.Delete(tempRepo, recursive: true);
+                }
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ScanAsync_MissingGitBlobSha_TreatsStreamAsUnavailableRatherThanEmptyFile()
+    {
+        string tempRepo = Path.Combine(Path.GetTempPath(), "git_missing_sha_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRepo);
+        Directory.CreateDirectory(Path.Combine(tempRepo, ".git"));
+
+        try
+        {
+            var options = new DiffRiskScannerOptions
+            {
+                RepositoryRootPath = tempRepo,
+                AllowUnverifiedImageExtensionsWhenStreamUnavailable = true
+            };
+            var scanner = new BinaryAndImageScanner(options);
+            var diff = new FileDiff
+            {
+                FilePath = "nonexistent.png",
+                NewBlobSha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                IsBinary = true
+            };
+
+            var findings = await scanner.ScanAsync([diff]);
+
+            Assert.Empty(findings);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRepo))
+            {
+                Directory.Delete(tempRepo, recursive: true);
+            }
+        }
+    }
+}

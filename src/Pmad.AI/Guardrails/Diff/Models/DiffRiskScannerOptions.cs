@@ -8,7 +8,9 @@ public sealed class DiffRiskScannerOptions
     private HashSet<string> _wellKnownSafeDomains = new(DiffRiskDefaults.WellKnownSafeDomains, StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _allowedIpAddresses = new(DiffRiskDefaults.AllowedIpAddresses, StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _wellKnownSafePackages = new(DiffRiskDefaults.WellKnownSafePackages, StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _wellKnownSafeTestPackages = new(DiffRiskDefaults.WellKnownSafeTestPackages, StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _allowedImageExtensions = new(DiffRiskDefaults.AllowedImageExtensions, StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _maxLineLengthExcludedExtensions = new(DiffRiskDefaults.DefaultMaxLineLengthExcludedExtensions, StringComparer.OrdinalIgnoreCase);
     private List<string> _excludedFileGlobs = [.. DiffRiskDefaults.ExcludedFileGlobs];
     private List<ISafeBinaryValidator> _safeBinaryValidators;
 
@@ -71,6 +73,11 @@ public sealed class DiffRiskScannerOptions
     public bool FlagPrivateNetworkIps { get; set; } = false;
 
     /// <summary>
+    /// Whether to apply safe tolerances for test files and projects (e.g. mock hostnames, test packages, test fixtures). Default: true.
+    /// </summary>
+    public bool EnableTestTolerance { get; set; } = true;
+
+    /// <summary>
     /// When true, allows image files whose extension matches AllowedImageExtensions when their byte stream cannot be opened.
     /// When false (default fail-closed), raises a finding if image magic bytes cannot be verified. Default: false.
     /// </summary>
@@ -92,19 +99,19 @@ public sealed class DiffRiskScannerOptions
     public double MaxFileImpactPercent { get; set; } = 15.0;
 
     /// <summary>
-    /// Maximum absolute number of changed files permitted before triggering SCOPE-FILES-001. Default: 25.
+    /// Maximum absolute number of changed files permitted before triggering SCOPE-FILES-001. Default: 50.
     /// </summary>
-    public int MaxChangedFiles { get; set; } = 25;
+    public int MaxChangedFiles { get; set; } = 50;
 
     /// <summary>
-    /// Maximum absolute number of changed lines permitted before triggering SCOPE-LINES-001. Default: 1500.
+    /// Maximum absolute number of changed lines permitted before triggering SCOPE-LINES-001. Default: 3000.
     /// </summary>
-    public int MaxChangedLines { get; set; } = 1_500;
+    public int MaxChangedLines { get; set; } = 3_000;
 
     /// <summary>
-    /// Shannon entropy threshold for flagging suspicious string literals. Default: 4.50.
+    /// Shannon entropy threshold for flagging suspicious string literals. Default: 4.95.
     /// </summary>
-    public double ShannonEntropyThreshold { get; set; } = 4.50;
+    public double ShannonEntropyThreshold { get; set; } = 4.95;
 
     /// <summary>
     /// Minimum string length required to evaluate Shannon entropy. Default: 20.
@@ -125,6 +132,21 @@ public sealed class DiffRiskScannerOptions
     /// Maximum single line character length before triggering PAY-UNI-004. Default: 500.
     /// </summary>
     public int MaxLineLength { get; set; } = 500;
+
+    /// <summary>
+    /// File extensions excluded from line length anomaly checking (PAY-UNI-004). Defaults to markdown and text documents (.md, .markdown, .txt, .svg).
+    /// </summary>
+    public HashSet<string> MaxLineLengthExcludedExtensions
+    {
+        get => _maxLineLengthExcludedExtensions;
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _maxLineLengthExcludedExtensions = value.Comparer == StringComparer.OrdinalIgnoreCase
+                ? value
+                : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+        }
+    }
 
     /// <summary>
     /// Trusted domains allowed in URLs and package feeds. Supports exact hostnames and *.domain.tld wildcards.
@@ -159,7 +181,7 @@ public sealed class DiffRiskScannerOptions
     }
 
     /// <summary>
-    /// Trusted package names or prefix wildcards (e.g. Microsoft.*, System.*, Pmad.*).
+    /// Trusted package names and wildcard prefixes allowed in dependencies.
     /// Setters coerce comparer to StringComparer.OrdinalIgnoreCase.
     /// </summary>
     public HashSet<string> WellKnownSafePackages
@@ -175,7 +197,23 @@ public sealed class DiffRiskScannerOptions
     }
 
     /// <summary>
-    /// Permitted file extensions for image diffs.
+    /// Trusted test package identifiers and prefix patterns permitted in test projects.
+    /// Setters coerce comparer to StringComparer.OrdinalIgnoreCase.
+    /// </summary>
+    public HashSet<string> WellKnownSafeTestPackages
+    {
+        get => _wellKnownSafeTestPackages;
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _wellKnownSafeTestPackages = value.Comparer == StringComparer.OrdinalIgnoreCase
+                ? value
+                : new HashSet<string>(value, StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
+    /// File extensions permitted for binary image diffs.
     /// Setters coerce comparer to StringComparer.OrdinalIgnoreCase.
     /// </summary>
     public HashSet<string> AllowedImageExtensions
@@ -217,12 +255,29 @@ public sealed class DiffRiskScannerOptions
     }
 
     /// <summary>
-    /// Optional delegate for resolving a read-only stream to a target repository file during binary scanning.
+    /// Optional asynchronous delegate for resolving a read-only stream to a target file or Git blob during binary scanning.
+    /// Receives the full <see cref="FileDiff"/> (including <see cref="FileDiff.FilePath"/> and <see cref="FileDiff.NewBlobSha"/>)
+    /// so callers can stream directly from Git object storage when the target branch is not checked out.
+    /// Takes precedence over <see cref="FileStreamProvider"/> and <see cref="RepositoryRootPath"/>.
+    /// </summary>
+    public Func<FileDiff, CancellationToken, ValueTask<Stream?>>? BlobStreamProvider { get; set; }
+
+    /// <summary>
+    /// Optional synchronous delegate for resolving a read-only stream to a target repository file path during binary scanning.
     /// </summary>
     public Func<string, Stream?>? FileStreamProvider { get; set; }
 
     /// <summary>
-    /// Root path of the repository on disk used for resolving file streams when FileStreamProvider is not set.
+    /// Root path of the repository on disk used for resolving file or Git blob streams when <see cref="BlobStreamProvider"/>
+    /// and <see cref="FileStreamProvider"/> are not set.
     /// </summary>
     public string? RepositoryRootPath { get; set; }
+
+    /// <summary>
+    /// Optional target Git revision, branch, or commit SHA (e.g. <c>"feature/my-branch"</c> or <c>"HEAD"</c>) being scanned.
+    /// When set alongside <see cref="RepositoryRootPath"/>, <see cref="BinaryAndImageScanner"/> resolves binary blobs directly
+    /// from the Git object database (<c>git cat-file blob &lt;NewBlobSha&gt;</c> or <c>git cat-file blob &lt;TargetGitRef&gt;:&lt;FilePath&gt;</c>)
+    /// instead of reading the checked-out working tree on disk.
+    /// </summary>
+    public string? TargetGitRef { get; set; }
 }

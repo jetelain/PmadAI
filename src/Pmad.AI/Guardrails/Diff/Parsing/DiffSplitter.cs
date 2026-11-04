@@ -292,6 +292,8 @@ public static class DiffSplitter
             OldFilePath = file.OldFilePath,
             NewFileMode = file.NewFileMode,
             OldFileMode = file.OldFileMode,
+            OldBlobSha = file.OldBlobSha,
+            NewBlobSha = file.NewBlobSha,
             IsNewFile = file.IsNewFile,
             IsDeletedFile = file.IsDeletedFile,
             IsRenamedFile = file.IsRenamedFile,

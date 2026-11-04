@@ -180,7 +180,10 @@ public sealed partial class DependencySupplyChainScanner
             else
             {
                 // Newly added external package dependency (DEP-NEW-001)
-                if (!IsSafePackage(added.PackageId, _options.WellKnownSafePackages))
+                bool isAllowedInTest = _options.EnableTestTolerance &&
+                                       DiffRiskDefaults.IsTestFile(added.FilePath) &&
+                                       IsSafePackage(added.PackageId, _options.WellKnownSafeTestPackages);
+                if (!IsSafePackage(added.PackageId, _options.WellKnownSafePackages) && !isAllowedInTest)
                 {
                     string verStr = !string.IsNullOrEmpty(added.Version) ? $" ({added.Version})" : "";
                     findings.Add(new DiffRiskFinding(

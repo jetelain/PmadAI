@@ -50,6 +50,16 @@ public sealed class FileDiff
     public string? OldFileMode { get; set; }
 
     /// <summary>
+    /// Previous Git blob object hash extracted from the <c>index &lt;old&gt;..&lt;new&gt;</c> header line, or <see langword="null"/> if not present or all zeros.
+    /// </summary>
+    public string? OldBlobSha { get; set; }
+
+    /// <summary>
+    /// Target Git blob object hash extracted from the <c>index &lt;old&gt;..&lt;new&gt;</c> header line, or <see langword="null"/> if not present or all zeros.
+    /// </summary>
+    public string? NewBlobSha { get; set; }
+
+    /// <summary>
     /// True if the file is newly added in this diff.
     /// </summary>
     public bool IsNewFile { get; set; }
@@ -124,4 +134,3 @@ public sealed class FileDiff
         return sb.ToString();
     }
 }
-

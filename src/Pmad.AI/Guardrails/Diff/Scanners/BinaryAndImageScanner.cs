@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Pmad.AI.Guardrails.Diff;
 
 /// <summary>
@@ -66,8 +68,13 @@ public sealed class BinaryAndImageScanner
             }
 
             Func<Stream?> streamOpener = () => null;
+            Func<CancellationToken, ValueTask<Stream?>>? asyncStreamOpener = null;
 
-            if (_options.FileStreamProvider != null)
+            if (_options.BlobStreamProvider != null)
+            {
+                asyncStreamOpener = ct => _options.BlobStreamProvider(file, ct);
+            }
+            else if (_options.FileStreamProvider != null)
             {
                 streamOpener = () => _options.FileStreamProvider(file.FilePath);
             }
@@ -104,7 +111,27 @@ public sealed class BinaryAndImageScanner
                     continue;
                 }
 
-                if (File.Exists(targetFull))
+                if (IsGitRepository(rootFull) && (!string.IsNullOrEmpty(file.NewBlobSha) || !string.IsNullOrEmpty(_options.TargetGitRef)))
+                {
+                    string blobTarget = !string.IsNullOrEmpty(file.NewBlobSha)
+                        ? file.NewBlobSha
+                        : $"{_options.TargetGitRef}:{file.FilePath}";
+
+                    bool allowDiskFallback = _options.TargetGitRef == null && File.Exists(targetFull);
+                    streamOpener = () =>
+                    {
+                        var gitStream = TryOpenGitBlobStream(rootFull, blobTarget);
+                        if (gitStream != null)
+                        {
+                            return gitStream;
+                        }
+
+                        return allowDiskFallback
+                            ? new FileStream(targetFull, FileMode.Open, FileAccess.Read, FileShare.Read)
+                            : null;
+                    };
+                }
+                else if (_options.TargetGitRef == null && File.Exists(targetFull))
                 {
                     streamOpener = () => new FileStream(targetFull, FileMode.Open, FileAccess.Read, FileShare.Read);
                 }
@@ -114,12 +141,24 @@ public sealed class BinaryAndImageScanner
             ReadOnlyMemory<byte>? headerBytes = null;
             try
             {
-                using var probeStream = streamOpener();
+                Stream? probeStream = null;
+                if (asyncStreamOpener != null)
+                {
+                    probeStream = await asyncStreamOpener(cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    probeStream = streamOpener();
+                }
+
                 if (probeStream != null)
                 {
-                    byte[] buffer = new byte[512];
-                    int read = await probeStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-                    headerBytes = new ReadOnlyMemory<byte>(buffer, 0, read);
+                    await using (probeStream.ConfigureAwait(false))
+                    {
+                        byte[] buffer = new byte[512];
+                        int read = await probeStream.ReadAtLeastAsync(buffer, 512, throwOnEndOfStream: false, cancellationToken).ConfigureAwait(false);
+                        headerBytes = new ReadOnlyMemory<byte>(buffer, 0, read);
+                    }
                 }
             }
             catch
@@ -133,6 +172,7 @@ public sealed class BinaryAndImageScanner
                 Extension = ext,
                 FileDiff = file,
                 StreamOpener = streamOpener,
+                AsyncStreamOpener = asyncStreamOpener,
                 HeaderBytes = headerBytes
             };
 
@@ -177,6 +217,78 @@ public sealed class BinaryAndImageScanner
         }
 
         return findings;
+    }
+
+    private static bool IsGitRepository(string rootPath)
+    {
+        return Directory.Exists(Path.Combine(rootPath, ".git")) || File.Exists(Path.Combine(rootPath, ".git"));
+    }
+
+    private static Stream? TryOpenGitBlobStream(string repoPath, string blobOrRevPath)
+    {
+        if (string.IsNullOrWhiteSpace(blobOrRevPath) || blobOrRevPath.StartsWith('-'))
+        {
+            return null;
+        }
+
+        Process? proc = null;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "git",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add("-C");
+            psi.ArgumentList.Add(repoPath);
+            psi.ArgumentList.Add("cat-file");
+            psi.ArgumentList.Add("blob");
+            psi.ArgumentList.Add(blobOrRevPath);
+
+            proc = Process.Start(psi);
+            if (proc == null) return null;
+
+            // Drain stderr asynchronously so git never blocks on stderr pipe buffer
+            _ = proc.StandardError.ReadToEndAsync();
+
+            var baseStream = proc.StandardOutput.BaseStream;
+            byte[] prefixBuffer = new byte[512];
+            int totalRead = baseStream.ReadAtLeast(prefixBuffer, 512, throwOnEndOfStream: false);
+
+            if (totalRead < 512)
+            {
+                // Reached EOF: wait briefly for git process exit code to distinguish empty blob from error
+                proc.WaitForExit(2000);
+                if (proc.HasExited && proc.ExitCode != 0)
+                {
+                    proc.Dispose();
+                    return null;
+                }
+
+                proc.Dispose();
+                return new MemoryStream(prefixBuffer, 0, totalRead, writable: false);
+            }
+
+            return new ProcessStream(prefixBuffer, totalRead, proc, baseStream);
+        }
+        catch
+        {
+            if (proc != null)
+            {
+                try
+                {
+                    if (!proc.HasExited) proc.Kill();
+                }
+                catch
+                {
+                }
+                proc.Dispose();
+            }
+            return null;
+        }
     }
 
     private static bool IsPathTraversal(string filePath)
@@ -245,5 +357,106 @@ public sealed class BinaryAndImageScanner
 
         return false;
     }
-}
 
+    private sealed class ProcessStream : Stream
+    {
+        private readonly byte[] _prefixBuffer;
+        private readonly int _prefixLength;
+        private int _prefixOffset;
+        private readonly Process _process;
+        private readonly Stream _baseStream;
+
+        public ProcessStream(byte[] prefixBuffer, int prefixLength, Process process, Stream baseStream)
+        {
+            _prefixBuffer = prefixBuffer;
+            _prefixLength = prefixLength;
+            _prefixOffset = 0;
+            _process = process;
+            _baseStream = baseStream;
+        }
+
+        public override bool CanRead => _baseStream.CanRead;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() => _baseStream.Flush();
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            return Read(buffer.AsSpan(offset, count));
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (_prefixOffset < _prefixLength)
+            {
+                int toCopy = Math.Min(buffer.Length, _prefixLength - _prefixOffset);
+                _prefixBuffer.AsSpan(_prefixOffset, toCopy).CopyTo(buffer);
+                _prefixOffset += toCopy;
+                return toCopy;
+            }
+
+            return _baseStream.Read(buffer);
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            return ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_prefixOffset < _prefixLength)
+            {
+                int toCopy = Math.Min(buffer.Length, _prefixLength - _prefixOffset);
+                _prefixBuffer.AsMemory(_prefixOffset, toCopy).CopyTo(buffer);
+                _prefixOffset += toCopy;
+                return ValueTask.FromResult(toCopy);
+            }
+
+            return _baseStream.ReadAsync(buffer, cancellationToken);
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _baseStream.Dispose();
+                try
+                {
+                    if (!_process.HasExited)
+                    {
+                        _process.Kill();
+                    }
+                }
+                catch
+                {
+                }
+                _process.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            await _baseStream.DisposeAsync().ConfigureAwait(false);
+            try
+            {
+                if (!_process.HasExited)
+                {
+                    _process.Kill();
+                }
+            }
+            catch
+            {
+            }
+            _process.Dispose();
+            await base.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+}
