@@ -428,4 +428,115 @@ public static class JsonRepairUtilities
         repaired = num.ToString();
         return true;
     }
+
+
+    /// <summary>
+    /// Extracts a balanced JSON object or array starting from or after <paramref name="startIndex"/>.
+    /// Handles nested braces/brackets, string literals, and escape sequences, repairing truncated JSON if necessary.
+    /// </summary>
+    public static string? ExtractBalancedJson(string text, int startIndex, out int consumedLength, out bool isTruncated)
+    {
+        consumedLength = 0;
+        isTruncated = false;
+        if (string.IsNullOrEmpty(text) || startIndex < 0 || startIndex >= text.Length)
+        {
+            return null;
+        }
+
+        int startBrace = text.IndexOf('{', startIndex);
+        int startBracket = text.IndexOf('[', startIndex);
+        int startPos;
+        if (startBrace >= 0 && startBracket >= 0)
+        {
+            startPos = Math.Min(startBrace, startBracket);
+        }
+        else if (startBrace >= 0)
+        {
+            startPos = startBrace;
+        }
+        else if (startBracket >= 0)
+        {
+            startPos = startBracket;
+        }
+        else
+        {
+            return null;
+        }
+
+        var openStack = new Stack<char>();
+        bool inString = false;
+        bool escaped = false;
+
+        for (int i = startPos; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (escaped)
+            {
+                escaped = false;
+                continue;
+            }
+
+            if (c == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inString = !inString;
+                continue;
+            }
+
+            if (!inString)
+            {
+                if (c == '{' || c == '[')
+                {
+                    openStack.Push(c);
+                }
+                else if (c == '}' || c == ']')
+                {
+                    if (openStack.Count > 0 && ((c == '}' && openStack.Peek() == '{') || (c == ']' && openStack.Peek() == '[')))
+                    {
+                        openStack.Pop();
+                    }
+                    if (openStack.Count == 0)
+                    {
+                        consumedLength = (i - startIndex) + 1;
+                        isTruncated = false;
+                        return text.Substring(startPos, i - startPos + 1);
+                    }
+                }
+            }
+        }
+
+        if (openStack.Count > 0)
+        {
+            consumedLength = text.Length - startIndex;
+            isTruncated = true;
+            var raw = text.Substring(startPos);
+            var repaired = JsonRepairUtilities.TryRepairTruncatedJson(raw);
+            if (repaired != null)
+            {
+                return repaired;
+            }
+
+            var sb = new StringBuilder(raw);
+            if (escaped)
+            {
+                sb.Append('\\');
+            }
+            if (inString)
+            {
+                sb.Append('"');
+            }
+            while (openStack.Count > 0)
+            {
+                sb.Append(openStack.Pop() == '[' ? ']' : '}');
+            }
+            return sb.ToString();
+        }
+
+        return null;
+    }
 }
