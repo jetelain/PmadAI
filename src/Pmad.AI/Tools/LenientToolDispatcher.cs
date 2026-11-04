@@ -27,7 +27,7 @@ public sealed record DispatchedToolCall(
 /// <see cref="ToolMapping.AddEnumAliases{TEnum}"/>, which uses runtime reflection and is marked
 /// <see cref="System.Diagnostics.CodeAnalysis.RequiresUnreferencedCodeAttribute"/>).
 /// </summary>
-public class LenientToolDispatcher
+public partial class LenientToolDispatcher
 {
     private readonly LenientToolDispatcherOptions _options;
     private readonly ToolDispatcherConfigurationSnapshot _configuration;
@@ -35,7 +35,8 @@ public class LenientToolDispatcher
     // May mutate with on-the-fly tool registration
     private volatile RegistredToolsMetadata _registeredTools = new RegistredToolsMetadata(null);
 
-    private static readonly Regex TemplatePlaceholderRegex = new(@"\{([a-zA-Z0-9_]+)(?::([^}]*))?\}", RegexOptions.Compiled);
+    [GeneratedRegex(@"\{([a-zA-Z0-9_]+)(?::([^}]*))?\}")]
+    private static partial Regex TemplatePlaceholderRegex();
 
     public LenientDispatchTelemetry? Telemetry => _options.Telemetry;
 
@@ -298,33 +299,54 @@ public class LenientToolDispatcher
             Telemetry?.Record(LenientDispatchEventType.CasingNormalized, toolName, canonicalTool, SessionId);
         }
 
+        _registeredTools.TryGetSchema(canonicalTool, out var propDict, out var rootSchema);
+
         // 3. Resolve parameter aliases via the flat alias -> canonical map (O(1) per argument).
         var canonicalArgs = new AIFunctionArguments();
         var aliased = new List<(string Key, object? Value, string Canonical)>();
         foreach (var (k, v) in rawArgs)
         {
+            var unwrappedVal = v is JsonElement { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined } ? null : v;
             if (mapping != null && mapping.ParameterAliases.Count > 0 &&
                 mapping.ParameterAliases.TryGetValue(k, out var canonicalParam))
             {
-                aliased.Add((k, v, canonicalParam));
+                aliased.Add((k, unwrappedVal, canonicalParam));
+            }
+            else if (TryStripJsonSuffixAndMatch(k, propDict, mapping, out var strippedCanonicalParam))
+            {
+                aliased.Add((k, unwrappedVal, strippedCanonicalParam));
             }
             else
             {
-                canonicalArgs[k] = v;
+                if (canonicalArgs.TryGetValue(k, out var existing) && !IsNullOrUndefined(existing) && IsNullOrUndefined(unwrappedVal))
+                {
+                    continue;
+                }
+                canonicalArgs[k] = unwrappedVal;
             }
         }
 
         // Deterministic precedence: when the model emits the canonical key and one or more of
-        // its aliases for the same parameter, the value supplied under the exact canonical key wins.
+        // its aliases for the same parameter, the value supplied under the exact canonical key wins
+        // (unless the canonical key's value is null/undefined, in which case a non-null alias wins).
         aliased.Sort(static (a, b) =>
-            (string.Equals(a.Key, a.Canonical, StringComparison.Ordinal) ? 0 : 1)
-                .CompareTo(string.Equals(b.Key, b.Canonical, StringComparison.Ordinal) ? 0 : 1));
+        {
+            int aNull = IsNullOrUndefined(a.Value) ? 1 : 0;
+            int bNull = IsNullOrUndefined(b.Value) ? 1 : 0;
+            int cmp = aNull.CompareTo(bNull);
+            if (cmp != 0) return cmp;
+
+            return (string.Equals(a.Key, a.Canonical, StringComparison.Ordinal) ? 0 : 1)
+                .CompareTo(string.Equals(b.Key, b.Canonical, StringComparison.Ordinal) ? 0 : 1);
+        });
 
         foreach (var (key, value, canonicalParam) in aliased)
         {
-            // First-wins after sorting: the exact canonical key (if present) takes precedence
-            // over any of its aliases; losing duplicates are dropped silently.
-            if (canonicalArgs.ContainsKey(canonicalParam))
+            // First-wins after sorting: a non-null value under the exact canonical key (if present)
+            // takes precedence over any of its aliases; a null canonical key is treated as unset so
+            // a non-null alias overwrites it.
+            if (canonicalArgs.TryGetValue(canonicalParam, out var existingVal) &&
+                (!IsNullOrUndefined(existingVal) || IsNullOrUndefined(value)))
             {
                 continue;
             }
@@ -344,6 +366,18 @@ public class LenientToolDispatcher
             }
         }
 
+        // 3.5. Top-level JSON array payload mapping
+        if (canonicalArgs.TryGetValue(ToolCallHealingTransform.RootArraySentinelKey, out var rootArrayVal))
+        {
+            canonicalArgs.Remove(ToolCallHealingTransform.RootArraySentinelKey);
+            string? targetArrayParam = ResolveRootArrayTargetParameter(propDict, rootSchema, mapping);
+            if (targetArrayParam != null && (!canonicalArgs.TryGetValue(targetArrayParam, out var existingArr) || IsNullOrUndefined(existingArr)))
+            {
+                canonicalArgs[targetArrayParam] = rootArrayVal;
+                Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, ToolCallHealingTransform.RootArraySentinelKey, targetArrayParam, SessionId);
+            }
+        }
+
         // 4. Evaluate computed parameters if canonical parameter not already resolved
         if (mapping?.ComputedParameters != null && mapping.ComputedParameters.Count > 0)
         {
@@ -353,7 +387,7 @@ public class LenientToolDispatcher
 
             foreach (var (computedParam, computer) in mapping.ComputedParameters)
             {
-                if (!canonicalArgs.ContainsKey(computedParam) || canonicalArgs[computedParam] == null)
+                if (!canonicalArgs.ContainsKey(computedParam) || IsNullOrUndefined(canonicalArgs[computedParam]))
                 {
                     try
                     {
@@ -373,7 +407,6 @@ public class LenientToolDispatcher
         }
 
         // 5. Deep schema-driven and mapping-driven normalization (nested property renaming, casing matching, stringified JSON parsing, value alias resolution)
-        _registeredTools.TryGetSchema(canonicalTool, out var propDict, out var rootSchema);
 
         // 4.5. Flattened collection promotion & array-to-flat unpacking & replaceAll propagation
         if (_options.AutoPromoteFlattenedArrayParameters && propDict != null)
@@ -391,7 +424,14 @@ public class LenientToolDispatcher
         foreach (var key in currentKeys)
         {
             var val = canonicalArgs[key];
-            if (val == null) continue;
+            if (IsNullOrUndefined(val))
+            {
+                if (val is JsonElement)
+                {
+                    canonicalArgs[key] = null;
+                }
+                continue;
+            }
 
             string canonicalKey = key;
             JsonElement? paramSchema = null;
@@ -406,16 +446,25 @@ public class LenientToolDispatcher
 
             if (!string.Equals(canonicalKey, key, StringComparison.Ordinal))
             {
-                canonicalArgs.Remove(key);
-                canonicalArgs[canonicalKey] = normalizedVal;
-                if (string.Equals(canonicalKey, key, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(ToSnakeCase(canonicalKey), ToSnakeCase(key), StringComparison.OrdinalIgnoreCase))
+                if (canonicalArgs.TryGetValue(canonicalKey, out var existingCanonVal) &&
+                    !IsNullOrUndefined(existingCanonVal))
                 {
-                    Telemetry?.Record(LenientDispatchEventType.CasingNormalized, key, canonicalKey, SessionId);
+                    // A non-null value is already present under the canonical key; drop the duplicate casing/alias key.
+                    canonicalArgs.Remove(key);
                 }
                 else
                 {
-                    Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, key, canonicalKey, SessionId);
+                    canonicalArgs.Remove(key);
+                    canonicalArgs[canonicalKey] = normalizedVal;
+                    if (string.Equals(canonicalKey, key, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ToSnakeCase(canonicalKey), ToSnakeCase(key), StringComparison.OrdinalIgnoreCase))
+                    {
+                        Telemetry?.Record(LenientDispatchEventType.CasingNormalized, key, canonicalKey, SessionId);
+                    }
+                    else
+                    {
+                        Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, key, canonicalKey, SessionId);
+                    }
                 }
             }
             else
@@ -479,7 +528,7 @@ public class LenientToolDispatcher
     {
         var template = translation.CommandTemplate;
 
-        var rendered = TemplatePlaceholderRegex.Replace(template, match =>
+        var rendered = TemplatePlaceholderRegex().Replace(template, match =>
         {
             var paramName = match.Groups[1].Value;
             var hasDefault = match.Groups[2].Success;
@@ -829,9 +878,10 @@ public class LenientToolDispatcher
 
         // 0. ToolMapping parameter value alias resolution (synonyms, plural/singular, casing)
         string? aliasVal = null;
-        if (mapping?.TryResolveValueAlias(paramName, trimmed, out aliasVal) == true && aliasVal != null)
+        bool hasValueAlias = mapping != null && mapping.TryResolveValueAlias(paramName, trimmed, out aliasVal) && aliasVal != null;
+        if (hasValueAlias)
         {
-            trimmed = aliasVal;
+            trimmed = aliasVal!;
         }
 
         // 1. Schema-based Enum matching (case-insensitive + casing/plural heuristics)
@@ -872,7 +922,7 @@ public class LenientToolDispatcher
         }
 
         // If a value alias was mapped and schema does not specify an alternative enum, return the resolved alias
-        if (aliasVal != null)
+        if (hasValueAlias)
         {
             return aliasVal;
         }
@@ -898,7 +948,8 @@ public class LenientToolDispatcher
 
         if (isIntegerTarget || (!schema.HasValue && IsNumericParameterName(paramName)))
         {
-            if (long.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var longVal))
+            var intCandidate = isIntegerTarget && trimmed.StartsWith('#') ? trimmed[1..].Trim() : trimmed;
+            if (long.TryParse(intCandidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out var longVal))
             {
                 if (longVal >= int.MinValue && longVal <= int.MaxValue)
                 {
@@ -943,11 +994,19 @@ public class LenientToolDispatcher
             {
                 if (itemType.ValueEquals("integer"))
                 {
-                    return parts.Select(p => int.TryParse(p, CultureInfo.InvariantCulture, out var iv) ? (object)iv : p).ToArray();
+                    return parts.Select(p =>
+                    {
+                        var candidate = p.StartsWith('#') ? p[1..].Trim() : p;
+                        if (long.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out var lv))
+                        {
+                            return lv >= int.MinValue && lv <= int.MaxValue ? (object)(int)lv : lv;
+                        }
+                        return (object)p;
+                    }).ToArray();
                 }
                 if (itemType.ValueEquals("number"))
                 {
-                    return parts.Select(p => double.TryParse(p, CultureInfo.InvariantCulture, out var dv) ? (object)dv : p).ToArray();
+                    return parts.Select(p => double.TryParse(p, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var dv) ? (object)dv : p).ToArray();
                 }
             }
 
@@ -1047,18 +1106,27 @@ public class LenientToolDispatcher
 
         if (value is System.Collections.IEnumerable list and not string and not IDictionary<string, object?> and not System.Collections.IDictionary)
         {
+            JsonElement? resolvedItemSchema = itemsSchema.HasValue
+                ? (rootSchema.HasValue ? ResolveSchema(itemsSchema.Value, rootSchema.Value) : itemsSchema.Value)
+                : null;
+
+            bool isScalarItemSchema = resolvedItemSchema.HasValue &&
+                (SchemaTypeMatches(resolvedItemSchema.Value, "integer") ||
+                 SchemaTypeMatches(resolvedItemSchema.Value, "number") ||
+                 SchemaTypeMatches(resolvedItemSchema.Value, "boolean") ||
+                 SchemaTypeMatches(resolvedItemSchema.Value, "string"));
+
             var normalizedList = new List<object?>();
             foreach (var item in list)
             {
                 var effectiveItem = item;
-                if (effectiveItem is string strItem && itemsSchema.HasValue)
+                if (effectiveItem is string strItem && resolvedItemSchema.HasValue)
                 {
-                    var resolvedItemSchema = rootSchema.HasValue ? ResolveSchema(itemsSchema.Value, rootSchema.Value) : itemsSchema.Value;
-                    if (resolvedItemSchema.ValueKind == JsonValueKind.Object &&
-                        resolvedItemSchema.TryGetProperty("properties", out var itemProps) &&
+                    if (resolvedItemSchema.Value.ValueKind == JsonValueKind.Object &&
+                        resolvedItemSchema.Value.TryGetProperty("properties", out var itemProps) &&
                         itemProps.ValueKind == JsonValueKind.Object)
                     {
-                        var primaryProp = FindPrimaryStringProperty(itemProps, resolvedItemSchema, mapping, paramPath + "[]");
+                        var primaryProp = FindPrimaryStringProperty(itemProps, resolvedItemSchema.Value, mapping, paramPath + "[]");
                         if (primaryProp != null)
                         {
                             effectiveItem = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
@@ -1069,7 +1137,12 @@ public class LenientToolDispatcher
                     }
                 }
 
-                normalizedList.Add(NormalizeValueDeep(effectiveItem, itemsSchema, mapping, paramPath + "[]", rootSchema));
+                var normalizedItem = NormalizeValueDeep(effectiveItem, itemsSchema, mapping, paramPath + "[]", rootSchema);
+                if (_options.EnableParameterCoercion && isScalarItemSchema && normalizedItem != null)
+                {
+                    normalizedItem = CoerceParameterValue(paramPath + "[]", normalizedItem, resolvedItemSchema, mapping);
+                }
+                normalizedList.Add(normalizedItem);
             }
             return normalizedList;
         }
@@ -1176,6 +1249,18 @@ public class LenientToolDispatcher
                     canonicalKey = pascalEntry.CanonicalName;
                     propSchema = pascalEntry.Schema;
                 }
+                else if (TryStripJsonSuffixAndMatch(rawKey, expectedProperties, out var strippedEntry))
+                {
+                    canonicalKey = strippedEntry.CanonicalName;
+                    propSchema = strippedEntry.Schema;
+                }
+
+                if (normalizedDict.TryGetValue(canonicalKey, out var existingNestedVal) &&
+                    !IsNullOrUndefined(existingNestedVal) &&
+                    IsNullOrUndefined(rawVal))
+                {
+                    continue;
+                }
 
                 if (!string.Equals(canonicalKey, rawKey, StringComparison.Ordinal))
                 {
@@ -1193,7 +1278,8 @@ public class LenientToolDispatcher
                 var normalizedSubVal = NormalizeValueDeep(rawVal, propSchema, mapping, paramPath + "." + canonicalKey, rootSchema);
                 if (_options.EnableParameterCoercion && normalizedSubVal is string && propSchema.HasValue)
                 {
-                    normalizedSubVal = CoerceParameterValue(canonicalKey, normalizedSubVal, propSchema, mapping);
+                    var resolvedPropSchema = rootSchema.HasValue ? ResolveSchema(propSchema.Value, rootSchema.Value) : propSchema.Value;
+                    normalizedSubVal = CoerceParameterValue(canonicalKey, normalizedSubVal, resolvedPropSchema, mapping);
                 }
                 normalizedDict[canonicalKey] = normalizedSubVal;
             }
@@ -1239,32 +1325,60 @@ public class LenientToolDispatcher
             if (canonicalArgs.TryGetValue(canonicalParamName, out var existingVal) ||
                 TryGetValueCaseInsensitive(canonicalArgs, canonicalParamName, out existingVal, out matchedKey))
             {
+                if (existingVal is JsonElement rootJe)
+                {
+                    existingVal = ConvertJsonElementToClr(rootJe);
+                }
+
                 if (existingVal is System.Collections.IEnumerable enumerable and not string and not IDictionary<string, object?> and not System.Collections.IDictionary)
                 {
                     foreach (var item in enumerable)
                     {
-                        if (item is IDictionary<string, object?> d && d.Count > 0)
-                        {
-                            hasValidCollection = true;
-                            break;
-                        }
-                        else if (item is JsonElement je && je.ValueKind == JsonValueKind.Object && je.EnumerateObject().Any())
-                        {
-                            hasValidCollection = true;
-                            break;
-                        }
-                        else if (item != null && item is not IDictionary<string, object?> and not System.Collections.IDictionary)
+                        if (!IsBlankCollectionElement(item))
                         {
                             hasValidCollection = true;
                             break;
                         }
                     }
                 }
-                else if (existingVal is IDictionary<string, object?> singleDict && singleDict.Count > 0)
+                else if (existingVal is IDictionary<string, object?> or System.Collections.IDictionary)
                 {
-                    hasValidCollection = true;
+                    if (!IsBlankCollectionElement(existingVal))
+                    {
+                        hasValidCollection = true;
+                    }
                 }
-                else if (existingVal != null)
+                else if (existingVal is string existingStr)
+                {
+                    if (!string.IsNullOrWhiteSpace(existingStr))
+                    {
+                        var trimmedStr = existingStr.Trim();
+                        if (trimmedStr.StartsWith('[') || trimmedStr.StartsWith('{'))
+                        {
+                            var parsed = TryParseStringifiedJson(trimmedStr, out _);
+                            if (parsed is System.Collections.IEnumerable parsedEnum and not string and not IDictionary<string, object?> and not System.Collections.IDictionary)
+                            {
+                                foreach (var item in parsedEnum)
+                                {
+                                    if (!IsBlankCollectionElement(item))
+                                    {
+                                        hasValidCollection = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            else if (!IsBlankCollectionElement(parsed))
+                            {
+                                hasValidCollection = true;
+                            }
+                        }
+                        else
+                        {
+                            hasValidCollection = true;
+                        }
+                    }
+                }
+                else if (!IsNullOrUndefined(existingVal))
                 {
                     hasValidCollection = true;
                 }
@@ -1689,6 +1803,198 @@ public class LenientToolDispatcher
         }
 
         return null;
+    }
+
+    private static bool IsNullOrUndefined(object? value)
+    {
+        if (value == null) return true;
+        if (value is JsonElement je)
+        {
+            return je.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined;
+        }
+        return false;
+    }
+
+    private static bool IsBlankCollectionElement(object? item)
+    {
+        if (IsNullOrUndefined(item))
+        {
+            return true;
+        }
+
+        if (item is string s)
+        {
+            return string.IsNullOrWhiteSpace(s);
+        }
+
+        if (item is JsonElement je)
+        {
+            if (je.ValueKind == JsonValueKind.String)
+            {
+                return string.IsNullOrWhiteSpace(je.GetString());
+            }
+            if (je.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in je.EnumerateObject())
+                {
+                    if (!IsBlankCollectionElement(prop.Value))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            return false;
+        }
+
+        if (item is IDictionary<string, object?> dict)
+        {
+            foreach (var v in dict.Values)
+            {
+                if (!IsBlankCollectionElement(v))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        if (item is System.Collections.IDictionary nonGenDict)
+        {
+            foreach (System.Collections.DictionaryEntry de in nonGenDict)
+            {
+                if (!IsBlankCollectionElement(de.Value))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryStripJsonSuffixAndMatch(
+        string rawKey,
+        Dictionary<string, (string CanonicalName, JsonElement Schema)>? expectedProperties,
+        ToolMapping? mapping,
+        out string canonicalParamName)
+    {
+        canonicalParamName = string.Empty;
+        string? stripped = StripJsonSuffix(rawKey);
+        if (string.IsNullOrEmpty(stripped))
+        {
+            return false;
+        }
+
+        if (expectedProperties != null &&
+            (expectedProperties.TryGetValue(stripped, out var matchedEntry) ||
+             expectedProperties.TryGetValue(ToSnakeCase(stripped), out matchedEntry) ||
+             expectedProperties.TryGetValue(ToCamelCase(stripped), out matchedEntry) ||
+             expectedProperties.TryGetValue(ToPascalCase(stripped), out matchedEntry)))
+        {
+            canonicalParamName = matchedEntry.CanonicalName;
+            return true;
+        }
+
+        if (mapping != null && mapping.ParameterAliases.Count > 0 &&
+            (mapping.ParameterAliases.TryGetValue(stripped, out var mappedCanon) ||
+             mapping.ParameterAliases.TryGetValue(ToSnakeCase(stripped), out mappedCanon) ||
+             mapping.ParameterAliases.TryGetValue(ToCamelCase(stripped), out mappedCanon) ||
+             mapping.ParameterAliases.TryGetValue(ToPascalCase(stripped), out mappedCanon)))
+        {
+            canonicalParamName = mappedCanon;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string? StripJsonSuffix(string rawKey)
+    {
+        if (rawKey.EndsWith("_json", StringComparison.OrdinalIgnoreCase) && rawKey.Length > 5)
+        {
+            return rawKey[..^5];
+        }
+        if (rawKey.EndsWith("Json", StringComparison.OrdinalIgnoreCase) && rawKey.Length > 4)
+        {
+            return rawKey[..^4];
+        }
+        return null;
+    }
+
+    private static bool TryStripJsonSuffixAndMatch(
+        string rawKey,
+        Dictionary<string, (string CanonicalName, JsonElement Schema)> expectedProperties,
+        out (string CanonicalName, JsonElement Schema) matchedEntry)
+    {
+        matchedEntry = default;
+        string? stripped = StripJsonSuffix(rawKey);
+
+        if (!string.IsNullOrEmpty(stripped))
+        {
+            if (expectedProperties.TryGetValue(stripped, out matchedEntry) ||
+                expectedProperties.TryGetValue(ToSnakeCase(stripped), out matchedEntry) ||
+                expectedProperties.TryGetValue(ToCamelCase(stripped), out matchedEntry) ||
+                expectedProperties.TryGetValue(ToPascalCase(stripped), out matchedEntry))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string? ResolveRootArrayTargetParameter(
+        Dictionary<string, (string CanonicalName, JsonElement Schema)>? propDict,
+        JsonElement? rootSchema,
+        ToolMapping? mapping)
+    {
+        if (mapping != null && mapping.ParameterAliases.TryGetValue("items", out var mappedItemsParam))
+        {
+            if (propDict != null && propDict.TryGetValue(mappedItemsParam, out var entry))
+            {
+                return entry.CanonicalName;
+            }
+            return mappedItemsParam;
+        }
+
+        if (propDict != null)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (canonicalName, paramSchema) in propDict.Values)
+            {
+                if (!seen.Add(canonicalName))
+                {
+                    continue;
+                }
+
+                var resolved = rootSchema.HasValue ? ResolveSchema(paramSchema, rootSchema.Value) : paramSchema;
+                if (SchemaTypeMatches(resolved, "array") ||
+                    (resolved.ValueKind == JsonValueKind.Object && resolved.TryGetProperty("items", out _)))
+                {
+                    return canonicalName;
+                }
+            }
+
+            if (propDict.TryGetValue("items", out var itemsEntry))
+            {
+                return itemsEntry.CanonicalName;
+            }
+        }
+
+        if (mapping?.NestedParameterAliases != null)
+        {
+            foreach (var path in mapping.NestedParameterAliases.Keys)
+            {
+                if (path.EndsWith("[]", StringComparison.Ordinal) && path.Length > 2 && path != "*[]")
+                {
+                    return path[..^2];
+                }
+            }
+        }
+
+        return "items";
     }
 
     /// <summary>

@@ -200,7 +200,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                 var callId = string.IsNullOrWhiteSpace(fcc.CallId) ? $"call_{Guid.NewGuid():N}"[..12] : fcc.CallId;
                 var arguments = fcc.Arguments;
                 if (arguments is { Count: 1 } && arguments.TryGetValue("input", out var inputVal) && inputVal is string strInput &&
-                    (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith("```")))
+                    (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith('[') || strInput.TrimStart().StartsWith("```")))
                 {
                     var parsed = ToolCallHealingTransform.ParseArgumentsJson(strInput, optionsToUse.Logger, fcc.Name);
                     if (parsed.Count > 0)

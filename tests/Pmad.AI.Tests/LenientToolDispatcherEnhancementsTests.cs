@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.AI;
 using Pmad.AI.Common;
+using Pmad.AI.Healing;
 using Pmad.AI.Tools;
 
 namespace Pmad.AI.Tests;
@@ -745,5 +746,296 @@ public class LenientToolDispatcherEnhancementsTests
         // Already-balanced documents are left untouched (returns null).
         Assert.Null(JsonRepairUtilities.TryRepairTruncatedJson("{\"a\":[1,2,3]}"));
         Assert.Null(JsonRepairUtilities.TryRepairTruncatedJson("[1,2,3]"));
+    }
+
+    [Fact]
+    public void NormalizeCall_NullValuedCanonicalKey_OverwrittenByNonNullAlias()
+    {
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["merge_task"] = new ToolMapping(
+                    parameterAliases: new Dictionary<string, IEnumerable<string>>
+                    {
+                        ["merge_mode"] = ["mergeMode", "mode"]
+                    })
+            }
+        });
+
+        dispatcher.RegisterTool(AIFunctionFactory.Create(
+            (int task_id, string? merge_mode = null) => $"{task_id}:{merge_mode}",
+            "merge_task"));
+
+        // Case 1: JSON string with canonical key = null and alias = "Automatic"
+        var d1 = dispatcher.NormalizeCall("merge_task", "{\"task_id\": 5, \"merge_mode\": null, \"mergeMode\": \"Automatic\"}");
+        Assert.Equal(5, d1.Arguments["task_id"]);
+        Assert.Equal("Automatic", d1.Arguments["merge_mode"]);
+
+        // Case 2: Dictionary with JsonElement(Null) on canonical key and non-null alias
+        using var nullDoc = JsonDocument.Parse("null");
+        var d2 = dispatcher.NormalizeCall("merge_task", new Dictionary<string, object?>
+        {
+            ["task_id"] = 5,
+            ["merge_mode"] = nullDoc.RootElement.Clone(),
+            ["mergeMode"] = "Automatic"
+        });
+        Assert.Equal("Automatic", d2.Arguments["merge_mode"]);
+
+        // Case 3: When both are null, JsonValueKind.Null is unwrapped to null
+        var d3 = dispatcher.NormalizeCall("merge_task", new Dictionary<string, object?>
+        {
+            ["task_id"] = 5,
+            ["merge_mode"] = nullDoc.RootElement.Clone()
+        });
+        Assert.Null(d3.Arguments["merge_mode"]);
+
+        // Case 4: Schema-only casing difference (without explicit ParameterAliases) where canonical is null and variant is non-null
+        var schemaOnlyDispatcher = new LenientToolDispatcher();
+        schemaOnlyDispatcher.RegisterTool(AIFunctionFactory.Create(
+            (int task_id, string? merge_mode = null) => $"{task_id}:{merge_mode}",
+            "merge_task"));
+
+        var d4 = schemaOnlyDispatcher.NormalizeCall("merge_task", new Dictionary<string, object?>
+        {
+            ["task_id"] = 5,
+            ["merge_mode"] = nullDoc.RootElement.Clone(),
+            ["mergeMode"] = "Automatic"
+        });
+        Assert.Equal("Automatic", d4.Arguments["merge_mode"]);
+        Assert.False(d4.Arguments.ContainsKey("mergeMode"));
+    }
+
+    public record TestPriorityUpdate(int TaskId, int Priority);
+
+    [Fact]
+    public async Task NormalizeCall_TopLevelJsonArrayPayload_MapsToSchemaArrayParameter()
+    {
+        // 1. Direct schema array discovery (ask -> questions)
+        var askDispatcher = new LenientToolDispatcher();
+        var askTool = AIFunctionFactory.Create(
+            (IReadOnlyList<TestQuestionItem> questions) => $"Asked {questions.Count}: {string.Join("; ", questions.Select(q => q.Prompt))}",
+            "ask");
+        askDispatcher.RegisterTool(askTool);
+
+        var d1 = askDispatcher.NormalizeCall("ask", "[{\"prompt\": \"Q1\"}, {\"prompt\": \"Q2\"}]");
+        var r1 = await askTool.InvokeAsync(d1.Arguments);
+        Assert.Equal("Asked 2: Q1; Q2", r1?.ToString());
+
+        // 2. Truncated top-level JSON array repaired by SanitizeArgumentsJson
+        var d2 = askDispatcher.NormalizeCall("ask", "[{\"prompt\": \"Q1\"}, {\"prompt\": \"Q2\"");
+        var r2 = await askTool.InvokeAsync(d2.Arguments);
+        Assert.Equal("Asked 2: Q1; Q2", r2?.ToString());
+
+        // 3. Top-level array mapped via "items" alias in ParameterAliases + nested snake_case -> camelCase normalization
+        var reworkDispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["rework_priorities"] = new ToolMapping(
+                    parameterAliases: new Dictionary<string, IEnumerable<string>>
+                    {
+                        ["updates"] = ["items", "priorities"]
+                    })
+            }
+        });
+        var reworkTool = AIFunctionFactory.Create(
+            (IReadOnlyList<TestPriorityUpdate> updates) => string.Join(",", updates.Select(u => $"{u.TaskId}={u.Priority}")),
+            "rework_priorities");
+        reworkDispatcher.RegisterTool(reworkTool);
+
+        var d3 = reworkDispatcher.NormalizeCall("rework_priorities", "[{\"task_id\": 1, \"priority\": 2}, {\"task_id\": \"#3\", \"priority\": \"4\"}]");
+        var r3 = await reworkTool.InvokeAsync(d3.Arguments);
+        Assert.Equal("1=2,3=4", r3?.ToString());
+    }
+
+    [Fact]
+    public async Task NormalizeCall_RecursiveScalarArrayElementCoercion_AndHashPrefixedIntegers()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (int task_id, int[]? depends_on_ids = null) => $"{task_id}:[{string.Join(",", depends_on_ids ?? [])}]",
+            "create_task");
+        dispatcher.RegisterTool(tool);
+
+        // Top-level "#42" integer and array elements [1, "#3", "7"]
+        var d = dispatcher.NormalizeCall("create_task", "{\"task_id\": \"#42\", \"depends_on_ids\": [1, \"#3\", \"7\"]}");
+        Assert.Equal(42, d.Arguments["task_id"]);
+
+        var result = await tool.InvokeAsync(d.Arguments);
+        Assert.Equal("42:[1,3,7]", result?.ToString());
+    }
+
+    [Fact]
+    public async Task NormalizeCall_NestedObjectAndStringifiedArrayViaJsonSchema_WithoutExplicitAlias()
+    {
+        // Pure schema-driven: no explicit NestedParameterAliases configured on dispatcher!
+        var dispatcher = new LenientToolDispatcher();
+        var askTool = AIFunctionFactory.Create(
+            (IReadOnlyList<TestQuestionItem> questions) =>
+                $"Prompt: {questions[0].Prompt}, Rationale: {questions[0].Rationale}, Options: {string.Join("|", questions[0].Options ?? [])}",
+            "ask");
+        dispatcher.RegisterTool(askTool);
+
+        // Model emits snake_case / options_json / optionsJson inside questions[]
+        var d1 = dispatcher.NormalizeCall("ask",
+            "{\"questions\": [{\"prompt\": \"Choose DB\", \"rationale\": \"Storage\", \"options_json\": \"[\\\"A\\\", \\\"B\\\"]\"}]}");
+        var r1 = await askTool.InvokeAsync(d1.Arguments);
+        Assert.Equal("Prompt: Choose DB, Rationale: Storage, Options: A|B", r1?.ToString());
+
+        var d2 = dispatcher.NormalizeCall("ask",
+            "{\"questions\": [{\"Prompt\": \"Choose DB\", \"Rationale\": \"Storage\", \"optionsJson\": \"[\\\"X\\\", \\\"Y\\\"]\"}]}");
+        var r2 = await askTool.InvokeAsync(d2.Arguments);
+        Assert.Equal("Prompt: Choose DB, Rationale: Storage, Options: X|Y", r2?.ToString());
+    }
+
+    [Fact]
+    public async Task AutoPromote_BlankCollectionPlaceholders_WithNullPropertiesOrJsonElement_PromotesFlatShortcuts()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (string path, List<TestEditItem> edits) => $"Edited {path} with {edits.Count} chunk: {edits[0].OldText}->{edits[0].NewText} (all={edits[0].ReplaceAll})",
+            "edit");
+        dispatcher.RegisterTool(tool);
+
+        // Case 1: Dictionary element with only null/blank properties: [{"oldText": null, "newText": ""}]
+        var d1 = dispatcher.NormalizeCall("edit", new Dictionary<string, object?>
+        {
+            ["path"] = "Service.cs",
+            ["edits"] = new List<object?>
+            {
+                new Dictionary<string, object?> { ["oldText"] = null, ["newText"] = "   " }
+            },
+            ["old_text"] = "before1",
+            ["new_text"] = "after1",
+            ["replace_all"] = true
+        });
+        var r1 = await tool.InvokeAsync(d1.Arguments);
+        Assert.Equal("Edited Service.cs with 1 chunk: before1->after1 (all=True)", r1?.ToString());
+
+        // Case 2: JsonElement array "[{}]" or "[{\"oldText\": null}]"
+        using var doc = JsonDocument.Parse("[{\"oldText\": null, \"newText\": null}]");
+        var d2 = dispatcher.NormalizeCall("edit", new Dictionary<string, object?>
+        {
+            ["path"] = "Service.cs",
+            ["edits"] = doc.RootElement.Clone(),
+            ["old_text"] = "before2",
+            ["new_text"] = "after2"
+        });
+        var r2 = await tool.InvokeAsync(d2.Arguments);
+        Assert.Equal("Edited Service.cs with 1 chunk: before2->after2 (all=False)", r2?.ToString());
+    }
+
+    [Fact]
+    public async Task LenientToolDispatchChatClient_NonStreaming_HasSameFallbackSafetyAsStreaming()
+    {
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
+        {
+            Translations =
+            [
+                new ToolTranslation
+                {
+                    SourceTool = "grep_search",
+                    TargetTool = "bash",
+                    CommandTemplate = "rg -- {query}",
+                    EscapeMethod = ParameterEscapeMethod.Bash
+                }
+            ]
+        });
+        dispatcher.RegisterTool(AIFunctionFactory.Create((string command) => command, "bash"));
+
+        // 1. Missing required translation parameter (throws KeyNotFoundException in NormalizeCall)
+        // 2. Option injection starting with '-' (throws ArgumentException in NormalizeCall)
+        var innerClient = new FakeSimpleChatClient((_, _, _) =>
+        {
+            var msg = new ChatMessage(ChatRole.Assistant, [
+                new FunctionCallContent("call_1", "grep_search", new Dictionary<string, object?>()),
+                new FunctionCallContent("call_2", "grep_search", new Dictionary<string, object?> { ["query"] = "--evil" })
+            ]);
+            return Task.FromResult(new ChatResponse(msg));
+        });
+
+        var client = new LenientToolDispatchChatClient(innerClient, dispatcher);
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "search")]);
+
+        // Should not throw; raw tool calls should remain intact
+        var calls = response.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>().ToList();
+        Assert.Equal(2, calls.Count);
+        Assert.Equal("grep_search", calls[0].Name);
+        Assert.Equal("grep_search", calls[1].Name);
+    }
+
+    [Fact]
+    public async Task NormalizeCall_TopLevelJsonSuffixParameter_MapsToSchemaPropertyWithoutExplicitAlias()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var askTool = AIFunctionFactory.Create(
+            (IReadOnlyList<TestQuestionItem> questions) => $"Asked {questions.Count}: {string.Join("; ", questions.Select(q => q.Prompt))}",
+            "ask");
+        dispatcher.RegisterTool(askTool);
+
+        // Top-level "questions_json" and "questionsJson" mapped automatically to "questions"
+        var d1 = dispatcher.NormalizeCall("ask", "{\"questions_json\": \"[{\\\"prompt\\\": \\\"Q1\\\"}, {\\\"prompt\\\": \\\"Q2\\\"}]\"}");
+        var r1 = await askTool.InvokeAsync(d1.Arguments);
+        Assert.Equal("Asked 2: Q1; Q2", r1?.ToString());
+
+        var d2 = dispatcher.NormalizeCall("ask", "{\"questionsJson\": \"[{\\\"prompt\\\": \\\"Q3\\\"}]\"}");
+        var r2 = await askTool.InvokeAsync(d2.Arguments);
+        Assert.Equal("Asked 1: Q3", r2?.ToString());
+    }
+
+    [Fact]
+    public async Task ToolCallHealing_DoesNotPrematurelyTruncateToolCallTag_WhenProseBeforeJsonContainsArrayBrackets()
+    {
+        var askTool = AIFunctionFactory.Create(
+            (IReadOnlyList<TestQuestionItem> questions) => $"Asked {questions.Count}: {questions[0].Prompt}",
+            "ask");
+
+        var content = "Let me check element [0] first.\n<tool_call>{\"name\": \"ask\", \"arguments\": [{\"prompt\": \"Which DB?\"}]}</tool_call>";
+        var extracted = ToolCallHealingTransform.TryExtractToolCalls(
+            ref content,
+            out var calls,
+            out var proseBefore,
+            out _,
+            options: new ToolCallHealingOptions { EnforceAvailableToolsGuardrail = false });
+
+        Assert.True(extracted);
+        Assert.Single(calls);
+        Assert.Equal("ask", calls[0].Name);
+        Assert.Equal("Let me check element [0] first.", proseBefore);
+
+        var dispatcher = new LenientToolDispatcher();
+        dispatcher.RegisterTool(askTool);
+        var normalized = dispatcher.NormalizeCall(calls[0]);
+        var res = await askTool.InvokeAsync(normalized.Arguments);
+        Assert.Equal("Asked 1: Which DB?", res?.ToString());
+    }
+
+    [Fact]
+    public async Task NormalizeCall_CommaSeparatedLongIntegerArray_Supports64BitAndHashPrefixes()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var tool = AIFunctionFactory.Create(
+            (long[] ids) => string.Join(",", ids),
+            "process_ids");
+        dispatcher.RegisterTool(tool);
+
+        var d = dispatcher.NormalizeCall("process_ids", new Dictionary<string, object?>
+        {
+            ["ids"] = "#10, 5000000000, #9000000000"
+        });
+        var res = await tool.InvokeAsync(d.Arguments);
+        Assert.Equal("10,5000000000,9000000000", res?.ToString());
+    }
+
+    private sealed class FakeSimpleChatClient(Func<IEnumerable<ChatMessage>, ChatOptions?, CancellationToken, Task<ChatResponse>> handler) : IChatClient
+    {
+        public ChatClientMetadata Metadata => new("FakeSimple");
+        public void Dispose() { }
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> chatMessages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+            => handler(chatMessages, options, cancellationToken);
+        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> chatMessages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+            => throw new NotImplementedException();
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
     }
 }

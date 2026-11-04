@@ -133,8 +133,30 @@ public class LenientToolDispatchChatClient : DelegatingChatClient
         {
             if (message.Contents[i] is FunctionCallContent fcc && !string.IsNullOrWhiteSpace(fcc.Name))
             {
-                var dispatched = _dispatcher.NormalizeCall(fcc);
-                message.Contents[i] = new FunctionCallContent(fcc.CallId, dispatched.CanonicalToolName, dispatched.Arguments);
+                try
+                {
+                    var dispatched = _dispatcher.NormalizeCall(fcc);
+                    message.Contents[i] = new FunctionCallContent(fcc.CallId, dispatched.CanonicalToolName, dispatched.Arguments);
+                }
+                catch (KeyNotFoundException ex)
+                {
+                    _logger?.LogDebug(ex, "Skipping normalization of tool call '{ToolName}' (missing parameter)", fcc.Name);
+                }
+                catch (ArgumentException ex)
+                {
+                    // Option injection rejected or malformed arguments: stay lenient, do not abort the response.
+                    _logger?.LogWarning(ex, "Normalization of tool call '{ToolName}' failed; invoking raw call", fcc.Name);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    // Rendered command blocked by the validator: stay lenient, do not abort the response.
+                    _logger?.LogWarning(ex, "Normalization of tool call '{ToolName}' failed; invoking raw call", fcc.Name);
+                }
+                catch (Exception ex)
+                {
+                    // Unexpected failure (e.g. malformed arguments): stay lenient, do not abort the response.
+                    _logger?.LogWarning(ex, "Normalization of tool call '{ToolName}' failed; invoking raw call", fcc.Name);
+                }
             }
         }
     }

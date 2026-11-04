@@ -26,8 +26,8 @@ public static partial class ToolCallHealingTransform
     [GeneratedRegex(@"Action:\s*(?<name>[a-zA-Z0-9_\-\.]+)\s*\r?\nAction Input:\s*(?:```(?:json)?\s*)?")]
     private static partial Regex ActionHeaderRegex();
 
-    [GeneratedRegex(@"Action:\s*(?<name>[a-zA-Z0-9_\-\.]+)\s*\r?\nAction Input:\s*(?:```(?:json)?\s*)?(?<payload>\{[\s\S]*?\})(?:\s*```)?")]
-    private static partial Regex ActionToolCallRegex();
+
+
 
     [GeneratedRegex(@"^<(?:think|thought)>\s*([\s\S]*)$")]
     private static partial Regex UnclosedThinkRegex();
@@ -455,6 +455,13 @@ public static partial class ToolCallHealingTransform
     }
 
     /// <summary>
+    /// Sentinel key used by <see cref="ParseArgumentsJson"/> when the root JSON payload is a bare array
+    /// rather than an object, allowing <see cref="LenientToolDispatcher"/> to map it to the tool's
+    /// array parameter discovered from <c>AIFunction.JsonSchema</c> (or <c>"items"</c> via <c>ParameterAliases</c>).
+    /// </summary>
+    internal const string RootArraySentinelKey = "$rootArray";
+
+    /// <summary>
     /// Sanitizes and parses a JSON arguments string into a strongly-typed dictionary,
     /// safe for Native AOT without reflection.
     /// </summary>
@@ -486,6 +493,13 @@ public static partial class ToolCallHealingTransform
                     }
                     return quickDict;
                 }
+                if (quickDoc.RootElement.ValueKind == JsonValueKind.Array)
+                {
+                    return new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        [RootArraySentinelKey] = JsonRepairUtilities.ConvertJsonElementToClr(quickDoc.RootElement)
+                    };
+                }
             }
             catch (JsonException)
             {
@@ -505,6 +519,10 @@ public static partial class ToolCallHealingTransform
                     dict[prop.Name] = UnwrapJsonElement(prop.Value);
                 }
             }
+            else if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                dict[RootArraySentinelKey] = JsonRepairUtilities.ConvertJsonElementToClr(doc.RootElement);
+            }
         }
         catch (Exception ex)
         {
@@ -514,8 +532,8 @@ public static partial class ToolCallHealingTransform
     }
 
     /// <summary>
-    /// Extracts a balanced JSON object starting from or after <paramref name="startIndex"/>.
-    /// Handles nested braces, string literals, and escape sequences, repairing truncated JSON if necessary.
+    /// Extracts a balanced JSON object or array starting from or after <paramref name="startIndex"/>.
+    /// Handles nested braces/brackets, string literals, and escape sequences, repairing truncated JSON if necessary.
     /// </summary>
     private static string? ExtractBalancedJson(string text, int startIndex, out int consumedLength, out bool isTruncated)
     {
@@ -527,16 +545,30 @@ public static partial class ToolCallHealingTransform
         }
 
         int startBrace = text.IndexOf('{', startIndex);
-        if (startBrace < 0)
+        int startBracket = text.IndexOf('[', startIndex);
+        int startPos;
+        if (startBrace >= 0 && startBracket >= 0)
+        {
+            startPos = Math.Min(startBrace, startBracket);
+        }
+        else if (startBrace >= 0)
+        {
+            startPos = startBrace;
+        }
+        else if (startBracket >= 0)
+        {
+            startPos = startBracket;
+        }
+        else
         {
             return null;
         }
 
-        int depth = 0;
+        var openStack = new Stack<char>();
         bool inString = false;
         bool escaped = false;
 
-        for (int i = startBrace; i < text.Length; i++)
+        for (int i = startPos; i < text.Length; i++)
         {
             char c = text[i];
             if (escaped)
@@ -559,28 +591,37 @@ public static partial class ToolCallHealingTransform
 
             if (!inString)
             {
-                if (c == '{')
+                if (c == '{' || c == '[')
                 {
-                    depth++;
+                    openStack.Push(c);
                 }
-                else if (c == '}')
+                else if (c == '}' || c == ']')
                 {
-                    depth--;
-                    if (depth == 0)
+                    if (openStack.Count > 0 && ((c == '}' && openStack.Peek() == '{') || (c == ']' && openStack.Peek() == '[')))
+                    {
+                        openStack.Pop();
+                    }
+                    if (openStack.Count == 0)
                     {
                         consumedLength = (i - startIndex) + 1;
                         isTruncated = false;
-                        return text.Substring(startBrace, i - startBrace + 1);
+                        return text.Substring(startPos, i - startPos + 1);
                     }
                 }
             }
         }
 
-        if (depth > 0)
+        if (openStack.Count > 0)
         {
             consumedLength = text.Length - startIndex;
             isTruncated = true;
-            var raw = text.Substring(startBrace);
+            var raw = text.Substring(startPos);
+            var repaired = JsonRepairUtilities.TryRepairTruncatedJson(raw);
+            if (repaired != null)
+            {
+                return repaired;
+            }
+
             var sb = new StringBuilder(raw);
             if (escaped)
             {
@@ -590,9 +631,9 @@ public static partial class ToolCallHealingTransform
             {
                 sb.Append('"');
             }
-            while (depth-- > 0)
+            while (openStack.Count > 0)
             {
-                sb.Append('}');
+                sb.Append(openStack.Pop() == '[' ? ']' : '}');
             }
             return sb.ToString();
         }
@@ -945,7 +986,7 @@ public static partial class ToolCallHealingTransform
                 var arguments = fcc.Arguments;
 
                 // If arguments contains a single "input" property with a string that looks like JSON
-                if (arguments is { Count: 1 } && arguments.TryGetValue("input", out var inputVal) && inputVal is string strInput && (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith("```")))
+                if (arguments is { Count: 1 } && arguments.TryGetValue("input", out var inputVal) && inputVal is string strInput && (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith('[') || strInput.TrimStart().StartsWith("```")))
                 {
                     var parsed = ParseArgumentsJson(strInput, logger, fcc.Name, options);
                     if (parsed.Count > 0)

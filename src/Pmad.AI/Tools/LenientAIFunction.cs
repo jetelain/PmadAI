@@ -24,39 +24,25 @@ public sealed class LenientAIFunction : DelegatingAIFunction
         AIFunctionArguments arguments,
         CancellationToken cancellationToken)
     {
-        string toolName = Name;
-        try
+        var rawArgs = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        if (arguments != null)
         {
-            var rawArgs = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            if (arguments != null)
+            foreach (var (k, v) in arguments)
             {
-                foreach (var (k, v) in arguments)
-                {
-                    rawArgs[k] = v;
-                }
+                rawArgs[k] = v;
             }
-
-            var normalized = _dispatcher.NormalizeCall(Name, rawArgs);
-            toolName = normalized.CanonicalToolName;
-
-            if (!string.Equals(normalized.CanonicalToolName, Name, StringComparison.OrdinalIgnoreCase) &&
-                _dispatcher.TryGetRegisteredTool(normalized.CanonicalToolName, out var targetTool) &&
-                targetTool != null)
-            {
-                return await targetTool.InvokeAsync(normalized.Arguments, cancellationToken).ConfigureAwait(false);
-            }
-
-            return await base.InvokeCoreAsync(normalized.Arguments, cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+
+        var normalized = _dispatcher.NormalizeCall(Name, rawArgs);
+
+        if (!string.Equals(normalized.CanonicalToolName, Name, StringComparison.OrdinalIgnoreCase) &&
+            _dispatcher.TryGetRegisteredTool(normalized.CanonicalToolName, out var targetTool) &&
+            targetTool != null)
         {
-            throw;
+            return await targetTool.InvokeAsync(normalized.Arguments, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex)
-        {
-            var innerMsg = ex.InnerException != null ? $" (Inner: {ex.InnerException.Message})" : "";
-            return $"Error executing tool '{toolName}': {ex.Message}{innerMsg}";
-        }
+
+        return await base.InvokeCoreAsync(normalized.Arguments, cancellationToken).ConfigureAwait(false);
     }
 }
 

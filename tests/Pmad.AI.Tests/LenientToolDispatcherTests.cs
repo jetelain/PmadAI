@@ -500,7 +500,7 @@ public class LenientToolDispatcherTests
     }
 
     [Fact]
-    public async Task LenientAIFunction_CatchesExecutionExceptionsGracefully()
+    public async Task LenientAIFunction_PropagatesExecutionExceptionsNaturally()
     {
         var dispatcher = new LenientToolDispatcher();
         var baseTool = AIFunctionFactory.Create(
@@ -508,12 +508,10 @@ public class LenientToolDispatcherTests
             "read_file");
 
         var lenientTool = baseTool.AsLenient(dispatcher);
-        var result = await lenientTool.InvokeAsync(new AIFunctionArguments { ["path"] = "missing.txt" });
+        var ex = await Assert.ThrowsAsync<FileNotFoundException>(() =>
+            lenientTool.InvokeAsync(new AIFunctionArguments { ["path"] = "missing.txt" }).AsTask());
 
-        var str = result?.ToString();
-        Assert.NotNull(str);
-        Assert.StartsWith("Error executing tool 'read_file':", str);
-        Assert.Contains("File not found: missing.txt", str);
+        Assert.Contains("File not found: missing.txt", ex.Message);
     }
 
     [Fact]
