@@ -102,6 +102,78 @@ public class DependencySupplyChainScannerTests
     }
 
     [Fact]
+    public void Scan_MultiProjectDifferentVersions_DoesNotTriggerFalsePositiveDowngrade()
+    {
+        // Project A upgrades SomePackage from 2.0.0 to 2.1.0
+        var diffA = new FileDiff
+        {
+            FilePath = "src/ProjectA/ProjectA.csproj",
+            DeletedLines = [new DiffDeletedLine("src/ProjectA/ProjectA.csproj", 10, "  <PackageReference Include=\"SomePackage\" Version=\"2.0.0\" />")],
+            AddedLines = [new DiffAddedLine("src/ProjectA/ProjectA.csproj", 10, "  <PackageReference Include=\"SomePackage\" Version=\"2.1.0\" />")]
+        };
+
+        // Project B upgrades SomePackage from 1.0.0 to 1.1.0
+        var diffB = new FileDiff
+        {
+            FilePath = "src/ProjectB/ProjectB.csproj",
+            DeletedLines = [new DiffDeletedLine("src/ProjectB/ProjectB.csproj", 10, "  <PackageReference Include=\"SomePackage\" Version=\"1.0.0\" />")],
+            AddedLines = [new DiffAddedLine("src/ProjectB/ProjectB.csproj", 10, "  <PackageReference Include=\"SomePackage\" Version=\"1.1.0\" />")]
+        };
+
+        var findings = _scanner.Scan([diffA, diffB]);
+
+        // Neither project should be flagged as a downgrade, even though Project B's 1.1.0 < Project A's removed 2.0.0
+        Assert.DoesNotContain(findings, f => f.RuleId == "DEP-DOWN-001");
+    }
+
+    [Fact]
+    public void Scan_CpmMigration_DowngradeAcrossFiles_FlagsDepDown001()
+    {
+        // SomePackage 2.0.0 removed from project, consolidated into Directory.Packages.props with lower version 1.5.0
+        var diffProj = new FileDiff
+        {
+            FilePath = "src/ProjectA.csproj",
+            DeletedLines = [new DiffDeletedLine("src/ProjectA.csproj", 10, "  <PackageReference Include=\"SomePackage\" Version=\"2.0.0\" />")],
+            AddedLines = [new DiffAddedLine("src/ProjectA.csproj", 10, "  <PackageReference Include=\"SomePackage\" />")]
+        };
+
+        var diffProps = new FileDiff
+        {
+            FilePath = "Directory.Packages.props",
+            AddedLines = [new DiffAddedLine("Directory.Packages.props", 5, "  <PackageVersion Include=\"SomePackage\" Version=\"1.5.0\" />")]
+        };
+
+        var findings = _scanner.Scan([diffProj, diffProps]);
+
+        Assert.Contains(findings, f => f.RuleId == "DEP-DOWN-001" && f.Description.Contains("2.0.0") && f.Description.Contains("1.5.0"));
+    }
+
+    [Fact]
+    public void Scan_PackagesConfig_AttributeOrderVariations_ParsesCorrectly()
+    {
+        // packages.config with version before id: downgrade check
+        var diffDowngrade = new FileDiff
+        {
+            FilePath = "packages.config",
+            DeletedLines = [new DiffDeletedLine("packages.config", 5, "  <package version=\"2.0.0\" id=\"SomePackage\" targetFramework=\"net48\" />")],
+            AddedLines = [new DiffAddedLine("packages.config", 5, "  <package targetFramework=\"net48\" version=\"1.0.0\" id=\"SomePackage\" />")]
+        };
+
+        var findingsDowngrade = _scanner.Scan([diffDowngrade]);
+        Assert.Contains(findingsDowngrade, f => f.RuleId == "DEP-DOWN-001");
+
+        // packages.config with version before id: unverified new dependency check
+        var diffNew = new FileDiff
+        {
+            FilePath = "packages.config",
+            AddedLines = [new DiffAddedLine("packages.config", 6, "  <package version=\"1.0.0\" id=\"Untrusted.LegacyPkg\" targetFramework=\"net48\" />")]
+        };
+
+        var findingsNew = _scanner.Scan([diffNew]);
+        Assert.Contains(findingsNew, f => f.RuleId == "DEP-NEW-001" && f.Description.Contains("Untrusted.LegacyPkg"));
+    }
+
+    [Fact]
     public void Scan_VersionDowngrade_WithPackageUpdateAndVersionOverride_FlagsDepDown001()
     {
         var diff = new FileDiff

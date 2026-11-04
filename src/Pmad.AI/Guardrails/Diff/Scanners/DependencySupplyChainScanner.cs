@@ -27,8 +27,11 @@ public sealed partial class DependencySupplyChainScanner
     [GeneratedRegex(@"\b(?:Version|VersionOverride)\s*=\s*[""']([^""']+)[""']", RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
     private static partial Regex DotNetVersionAttrRegex();
 
-    [GeneratedRegex(@"<package\b[^>]*\bid\s*=\s*[""']([^""']+)[""'][^>]*\bversion\s*=\s*[""']([^""']+)[""']", RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
-    private static partial Regex PackagesConfigRegex();
+    [GeneratedRegex(@"<package\b([^>]+)>", RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
+    private static partial Regex PackagesConfigTagRegex();
+
+    [GeneratedRegex(@"\bid\s*=\s*[""']([^""']+)[""']", RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
+    private static partial Regex PackagesConfigIdAttrRegex();
 
     // Package feeds
     [GeneratedRegex(@"<add\b[^>]*\bvalue\s*=\s*[""']([^""']+)[""']", RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
@@ -146,7 +149,11 @@ public sealed partial class DependencySupplyChainScanner
                 // Dependency was existing in the commit! Check for SemVer downgrades (DEP-DOWN-001)
                 if (!string.IsNullOrEmpty(added.Version))
                 {
-                    foreach (var old in matchingRemoved)
+                    // Prioritize removals in the same file first; fall back to commit-wide removals for CPM migrations / file moves
+                    var sameFileRemoved = matchingRemoved.FindAll(r => string.Equals(r.FilePath, added.FilePath, StringComparison.OrdinalIgnoreCase));
+                    var candidates = sameFileRemoved.Count > 0 ? sameFileRemoved : matchingRemoved;
+
+                    foreach (var old in candidates)
                     {
                         if (!string.IsNullOrEmpty(old.Version) &&
                             SemanticVersion.TryParse(old.Version, out var oldSemVer) &&
@@ -382,10 +389,18 @@ public sealed partial class DependencySupplyChainScanner
                 }
                 else
                 {
-                    var pcMatch = PackagesConfigRegex().Match(content);
+                    var pcMatch = PackagesConfigTagRegex().Match(content);
                     if (pcMatch.Success)
                     {
-                        targetList.Add(new PackageEntry(ecosystem, pcMatch.Groups[1].Value, pcMatch.Groups[2].Value, filePath, lineNumber, content));
+                        string tagContent = pcMatch.Groups[1].Value;
+                        var idMatch = PackagesConfigIdAttrRegex().Match(tagContent);
+                        var verMatch = DotNetVersionAttrRegex().Match(tagContent);
+                        if (idMatch.Success)
+                        {
+                            string pkg = idMatch.Groups[1].Value;
+                            string? ver = verMatch.Success ? verMatch.Groups[1].Value : null;
+                            targetList.Add(new PackageEntry(ecosystem, pkg, ver, filePath, lineNumber, content));
+                        }
                     }
                 }
                 break;
