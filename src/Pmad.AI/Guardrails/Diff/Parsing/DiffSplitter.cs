@@ -17,6 +17,7 @@ public static class DiffSplitter
     public static DiffHunk FilterDeletedLines(DiffHunk hunk, int maxConsecutiveDeleted = 3)
     {
         ArgumentNullException.ThrowIfNull(hunk);
+        maxConsecutiveDeleted = Math.Max(1, maxConsecutiveDeleted);
 
         var result = new DiffHunk
         {
@@ -81,17 +82,23 @@ public static class DiffSplitter
     /// </summary>
     /// <param name="diffText">The raw unified diff text.</param>
     /// <param name="maxChunkBytes">Maximum byte size per chunk. Default: 120,000.</param>
-    /// <param name="filterDeletedLines">Whether to compress long deleted-line blocks. Default: true.</param>
+    /// <param name="filterDeletedLines">Whether to compress long deleted-line blocks. Default: false.</param>
+    /// <param name="maxConsecutiveDeletedLines">Maximum consecutive deleted lines allowed before compression triggers. Default: 3.</param>
     /// <param name="excludedGlobs">Optional file globs to exclude before chunking.</param>
     /// <returns>A read-only list of <see cref="DiffChunk"/> instances.</returns>
     public static IReadOnlyList<DiffChunk> SplitIntoChunks(
         string diffText,
         int maxChunkBytes = 120_000,
-        bool filterDeletedLines = true,
+        bool filterDeletedLines = false,
+        int maxConsecutiveDeletedLines = 3,
         IEnumerable<string>? excludedGlobs = null)
     {
+        ArgumentNullException.ThrowIfNull(diffText);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxChunkBytes);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxConsecutiveDeletedLines);
+
         var files = DiffParser.Parse(diffText, excludedGlobs);
-        return SplitIntoChunks(files, maxChunkBytes, filterDeletedLines);
+        return SplitIntoChunks(files, maxChunkBytes, filterDeletedLines, maxConsecutiveDeletedLines);
     }
 
     /// <summary>
@@ -100,14 +107,18 @@ public static class DiffSplitter
     /// </summary>
     /// <param name="files">The list of file diffs to partition.</param>
     /// <param name="maxChunkBytes">Maximum byte size per chunk. Default: 120,000.</param>
-    /// <param name="filterDeletedLines">Whether to compress long deleted-line blocks. Default: true.</param>
+    /// <param name="filterDeletedLines">Whether to compress long deleted-line blocks. Default: false.</param>
+    /// <param name="maxConsecutiveDeletedLines">Maximum consecutive deleted lines allowed before compression triggers. Default: 3.</param>
     /// <returns>A read-only list of <see cref="DiffChunk"/> instances.</returns>
     public static IReadOnlyList<DiffChunk> SplitIntoChunks(
         IReadOnlyList<FileDiff> files,
         int maxChunkBytes = 120_000,
-        bool filterDeletedLines = true)
+        bool filterDeletedLines = false,
+        int maxConsecutiveDeletedLines = 3)
     {
         ArgumentNullException.ThrowIfNull(files);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxChunkBytes);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxConsecutiveDeletedLines);
 
         var chunks = new List<DiffChunk>();
         if (files.Count == 0)
@@ -149,7 +160,7 @@ public static class DiffSplitter
 
         foreach (var originalFile in files)
         {
-            var file = PrepareFileForChunking(originalFile, filterDeletedLines);
+            var file = PrepareFileForChunking(originalFile, filterDeletedLines, maxConsecutiveDeletedLines);
             int fileBytes = file.GetByteCount(Encoding.UTF8);
 
             // Case 1: The file by itself exceeds maxChunkBytes -> Split by hunk
@@ -296,7 +307,7 @@ public static class DiffSplitter
     {
         int rawHeaderBytes = Encoding.UTF8.GetByteCount(hunk.Header);
         int partHeaderOverhead = rawHeaderBytes + 20; // Accounts for " [Part NNN]\n"
-        int maxPartContentBytes = Math.Max(64, maxHunkBytes - partHeaderOverhead);
+        int maxPartContentBytes = Math.Max(16, maxHunkBytes - partHeaderOverhead);
 
         var subHunks = new List<DiffHunk>();
         var currentLines = new List<string>();
@@ -389,4 +400,3 @@ public static class DiffSplitter
         return Math.Max(1, offset);
     }
 }
-
