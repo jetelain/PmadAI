@@ -521,5 +521,48 @@ public class DiffParserTests
         Assert.Single(files);
         Assert.Equal("src/App.cs", files[0].FilePath);
     }
-}
 
+    [Fact]
+    public void Parse_IndexHeader_ExtractsBlobHashesAndMode()
+    {
+        var diff = """
+            diff --git a/src/App.cs b/src/App.cs
+            index 1234567..89abcdef 100755
+            --- a/src/App.cs
+            +++ b/src/App.cs
+            @@ -1,1 +1,1 @@
+            +code
+            """;
+
+        var files = DiffParser.Parse(diff);
+
+        Assert.Single(files);
+        var file = files[0];
+        Assert.Equal("1234567", file.OldBlobSha);
+        Assert.Equal("89abcdef", file.NewBlobSha);
+        Assert.Equal("100755", file.NewFileMode);
+    }
+
+    [Fact]
+    public void Parse_IndexHeaderWithZeros_LeavesNullBlobHashes()
+    {
+        var diff = """
+            diff --git a/newfile.txt b/newfile.txt
+            new file mode 100644
+            index 0000000..fedcba9
+            --- /dev/null
+            +++ b/newfile.txt
+            @@ -0,0 +1,1 @@
+            +hello
+            """;
+
+        var files = DiffParser.Parse(diff);
+
+        Assert.Single(files);
+        var file = files[0];
+        Assert.Null(file.OldBlobSha);
+        Assert.Equal("fedcba9", file.NewBlobSha);
+        Assert.Equal("100644", file.NewFileMode);
+        Assert.True(file.IsNewFile);
+    }
+}

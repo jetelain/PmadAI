@@ -258,6 +258,10 @@ public static partial class DiffParser
             currentFile.IsNewFile = true;
             currentFile.NewFileMode = line["new file mode ".Length..].Trim();
         }
+        else if (line.StartsWith("index ", StringComparison.Ordinal))
+        {
+            ParseIndexHeaderLine(line.AsSpan("index ".Length).Trim(), currentFile);
+        }
         else if (line.StartsWith("rename from ", StringComparison.Ordinal))
         {
             currentFile.IsRenamedFile = true;
@@ -329,6 +333,64 @@ public static partial class DiffParser
         {
             currentFile.IsBinary = true;
         }
+    }
+
+    private static void ParseIndexHeaderLine(ReadOnlySpan<char> indexSpan, FileDiff currentFile)
+    {
+        if (indexSpan.IsEmpty)
+        {
+            return;
+        }
+
+        // Format: <oldSha>..<newSha>[ <mode>]
+        int spaceIdx = indexSpan.IndexOf(' ');
+        ReadOnlySpan<char> rangePart = spaceIdx >= 0 ? indexSpan[..spaceIdx] : indexSpan;
+        ReadOnlySpan<char> modePart = spaceIdx >= 0 ? indexSpan[(spaceIdx + 1)..].Trim() : default;
+
+        int dotsIdx = rangePart.IndexOf("..", StringComparison.Ordinal);
+        if (dotsIdx > 0)
+        {
+            var oldSha = rangePart[..dotsIdx];
+            var newSha = rangePart[(dotsIdx + 2)..];
+
+            if (IsNonZeroHexSha(oldSha))
+            {
+                currentFile.OldBlobSha = oldSha.ToString();
+            }
+
+            if (IsNonZeroHexSha(newSha))
+            {
+                currentFile.NewBlobSha = newSha.ToString();
+            }
+        }
+
+        if (!modePart.IsEmpty && string.IsNullOrEmpty(currentFile.NewFileMode))
+        {
+            currentFile.NewFileMode = modePart.ToString();
+        }
+    }
+
+    private static bool IsNonZeroHexSha(ReadOnlySpan<char> sha)
+    {
+        if (sha.Length < 4)
+        {
+            return false;
+        }
+
+        bool hasNonZero = false;
+        foreach (char c in sha)
+        {
+            if (!char.IsAsciiHexDigit(c))
+            {
+                return false;
+            }
+            if (c != '0')
+            {
+                hasNonZero = true;
+            }
+        }
+
+        return hasNonZero;
     }
 
     private static bool TryParseDiffGitLine(string line, out string oldPath, out string newPath)
@@ -566,4 +628,3 @@ public static partial class DiffParser
         return false;
     }
 }
-

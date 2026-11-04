@@ -41,11 +41,14 @@ public sealed class MagicByteImageValidator : ISafeBinaryValidator
         {
             try
             {
-                using var stream = context.OpenRead();
+                var stream = await context.OpenReadAsync(cancellationToken).ConfigureAwait(false);
                 if (stream != null)
                 {
-                    readBuffer = new byte[512];
-                    readCount = await stream.ReadAsync(readBuffer, cancellationToken).ConfigureAwait(false);
+                    await using (stream.ConfigureAwait(false))
+                    {
+                        readBuffer = new byte[512];
+                        readCount = await stream.ReadAtLeastAsync(readBuffer, 512, throwOnEndOfStream: false, cancellationToken).ConfigureAwait(false);
+                    }
                 }
             }
             catch (Exception ex)
@@ -131,4 +134,3 @@ public sealed class MagicByteImageValidator : ISafeBinaryValidator
             "PAY-BIN-002");
     }
 }
-

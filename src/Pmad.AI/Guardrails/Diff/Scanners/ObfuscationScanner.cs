@@ -79,7 +79,7 @@ public sealed class ObfuscationScanner
         }
 
         // 1. Line Length Anomaly (PAY-UNI-004)
-        if (line.Content.Length > _options.MaxLineLength)
+        if (line.Content.Length > _options.MaxLineLength && !IsLineLengthExcluded(line.FilePath))
         {
             string preview = line.Content.Length > 80
                 ? $"{line.Content[..80]}... [+{line.Content.Length - 80} more chars]"
@@ -153,6 +153,17 @@ public sealed class ObfuscationScanner
         return findings;
     }
 
+    private bool IsLineLengthExcluded(string? filePath)
+    {
+        if (string.IsNullOrEmpty(filePath) || _options.MaxLineLengthExcludedExtensions.Count == 0)
+        {
+            return false;
+        }
+
+        string ext = Path.GetExtension(filePath);
+        return !string.IsNullOrEmpty(ext) && _options.MaxLineLengthExcludedExtensions.Contains(ext);
+    }
+
     private static bool IsMixedWithAsciiLatinInIdentifier(string content, int index)
     {
         static bool IsIdentifierChar(char ch) => char.IsLetterOrDigit(ch) || ch == '_';
@@ -193,4 +204,3 @@ public sealed class ObfuscationScanner
         return $"{prefix}{content[start..end].Replace("\r", " ").Replace("\n", " ").Trim()}{suffix}";
     }
 }
-

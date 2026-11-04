@@ -92,16 +92,23 @@ public sealed partial class EntropyAndSecretScanner
         var assignMatch = SecretAssignmentRegex().Match(line.Content);
         if (assignMatch.Success)
         {
-            findings.Add(new DiffRiskFinding(
-                RuleId: "PAY-SEC-003",
-                Title: "Hardcoded Secret Assignment",
-                Category: DiffRiskCategory.SuspiciousPayload,
-                Severity: DiffRiskSeverity.High,
-                FilePath: line.FilePath,
-                LineNumber: line.LineNumber,
-                Column: assignMatch.Index + 1,
-                Description: "Hardcoded secret, API key, access token, or private key assignment detected.",
-                Snippet: ExtractSnippet(line.Content, assignMatch.Index, assignMatch.Length)));
+            bool isTestPlaceholder = _options.EnableTestTolerance &&
+                                    DiffRiskDefaults.IsTestFile(line.FilePath) &&
+                                    IsTestFixtureSecret(assignMatch.Value);
+
+            if (!isTestPlaceholder)
+            {
+                findings.Add(new DiffRiskFinding(
+                    RuleId: "PAY-SEC-003",
+                    Title: "Hardcoded Secret Assignment",
+                    Category: DiffRiskCategory.SuspiciousPayload,
+                    Severity: DiffRiskSeverity.High,
+                    FilePath: line.FilePath,
+                    LineNumber: line.LineNumber,
+                    Column: assignMatch.Index + 1,
+                    Description: "Hardcoded secret, API key, access token, or private key assignment detected.",
+                    Snippet: ExtractSnippet(line.Content, assignMatch.Index, assignMatch.Length)));
+            }
         }
 
         // 4. Shannon Entropy Evaluation (PAY-ENT-001)
@@ -237,5 +244,14 @@ public sealed partial class EntropyAndSecretScanner
 
         return $"{prefix}{content[start..end].Replace("\r", " ").Replace("\n", " ").Trim()}{suffix}";
     }
+    private static bool IsTestFixtureSecret(string assignmentSnippet)
+    {
+        return assignmentSnippet.Contains("test", StringComparison.OrdinalIgnoreCase) ||
+               assignmentSnippet.Contains("mock", StringComparison.OrdinalIgnoreCase) ||
+               assignmentSnippet.Contains("fake", StringComparison.OrdinalIgnoreCase) ||
+               assignmentSnippet.Contains("dummy", StringComparison.OrdinalIgnoreCase) ||
+               assignmentSnippet.Contains("sample", StringComparison.OrdinalIgnoreCase) ||
+               assignmentSnippet.Contains("example", StringComparison.OrdinalIgnoreCase) ||
+               assignmentSnippet.Contains("file-", StringComparison.OrdinalIgnoreCase);
+    }
 }
-

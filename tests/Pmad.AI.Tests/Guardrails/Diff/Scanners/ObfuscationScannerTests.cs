@@ -106,5 +106,30 @@ public class ObfuscationScannerTests
 
         Assert.DoesNotContain(findings, f => f.RuleId == "PAY-UNI-003");
     }
-}
 
+    [Theory]
+    [InlineData("README.md")]
+    [InlineData("docs/ARCHITECTURE.markdown")]
+    [InlineData("notes.txt")]
+    [InlineData("assets/diagram.svg")]
+    public void ScanLine_ExcessiveLineLengthInExcludedDocExtensions_DoesNotFlagPayUni004(string filePath)
+    {
+        string longDocLine = new string('a', 800);
+        var line = new DiffAddedLine(filePath, 1, longDocLine);
+
+        var findings = _scanner.ScanLine(line);
+
+        Assert.DoesNotContain(findings, f => f.RuleId == "PAY-UNI-004");
+    }
+
+    [Fact]
+    public void ScanLine_TrojanSourceInMarkdown_StillFlagsPayUni001()
+    {
+        string bidiLine = "<!-- \u202E reverse text \u2066 -->";
+        var line = new DiffAddedLine("README.md", 1, bidiLine);
+
+        var findings = _scanner.ScanLine(line);
+
+        Assert.Contains(findings, f => f.RuleId == "PAY-UNI-001");
+    }
+}

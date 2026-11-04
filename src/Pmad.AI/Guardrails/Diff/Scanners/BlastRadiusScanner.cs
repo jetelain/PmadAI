@@ -36,7 +36,7 @@ public sealed class BlastRadiusScanner
                 RuleId: "SCOPE-FILES-001",
                 Title: "Excessive Changed File Count",
                 Category: DiffRiskCategory.ExcessiveBlastRadius,
-                Severity: DiffRiskSeverity.Medium,
+                Severity: DiffRiskSeverity.Low,
                 FilePath: null,
                 LineNumber: null,
                 Column: null,
@@ -50,7 +50,7 @@ public sealed class BlastRadiusScanner
                 RuleId: "SCOPE-LINES-001",
                 Title: "Excessive Changed Line Count",
                 Category: DiffRiskCategory.ExcessiveBlastRadius,
-                Severity: DiffRiskSeverity.Medium,
+                Severity: DiffRiskSeverity.Low,
                 FilePath: null,
                 LineNumber: null,
                 Column: null,
@@ -69,7 +69,7 @@ public sealed class BlastRadiusScanner
                         RuleId: "SCOPE-PCT-001",
                         Title: "Excessive Codebase Impact Percentage",
                         Category: DiffRiskCategory.ExcessiveBlastRadius,
-                        Severity: DiffRiskSeverity.Medium,
+                        Severity: DiffRiskSeverity.Low,
                         FilePath: null,
                         LineNumber: null,
                         Column: null,
@@ -86,7 +86,7 @@ public sealed class BlastRadiusScanner
                         RuleId: "SCOPE-FILEPCT-001",
                         Title: "Excessive File Impact Percentage",
                         Category: DiffRiskCategory.ExcessiveBlastRadius,
-                        Severity: DiffRiskSeverity.Medium,
+                        Severity: DiffRiskSeverity.Low,
                         FilePath: null,
                         LineNumber: null,
                         Column: null,
@@ -98,4 +98,3 @@ public sealed class BlastRadiusScanner
         return findings;
     }
 }
-

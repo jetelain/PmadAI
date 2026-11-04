@@ -89,5 +89,21 @@ public class BlastRadiusScannerTests
 
         Assert.Empty(findings);
     }
-}
 
+    [Fact]
+    public void Scan_ExceedingThresholds_EmitsLowSeverity()
+    {
+        var options = new DiffRiskScannerOptions { MaxChangedFiles = 1 };
+        var scanner = new BlastRadiusScanner(options);
+
+        var files = new List<FileDiff>
+        {
+            new() { FilePath = "f1.cs", AddedLines = [new DiffAddedLine("f1.cs", 1, "a")] },
+            new() { FilePath = "f2.cs", AddedLines = [new DiffAddedLine("f2.cs", 1, "b")] }
+        };
+
+        var findings = scanner.Scan(files);
+        var f = Assert.Single(findings);
+        Assert.Equal(DiffRiskSeverity.Low, f.Severity);
+    }
+}

@@ -96,5 +96,26 @@ public class EntropyAndSecretScannerTests
 
         Assert.Contains(findings, f => f.RuleId == "PAY-ENT-001");
     }
-}
 
+    [Theory]
+    [InlineData("{\"ApiKey\": \"file-gemini-key\"}")]
+    [InlineData("const api_key = \"test-key-1234567890\";")]
+    [InlineData("secret_key = \"mock-token-sample-123\";")]
+    [InlineData("access_token: \"fake-access-token-09876\"")]
+    public void ScanLine_TestFixtureSecretPlaceholders_AreExemptInTests(string lineContent)
+    {
+        var line = new DiffAddedLine("Tests/AppTests.cs", 5, lineContent);
+        var findings = _scanner.ScanLine(line);
+
+        Assert.DoesNotContain(findings, f => f.RuleId == "PAY-SEC-003");
+    }
+
+    [Fact]
+    public void ScanLine_RealCloudTokenInTest_StillFlagsPaySec001()
+    {
+        var line = new DiffAddedLine("tests/ApiKeyTests.cs", 1, "var key = \"sk-1234567890abcdef1234567890abcdef12345678\";");
+        var findings = _scanner.ScanLine(line);
+
+        Assert.Contains(findings, f => f.RuleId == "PAY-SEC-001");
+    }
+}
