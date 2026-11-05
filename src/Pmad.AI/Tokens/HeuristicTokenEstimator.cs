@@ -35,23 +35,23 @@ public class HeuristicTokenEstimator
 
     /// <summary>
     /// Gets a preset fine-tuned for the Qwen model family (Qwen 3.5, Qwen 3.6, Qwen 3.8)
-    /// based on empirical tokenizer calibration (WordFactor=1.17, SymbolFactor=0.88, NonAsciiFactor=0.40, CharFloorFactor=3.5).
+    /// based on empirical tokenizer calibration (WordFactor=1.22, SymbolFactor=0.86, NonAsciiFactor=0.40, CharFloorFactor=3.6).
     /// </summary>
     public static HeuristicTokenEstimator Qwen { get; } = new(
-        wordFactor: 1.17,
-        symbolFactor: 0.88,
+        wordFactor: 1.22,
+        symbolFactor: 0.86,
         nonAsciiFactor: 0.40,
-        charFloorFactor: 3.5);
+        charFloorFactor: 3.6);
 
     /// <summary>
     /// Gets a preset fine-tuned for Google Gemma 4 models (E2B, E4B, 12B, 26B, 31B)
-    /// based on empirical tokenizer calibration (WordFactor=1.43, SymbolFactor=0.72, NonAsciiFactor=0.37, CharFloorFactor=3.6).
+    /// based on empirical tokenizer calibration (WordFactor=1.21, SymbolFactor=0.61, NonAsciiFactor=0.37, CharFloorFactor=3.8).
     /// </summary>
     public static HeuristicTokenEstimator Gemma { get; } = new(
-        wordFactor: 1.43,
-        symbolFactor: 0.72,
+        wordFactor: 1.21,
+        symbolFactor: 0.61,
         nonAsciiFactor: 0.37,
-        charFloorFactor: 3.6);
+        charFloorFactor: 3.8);
 
     /// <summary>
     /// Gets the factor applied to word count.

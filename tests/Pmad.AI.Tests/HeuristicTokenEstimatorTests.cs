@@ -20,10 +20,10 @@ public class HeuristicTokenEstimatorTests
     {
         var qwenEstimator = HeuristicTokenEstimator.Qwen;
         Assert.NotNull(qwenEstimator);
-        Assert.Equal(1.17, qwenEstimator.WordFactor);
-        Assert.Equal(0.88, qwenEstimator.SymbolFactor);
+        Assert.Equal(1.22, qwenEstimator.WordFactor);
+        Assert.Equal(0.86, qwenEstimator.SymbolFactor);
         Assert.Equal(0.40, qwenEstimator.NonAsciiFactor);
-        Assert.Equal(3.5, qwenEstimator.CharFloorFactor);
+        Assert.Equal(3.6, qwenEstimator.CharFloorFactor);
     }
 
     [Fact]
@@ -31,10 +31,10 @@ public class HeuristicTokenEstimatorTests
     {
         var gemmaEstimator = HeuristicTokenEstimator.Gemma;
         Assert.NotNull(gemmaEstimator);
-        Assert.Equal(1.43, gemmaEstimator.WordFactor);
-        Assert.Equal(0.72, gemmaEstimator.SymbolFactor);
+        Assert.Equal(1.21, gemmaEstimator.WordFactor);
+        Assert.Equal(0.61, gemmaEstimator.SymbolFactor);
         Assert.Equal(0.37, gemmaEstimator.NonAsciiFactor);
-        Assert.Equal(3.6, gemmaEstimator.CharFloorFactor);
+        Assert.Equal(3.8, gemmaEstimator.CharFloorFactor);
     }
 
     [Fact]
