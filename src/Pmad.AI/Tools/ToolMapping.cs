@@ -51,6 +51,23 @@ public class ToolMapping
     /// </summary>
     public Dictionary<string, string> PrimaryCollectionProperties { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Declarative rules for computing limit/count parameters from start and end parameters (e.g. offset + limit from start_line + end_line).
+    /// </summary>
+    public List<RangeToLimitRule> RangeToLimitRules { get; init; } = [];
+
+    /// <summary>
+    /// Explicit list of top-level parameter names or aliases that should be promoted into collection items
+    /// (e.g. "edits" -> ["old_text", "new_text", "replace_all"]), even if declared in the top-level schema.
+    /// </summary>
+    public Dictionary<string, HashSet<string>> PromotedCollectionParameters { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Parameters or nested property paths whose explicit null value should be coerced to string.Empty ("").
+    /// Supports top-level names (e.g. "new_text") and nested paths (e.g. "edits[].newText").
+    /// </summary>
+    public HashSet<string> NullAsEmptyStringParameters { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
     public ToolMapping() { }
 
     public ToolMapping(
@@ -60,7 +77,10 @@ public class ToolMapping
         IDictionary<string, IDictionary<string, IEnumerable<string>>>? nestedParameterAliases = null,
         IDictionary<string, IDictionary<string, IEnumerable<string>>>? parameterValueAliases = null,
         IEnumerable<string>? propagatedParameters = null,
-        IDictionary<string, string>? primaryCollectionProperties = null)
+        IDictionary<string, string>? primaryCollectionProperties = null,
+        IEnumerable<RangeToLimitRule>? rangeToLimitRules = null,
+        IDictionary<string, IEnumerable<string>>? promotedCollectionParameters = null,
+        IEnumerable<string>? nullAsEmptyStringParameters = null)
     {
         if (aliases != null)
         {
@@ -123,6 +143,30 @@ public class ToolMapping
                 }
             }
         }
+
+        if (rangeToLimitRules != null)
+        {
+            RangeToLimitRules.AddRange(rangeToLimitRules);
+        }
+
+        if (promotedCollectionParameters != null)
+        {
+            foreach (var (k, v) in promotedCollectionParameters)
+            {
+                PromotedCollectionParameters[k] = new HashSet<string>(v, StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        if (nullAsEmptyStringParameters != null)
+        {
+            foreach (var p in nullAsEmptyStringParameters)
+            {
+                if (!string.IsNullOrWhiteSpace(p))
+                {
+                    NullAsEmptyStringParameters.Add(p.Trim());
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -140,7 +184,158 @@ public class ToolMapping
             ParameterValueAliases = CloneNestedDictionaries(ParameterValueAliases),
             PropagatedParameters = new HashSet<string>(PropagatedParameters, StringComparer.OrdinalIgnoreCase),
             PrimaryCollectionProperties = new Dictionary<string, string>(PrimaryCollectionProperties, StringComparer.OrdinalIgnoreCase),
+            RangeToLimitRules = RangeToLimitRules.Select(r => new RangeToLimitRule
+            {
+                StartParameter = r.StartParameter,
+                CountParameter = r.CountParameter,
+                EndParameterAliases = new HashSet<string>(r.EndParameterAliases, StringComparer.OrdinalIgnoreCase),
+                DefaultStart = r.DefaultStart,
+                Inclusive = r.Inclusive
+            }).ToList(),
+            PromotedCollectionParameters = PromotedCollectionParameters.ToDictionary(
+                kvp => kvp.Key,
+                kvp => new HashSet<string>(kvp.Value, StringComparer.OrdinalIgnoreCase),
+                StringComparer.OrdinalIgnoreCase),
+            NullAsEmptyStringParameters = new HashSet<string>(NullAsEmptyStringParameters, StringComparer.OrdinalIgnoreCase)
         };
+    }
+
+    /// <summary>
+    /// Configures declarative range-to-limit pagination computation (e.g. converting start_line + end_line to offset + limit).
+    /// </summary>
+    public ToolMapping MapEndLineToLimit(
+        string startParameter,
+        string limitParameter,
+        IEnumerable<string>? endAliases = null,
+        int defaultStart = 1,
+        bool inclusive = true)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(startParameter);
+        ArgumentException.ThrowIfNullOrWhiteSpace(limitParameter);
+
+        var rule = new RangeToLimitRule
+        {
+            StartParameter = startParameter.Trim(),
+            CountParameter = limitParameter.Trim(),
+            DefaultStart = defaultStart,
+            Inclusive = inclusive
+        };
+        if (endAliases != null)
+        {
+            foreach (var alias in endAliases)
+            {
+                if (!string.IsNullOrWhiteSpace(alias))
+                {
+                    rule.EndParameterAliases.Add(alias.Trim());
+                }
+            }
+        }
+        RangeToLimitRules.Add(rule);
+        return this;
+    }
+
+    /// <summary>
+    /// Configures top-level parameter names or aliases that should be promoted into collection items
+    /// (e.g. "edits" -> ["old_text", "new_text", "replace_all"]).
+    /// </summary>
+    public ToolMapping AddPromotedCollectionParameter(string collectionParam, params string[] shortcutParams)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(collectionParam);
+        var targetKey = collectionParam.Trim();
+        if (!PromotedCollectionParameters.TryGetValue(targetKey, out var set))
+        {
+            set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            PromotedCollectionParameters[targetKey] = set;
+        }
+
+        foreach (var p in shortcutParams)
+        {
+            if (!string.IsNullOrWhiteSpace(p))
+            {
+                var trimmed = p.Trim();
+                set.Add(trimmed);
+                set.Add(StringCaseConverter.ToSnakeCase(trimmed));
+                set.Add(StringCaseConverter.ToCamelCase(trimmed));
+                set.Add(StringCaseConverter.ToPascalCase(trimmed));
+            }
+        }
+        return this;
+    }
+
+    /// <summary>
+    /// Configures parameters or nested property paths whose explicit null value should be coerced to string.Empty ("").
+    /// </summary>
+    public ToolMapping AddNullAsEmptyStringParameter(params string[] parameters)
+    {
+        foreach (var p in parameters)
+        {
+            if (!string.IsNullOrWhiteSpace(p))
+            {
+                var trimmed = p.Trim();
+                NullAsEmptyStringParameters.Add(trimmed);
+                NullAsEmptyStringParameters.Add(StringCaseConverter.ToSnakeCase(trimmed));
+                NullAsEmptyStringParameters.Add(StringCaseConverter.ToCamelCase(trimmed));
+                NullAsEmptyStringParameters.Add(StringCaseConverter.ToPascalCase(trimmed));
+            }
+        }
+        return this;
+    }
+
+    /// <summary>
+    /// Determines whether an explicit null value for the specified parameter path and property name
+    /// should be coerced to string.Empty ("").
+    /// </summary>
+    public bool ShouldCoerceNullToEmptyString(string paramPath, string propName)
+    {
+        if (NullAsEmptyStringParameters == null || NullAsEmptyStringParameters.Count == 0 || string.IsNullOrWhiteSpace(propName))
+        {
+            return false;
+        }
+
+        var prop = propName.Trim();
+        var snakeProp = StringCaseConverter.ToSnakeCase(prop);
+        var camelProp = StringCaseConverter.ToCamelCase(prop);
+        var pascalProp = StringCaseConverter.ToPascalCase(prop);
+
+        // Check bare property names
+        if (NullAsEmptyStringParameters.Contains(prop) ||
+            NullAsEmptyStringParameters.Contains(snakeProp) ||
+            NullAsEmptyStringParameters.Contains(camelProp) ||
+            NullAsEmptyStringParameters.Contains(pascalProp))
+        {
+            return true;
+        }
+
+        // Check path + prop (e.g. "edits[].newText", "edits.newText")
+        if (!string.IsNullOrWhiteSpace(paramPath))
+        {
+            var p = paramPath.Trim();
+            var candidates = new[]
+            {
+                $"{p}.{prop}",
+                $"{p}.{snakeProp}",
+                $"{p}.{camelProp}",
+                $"{p}.{pascalProp}",
+                $"{p.TrimEnd('[', ']')}.{prop}",
+                $"{p.TrimEnd('[', ']')}.{snakeProp}",
+                $"{p.TrimEnd('[', ']')}.{camelProp}",
+                $"{p.TrimEnd('[', ']')}.{pascalProp}",
+                $"{p.TrimEnd('[', ']')}[].{prop}",
+                $"{p.TrimEnd('[', ']')}[].{snakeProp}",
+                $"{p.TrimEnd('[', ']')}[].{camelProp}",
+                $"{p.TrimEnd('[', ']')}[].{pascalProp}"
+            };
+
+            foreach (var cand in candidates)
+            {
+                if (NullAsEmptyStringParameters.Contains(cand))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private static Dictionary<string, Dictionary<string, string>> CloneNestedDictionaries(
