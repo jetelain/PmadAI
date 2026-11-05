@@ -875,5 +875,138 @@ public class LenientToolDispatcherGenericTransformsTests
         Assert.False(endLineStillVisibleInComputed);
     }
 
+    [Fact]
+    public void ToolParameterComputationContext_TryParseInt_HandlesBoundsAndSpecialFloatingPointValues()
+    {
+        // Within bounds
+        Assert.True(ToolParameterComputationContext.TryParseInt(42L, out var res1));
+        Assert.Equal(42, res1);
+
+        Assert.True(ToolParameterComputationContext.TryParseInt(100.0, out var res2));
+        Assert.Equal(100, res2);
+
+        Assert.True(ToolParameterComputationContext.TryParseInt(50.0f, out var res3));
+        Assert.Equal(50, res3);
+
+        Assert.True(ToolParameterComputationContext.TryParseInt(1234m, out var res4));
+        Assert.Equal(1234, res4);
+
+        // Out of integer bounds
+        Assert.False(ToolParameterComputationContext.TryParseInt((long)int.MaxValue + 1L, out _));
+        Assert.False(ToolParameterComputationContext.TryParseInt((long)int.MinValue - 1L, out _));
+        Assert.False(ToolParameterComputationContext.TryParseInt((double)int.MaxValue + 1000.0, out _));
+        Assert.False(ToolParameterComputationContext.TryParseInt((double)int.MinValue - 1000.0, out _));
+        Assert.False(ToolParameterComputationContext.TryParseInt(1e15, out _));
+        Assert.False(ToolParameterComputationContext.TryParseInt(decimal.MaxValue, out _));
+        Assert.False(ToolParameterComputationContext.TryParseInt(decimal.MinValue, out _));
+
+        // NaN and Infinity
+        Assert.False(ToolParameterComputationContext.TryParseInt(double.NaN, out _));
+        Assert.False(ToolParameterComputationContext.TryParseInt(double.PositiveInfinity, out _));
+        Assert.False(ToolParameterComputationContext.TryParseInt(double.NegativeInfinity, out _));
+        Assert.False(ToolParameterComputationContext.TryParseInt(float.NaN, out _));
+        Assert.False(ToolParameterComputationContext.TryParseInt(float.PositiveInfinity, out _));
+        Assert.False(ToolParameterComputationContext.TryParseInt(float.NegativeInfinity, out _));
+    }
+
+    [Fact]
+    public void ToolParameterComputationContext_TryParseLong_HandlesBoundsAndSpecialFloatingPointValues()
+    {
+        // Within bounds
+        Assert.True(ToolParameterComputationContext.TryParseLong(1234567890123L, out var res1));
+        Assert.Equal(1234567890123L, res1);
+
+        Assert.True(ToolParameterComputationContext.TryParseLong(500.0, out var res2));
+        Assert.Equal(500L, res2);
+
+        // Out of long bounds
+        Assert.False(ToolParameterComputationContext.TryParseLong(1e25, out _));
+        Assert.False(ToolParameterComputationContext.TryParseLong(-1e25, out _));
+        Assert.False(ToolParameterComputationContext.TryParseLong(decimal.MaxValue, out _));
+        Assert.False(ToolParameterComputationContext.TryParseLong(decimal.MinValue, out _));
+
+        // NaN and Infinity
+        Assert.False(ToolParameterComputationContext.TryParseLong(double.NaN, out _));
+        Assert.False(ToolParameterComputationContext.TryParseLong(double.PositiveInfinity, out _));
+        Assert.False(ToolParameterComputationContext.TryParseLong(double.NegativeInfinity, out _));
+        Assert.False(ToolParameterComputationContext.TryParseLong(float.NaN, out _));
+        Assert.False(ToolParameterComputationContext.TryParseLong(float.PositiveInfinity, out _));
+        Assert.False(ToolParameterComputationContext.TryParseLong(float.NegativeInfinity, out _));
+    }
+
+    [Fact]
+    public void ToolParameterComputationExtensions_GetIntAndGetLong_ReturnDefaultValue_OnOverflow()
+    {
+        var dict = new Dictionary<string, object?>
+        {
+            ["overflow_int"] = 5_000_000_000L,
+            ["overflow_long"] = 1e25,
+            ["nan_val"] = double.NaN,
+            ["valid_int"] = 42
+        };
+
+        var ctx = new ToolParameterComputationContext(dict);
+
+        Assert.Equal(-1, ctx.GetInt("overflow_int", defaultValue: -1));
+        Assert.Equal(-1, ctx.GetLong("overflow_long", defaultValue: -1));
+        Assert.Equal(-1, ctx.GetInt("nan_val", defaultValue: -1));
+        Assert.Equal(42, ctx.GetInt("valid_int", defaultValue: -1));
+
+        // Also test directly via IDictionary extension methods
+        Assert.Equal(-1, dict.GetInt("overflow_int", defaultValue: -1));
+        Assert.Equal(-1, dict.GetLong("overflow_long", defaultValue: -1));
+        Assert.Equal(-1, dict.GetInt("nan_val", defaultValue: -1));
+        Assert.Equal(42, dict.GetInt("valid_int", defaultValue: -1));
+    }
+
+    [Fact]
+    public void ToolMapping_AddParameterAliases_RegistersAliasesAndCasingVariants()
+    {
+        var mapping = new ToolMapping();
+        var returned = mapping
+            .AddParameterAliases("filePath", "path", "file")
+            .AddParameterAliases("path", "source_file");
+
+        Assert.Same(mapping, returned);
+
+        // Canonical and aliases map to "filePath"
+        Assert.Equal("filePath", mapping.ParameterAliases["filePath"]);
+        Assert.Equal("filePath", mapping.ParameterAliases["file_path"]);
+        Assert.Equal("filePath", mapping.ParameterAliases["FilePath"]);
+        Assert.Equal("filePath", mapping.ParameterAliases["path"]);
+        Assert.Equal("filePath", mapping.ParameterAliases["file"]);
+        Assert.Equal("filePath", mapping.ParameterAliases["source_file"]);
+        Assert.Equal("filePath", mapping.ParameterAliases["sourceFile"]);
+        Assert.Equal("filePath", mapping.ParameterAliases["SourceFile"]);
+
+        // NormalizeCall test with dispatcher
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
+        {
+            Tools = { ["read_file"] = mapping }
+        });
+        dispatcher.RegisterTool(AIFunctionFactory.Create((string filePath) => filePath, "read_file"));
+
+        var call1 = dispatcher.NormalizeCall("read_file", new Dictionary<string, object?> { ["sourceFile"] = "test.txt" });
+        Assert.Equal("test.txt", call1.Arguments["filePath"]);
+
+        var call2 = dispatcher.NormalizeCall("read_file", new Dictionary<string, object?> { ["file"] = "other.txt" });
+        Assert.Equal("other.txt", call2.Arguments["filePath"]);
+    }
+
+    [Fact]
+    public void ToolMapping_AddParameterAliases_ValidatesArguments_AndIgnoresEmptyElements()
+    {
+        var mapping = new ToolMapping();
+
+        Assert.Throws<ArgumentException>(() => mapping.AddParameterAliases("", "alias"));
+        Assert.Throws<ArgumentException>(() => mapping.AddParameterAliases("   ", "alias"));
+        Assert.Throws<ArgumentNullException>(() => mapping.AddParameterAliases("param", (IEnumerable<string>)null!));
+
+        // Ignores null or whitespace elements in aliases without throwing
+        mapping.AddParameterAliases("param", ["", "   ", null!, "valid_alias"]);
+        Assert.Equal("param", mapping.ParameterAliases["valid_alias"]);
+        Assert.False(mapping.ParameterAliases.ContainsKey(""));
+    }
+
     #endregion
 }

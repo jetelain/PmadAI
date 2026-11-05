@@ -181,12 +181,32 @@ public sealed class ToolParameterComputationContext : IDictionary<string, object
         result = 0;
         if (value == null) return false;
         if (value is int i) { result = i; return true; }
-        if (value is long l) { result = (int)l; return true; }
+        if (value is long l)
+        {
+            if (l < int.MinValue || l > int.MaxValue) return false;
+            result = (int)l;
+            return true;
+        }
         if (value is short s) { result = s; return true; }
         if (value is byte b) { result = b; return true; }
-        if (value is double d) { result = (int)d; return true; }
-        if (value is float f) { result = (int)f; return true; }
-        if (value is decimal dec) { result = (int)dec; return true; }
+        if (value is double d)
+        {
+            if (double.IsNaN(d) || double.IsInfinity(d) || d < int.MinValue || d > int.MaxValue) return false;
+            result = (int)d;
+            return true;
+        }
+        if (value is float f)
+        {
+            if (float.IsNaN(f) || float.IsInfinity(f) || f < int.MinValue || f > int.MaxValue) return false;
+            result = (int)f;
+            return true;
+        }
+        if (value is decimal dec)
+        {
+            if (dec < int.MinValue || dec > int.MaxValue) return false;
+            result = (int)dec;
+            return true;
+        }
         if (value is bool boolVal) { result = boolVal ? 1 : 0; return true; }
 
         var str = value.ToString()?.Trim();
@@ -203,9 +223,24 @@ public sealed class ToolParameterComputationContext : IDictionary<string, object
         if (value is int i) { result = i; return true; }
         if (value is short s) { result = s; return true; }
         if (value is byte b) { result = b; return true; }
-        if (value is double d) { result = (long)d; return true; }
-        if (value is float f) { result = (long)f; return true; }
-        if (value is decimal dec) { result = (long)dec; return true; }
+        if (value is double d)
+        {
+            if (double.IsNaN(d) || double.IsInfinity(d) || d < long.MinValue || d > long.MaxValue) return false;
+            result = (long)d;
+            return true;
+        }
+        if (value is float f)
+        {
+            if (float.IsNaN(f) || float.IsInfinity(f) || f < long.MinValue || f > long.MaxValue) return false;
+            result = (long)f;
+            return true;
+        }
+        if (value is decimal dec)
+        {
+            if (dec < long.MinValue || dec > long.MaxValue) return false;
+            result = (long)dec;
+            return true;
+        }
         if (value is bool boolVal) { result = boolVal ? 1 : 0; return true; }
 
         var str = value.ToString()?.Trim();

@@ -649,4 +649,44 @@ public class ToolMapping
         }
         return flat;
     }
+
+    /// <summary>
+    /// Configures aliases for a top-level parameter name.
+    /// </summary>
+    public ToolMapping AddParameterAliases(string paramName, IEnumerable<string> aliases)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(paramName);
+        ArgumentNullException.ThrowIfNull(aliases);
+
+        var trimmedParamName = paramName.Trim();
+        if (!ParameterAliases.TryGetValue(trimmedParamName, out var canonicalParamName))
+        {
+            canonicalParamName = trimmedParamName;
+            ParameterAliases[canonicalParamName] = canonicalParamName;
+            ParameterAliases[StringCaseConverter.ToSnakeCase(canonicalParamName)] = canonicalParamName;
+            ParameterAliases[StringCaseConverter.ToCamelCase(canonicalParamName)] = canonicalParamName;
+            ParameterAliases[StringCaseConverter.ToPascalCase(canonicalParamName)] = canonicalParamName;
+        }
+        foreach (var alias in aliases)
+        {
+            if (string.IsNullOrWhiteSpace(alias))
+            {
+                continue;
+            }
+            var trimmedAlias = alias.Trim();
+            ParameterAliases[trimmedAlias] = canonicalParamName;
+            ParameterAliases[StringCaseConverter.ToSnakeCase(trimmedAlias)] = canonicalParamName;
+            ParameterAliases[StringCaseConverter.ToCamelCase(trimmedAlias)] = canonicalParamName;
+            ParameterAliases[StringCaseConverter.ToPascalCase(trimmedAlias)] = canonicalParamName;
+        }
+        return this;
+    }
+
+    /// <summary>
+    /// Configures aliases for a top-level parameter name.
+    /// </summary>
+    public ToolMapping AddParameterAliases(string paramName, params string[] aliases)
+    {
+        return AddParameterAliases(paramName, (IEnumerable<string>)aliases);
+    }
 }
