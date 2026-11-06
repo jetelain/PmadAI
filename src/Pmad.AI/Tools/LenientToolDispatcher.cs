@@ -94,8 +94,6 @@ public partial class LenientToolDispatcher
         return clone;
     }
 
-   
-
     /// <summary>
     /// Registers an executable <see cref="AIFunction"/> canonical tool.
     /// </summary>
@@ -127,6 +125,36 @@ public partial class LenientToolDispatcher
         {
             if (!_registeredTools.TryGetValue(toolName, out var aiFunction))
             {
+                // Check if this tool is a SourceTool or alias of a ToolTranslation
+                if (_configuration.TryGetTranslation(toolName, out var translation))
+                {
+                    // It is a virtual translated tool! Validate its ParameterAliases targets against placeholders
+                    var placeholders = ExtractTemplatePlaceholders(translation.CommandTemplate);
+                    foreach (var (alias, canonicalParam) in mapping.ParameterAliases)
+                    {
+                        if (!placeholders.Contains(canonicalParam))
+                        {
+                            issues.Add(new ToolValidationIssue(
+                                ToolValidationSeverity.Error,
+                                toolName,
+                                canonicalParam,
+                                $"Configured parameter alias targets non-existent placeholder '{canonicalParam}' on translated tool '{toolName}'."));
+                        }
+
+                        if (string.IsNullOrWhiteSpace(alias) || string.IsNullOrWhiteSpace(canonicalParam))
+                        {
+                            issues.Add(new ToolValidationIssue(
+                                ToolValidationSeverity.Error,
+                                toolName,
+                                alias,
+                                $"Parameter alias entry with a blank alias or canonical target on tool '{toolName}'."));
+                        }
+                    }
+
+                    CheckToolAliasCollisions(toolName, mapping.Aliases, seenAliases, issues);
+                    continue;
+                }
+
                 issues.Add(new ToolValidationIssue(
                     ToolValidationSeverity.Error,
                     toolName,
@@ -176,6 +204,34 @@ public partial class LenientToolDispatcher
                 }
             }
 
+            // Inspect range-to-limit rules
+            if (mapping.RangeToLimitRules != null)
+            {
+                foreach (var rule in mapping.RangeToLimitRules)
+                {
+                    if (schemaProps != null)
+                    {
+                        if (!schemaProps.Contains(rule.StartParameter))
+                        {
+                            issues.Add(new ToolValidationIssue(
+                                ToolValidationSeverity.Error,
+                                toolName,
+                                rule.StartParameter,
+                                $"RangeToLimitRule StartParameter targets non-existent parameter '{rule.StartParameter}' on tool '{toolName}'."));
+                        }
+
+                        if (!schemaProps.Contains(rule.CountParameter))
+                        {
+                            issues.Add(new ToolValidationIssue(
+                                ToolValidationSeverity.Error,
+                                toolName,
+                                rule.CountParameter,
+                                $"RangeToLimitRule CountParameter targets non-existent parameter '{rule.CountParameter}' on tool '{toolName}'."));
+                        }
+                    }
+                }
+            }
+
             // Inspect nested parameter aliases
             if (mapping.NestedParameterAliases != null)
             {
@@ -194,40 +250,7 @@ public partial class LenientToolDispatcher
             }
 
             // Alias collision detection across tools
-            foreach (var alias in mapping.Aliases)
-            {
-                if (string.Equals(alias, toolName, StringComparison.OrdinalIgnoreCase))
-                {
-                    issues.Add(new ToolValidationIssue(
-                        ToolValidationSeverity.Warning,
-                        toolName,
-                        null,
-                        $"Tool alias '{alias}' is identical to the canonical tool name."));
-                }
-                else if (seenAliases.TryGetValue(alias, out var existingOwner))
-                {
-                    if (string.Equals(existingOwner, toolName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        issues.Add(new ToolValidationIssue(
-                            ToolValidationSeverity.Error,
-                            toolName,
-                            null,
-                            $"Duplicate alias '{alias}' declared within tool '{toolName}'."));
-                    }
-                    else
-                    {
-                        issues.Add(new ToolValidationIssue(
-                            ToolValidationSeverity.Warning,
-                            toolName,
-                            null,
-                            $"Alias collision: '{alias}' is mapped to both '{existingOwner}' and '{toolName}'. First-configured will win."));
-                    }
-                }
-                else
-                {
-                    seenAliases[alias] = toolName;
-                }
-            }
+            CheckToolAliasCollisions(toolName, mapping.Aliases, seenAliases, issues);
         }
 
         // 2. Validate translations
@@ -241,6 +264,58 @@ public partial class LenientToolDispatcher
                     null,
                     $"Translation source '{translation.SourceTool}' targets non-existent tool '{translation.TargetTool}'."));
             }
+
+            var placeholders = ExtractTemplatePlaceholders(translation.CommandTemplate);
+            if (translation.ParameterAliases != null)
+            {
+                foreach (var (alias, target) in translation.ParameterAliases)
+                {
+                    if (!placeholders.Contains(target))
+                    {
+                        issues.Add(new ToolValidationIssue(
+                            ToolValidationSeverity.Error,
+                            translation.SourceTool,
+                            target,
+                            $"Translation parameter alias targets non-existent placeholder '{target}' on translated tool '{translation.SourceTool}'."));
+                    }
+
+                    if (string.IsNullOrWhiteSpace(alias) || string.IsNullOrWhiteSpace(target))
+                    {
+                        issues.Add(new ToolValidationIssue(
+                            ToolValidationSeverity.Error,
+                            translation.SourceTool,
+                            alias,
+                            $"Translation parameter alias entry with a blank alias or placeholder target on tool '{translation.SourceTool}'."));
+                    }
+                }
+            }
+
+            if (translation.Aliases != null)
+            {
+                foreach (var alias in translation.Aliases)
+                {
+                    if (string.Equals(alias, translation.SourceTool, StringComparison.OrdinalIgnoreCase))
+                    {
+                        issues.Add(new ToolValidationIssue(
+                            ToolValidationSeverity.Warning,
+                            translation.SourceTool,
+                            null,
+                            $"Translation alias '{alias}' is identical to the source tool name."));
+                    }
+                    else if (seenAliases.TryGetValue(alias, out var existingOwner))
+                    {
+                        issues.Add(new ToolValidationIssue(
+                            ToolValidationSeverity.Warning,
+                            translation.SourceTool,
+                            null,
+                            $"Alias collision: '{alias}' is mapped to both '{existingOwner}' and '{translation.SourceTool}'. First-configured will win."));
+                    }
+                    else
+                    {
+                        seenAliases[alias] = translation.SourceTool;
+                    }
+                }
+            }
         }
 
         var report = new ToolDispatcherValidationReport { Issues = issues };
@@ -249,6 +324,48 @@ public partial class LenientToolDispatcher
             report.ThrowIfInvalid();
         }
         return report;
+    }
+
+    private static void CheckToolAliasCollisions(
+        string toolName,
+        HashSet<string> aliases,
+        Dictionary<string, string> seenAliases,
+        List<ToolValidationIssue> issues)
+    {
+        foreach (var alias in aliases)
+        {
+            if (string.Equals(alias, toolName, StringComparison.OrdinalIgnoreCase))
+            {
+                issues.Add(new ToolValidationIssue(
+                    ToolValidationSeverity.Warning,
+                    toolName,
+                    null,
+                    $"Tool alias '{alias}' is identical to the canonical tool name."));
+            }
+            else if (seenAliases.TryGetValue(alias, out var existingOwner))
+            {
+                if (string.Equals(existingOwner, toolName, StringComparison.OrdinalIgnoreCase))
+                {
+                    issues.Add(new ToolValidationIssue(
+                        ToolValidationSeverity.Error,
+                        toolName,
+                        null,
+                        $"Duplicate alias '{alias}' declared within tool '{toolName}'."));
+                }
+                else
+                {
+                    issues.Add(new ToolValidationIssue(
+                        ToolValidationSeverity.Warning,
+                        toolName,
+                        null,
+                        $"Alias collision: '{alias}' is mapped to both '{existingOwner}' and '{toolName}'. First-configured will win."));
+                }
+            }
+            else
+            {
+                seenAliases[alias] = toolName;
+            }
+        }
     }
 
     /// <summary>
@@ -282,19 +399,33 @@ public partial class LenientToolDispatcher
         // 1. Check if tool is a translation rule via O(1) lookup
         if (_configuration.TryGetTranslation(toolName, out var translation))
         {
-            Telemetry?.Record(LenientDispatchEventType.ToolAliasResolved, toolName, translation.TargetTool, SessionId);
+            if (string.Equals(translation.SourceTool, toolName, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.Equals(translation.SourceTool, toolName, StringComparison.Ordinal))
+                {
+                    Telemetry?.Record(LenientDispatchEventType.CasingNormalized, toolName, translation.TargetTool, SessionId);
+                }
+            }
+            else if (string.Equals(ToolHelpers.NormalizeToolIdentifier(translation.SourceTool),
+                                   ToolHelpers.NormalizeToolIdentifier(toolName),
+                                   StringComparison.Ordinal))
+            {
+                Telemetry?.Record(LenientDispatchEventType.CasingNormalized, toolName, translation.TargetTool, SessionId);
+            }
+            else
+            {
+                Telemetry?.Record(LenientDispatchEventType.ToolAliasResolved, toolName, translation.TargetTool, SessionId);
+            }
             return RenderTranslationCall(translation, rawArgs, rawToolName);
         }
 
         // 2. Resolve canonical tool name (exact match always wins over aliases)
-        var (canonicalTool, mapping, wasAliasResolved) = ResolveCanonicalToolAndMapping(toolName);
+        var (canonicalTool, mapping, wasAliasResolved, wasCasingNormalized) = ResolveCanonicalToolAndMapping(toolName);
         if (wasAliasResolved)
         {
             Telemetry?.Record(LenientDispatchEventType.ToolAliasResolved, toolName, canonicalTool, SessionId);
         }
-
-        if (string.Equals(toolName, canonicalTool, StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(toolName, canonicalTool, StringComparison.Ordinal))
+        else if (wasCasingNormalized)
         {
             Telemetry?.Record(LenientDispatchEventType.CasingNormalized, toolName, canonicalTool, SessionId);
         }
@@ -303,18 +434,42 @@ public partial class LenientToolDispatcher
 
         // 3. Resolve parameter aliases via the flat alias -> canonical map (O(1) per argument).
         var canonicalArgs = new AIFunctionArguments();
-        var aliased = new List<(string Key, object? Value, string Canonical)>();
+        var aliased = new List<(string Key, object? Value, string Canonical, int AppearanceIndex)>();
+        int appearanceIndex = 0;
         foreach (var (k, v) in rawArgs)
         {
-            var unwrappedVal = v is JsonElement { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined } ? null : v;
+            int currentIndex = appearanceIndex++;
+            var isExplicitNull = v == null || (v is JsonElement je && je.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined);
+            var unwrappedVal = isExplicitNull ? null : v;
+
+            string? targetParam = null;
+            if (mapping != null && mapping.ParameterAliases.Count > 0 &&
+                mapping.ParameterAliases.TryGetValue(k, out var cp))
+            {
+                targetParam = cp;
+            }
+            else if (TryStripJsonSuffixAndMatch(k, propDict, mapping, out var scp))
+            {
+                targetParam = scp;
+            }
+            else
+            {
+                targetParam = k;
+            }
+
+            if (isExplicitNull && mapping != null && mapping.ShouldCoerceNullToEmptyString(string.Empty, targetParam ?? k))
+            {
+                unwrappedVal = string.Empty;
+            }
+
             if (mapping != null && mapping.ParameterAliases.Count > 0 &&
                 mapping.ParameterAliases.TryGetValue(k, out var canonicalParam))
             {
-                aliased.Add((k, unwrappedVal, canonicalParam));
+                aliased.Add((k, unwrappedVal, canonicalParam, currentIndex));
             }
             else if (TryStripJsonSuffixAndMatch(k, propDict, mapping, out var strippedCanonicalParam))
             {
-                aliased.Add((k, unwrappedVal, strippedCanonicalParam));
+                aliased.Add((k, unwrappedVal, strippedCanonicalParam, currentIndex));
             }
             else
             {
@@ -329,6 +484,7 @@ public partial class LenientToolDispatcher
         // Deterministic precedence: when the model emits the canonical key and one or more of
         // its aliases for the same parameter, the value supplied under the exact canonical key wins
         // (unless the canonical key's value is null/undefined, in which case a non-null alias wins).
+        // Tie-breaker: preserve appearance order from rawArgs via AppearanceIndex.
         aliased.Sort(static (a, b) =>
         {
             int aNull = IsNullOrUndefined(a.Value) ? 1 : 0;
@@ -336,11 +492,14 @@ public partial class LenientToolDispatcher
             int cmp = aNull.CompareTo(bNull);
             if (cmp != 0) return cmp;
 
-            return (string.Equals(a.Key, a.Canonical, StringComparison.Ordinal) ? 0 : 1)
+            int exactCmp = (string.Equals(a.Key, a.Canonical, StringComparison.Ordinal) ? 0 : 1)
                 .CompareTo(string.Equals(b.Key, b.Canonical, StringComparison.Ordinal) ? 0 : 1);
+            if (exactCmp != 0) return exactCmp;
+
+            return a.AppearanceIndex.CompareTo(b.AppearanceIndex);
         });
 
-        foreach (var (key, value, canonicalParam) in aliased)
+        foreach (var (key, value, canonicalParam, _) in aliased)
         {
             // First-wins after sorting: a non-null value under the exact canonical key (if present)
             // takes precedence over any of its aliases; a null canonical key is treated as unset so
@@ -378,23 +537,52 @@ public partial class LenientToolDispatcher
             }
         }
 
+        // 3.8. Declarative RangeToLimitRule evaluation (start_line + end_line -> offset + limit)
+        if (mapping?.RangeToLimitRules != null && mapping.RangeToLimitRules.Count > 0)
+        {
+            ApplyRangeToLimitRules(canonicalArgs, rawArgs, mapping);
+        }
+
         // 4. Evaluate computed parameters if canonical parameter not already resolved
         if (mapping?.ComputedParameters != null && mapping.ComputedParameters.Count > 0)
         {
-            var caseInsensitiveRaw = rawArgs is Dictionary<string, object?> dict && dict.Comparer == StringComparer.OrdinalIgnoreCase
-                ? rawArgs
-                : new Dictionary<string, object?>(rawArgs, StringComparer.OrdinalIgnoreCase);
+            var compArgs = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (k, v) in rawArgs)
+            {
+                compArgs[k] = v;
+            }
+            foreach (var (k, v) in canonicalArgs)
+            {
+                compArgs[k] = v;
+            }
+            if (mapping.RangeToLimitRules != null)
+            {
+                foreach (var rule in mapping.RangeToLimitRules)
+                {
+                    foreach (var alias in rule.EndParameterAliases)
+                    {
+                        if (!canonicalArgs.ContainsKey(alias))
+                        {
+                            compArgs.Remove(alias);
+                        }
+                    }
+                }
+            }
+            var computationContext = new ToolParameterComputationContext(compArgs, mapping);
 
             foreach (var (computedParam, computer) in mapping.ComputedParameters)
             {
-                if (!canonicalArgs.ContainsKey(computedParam) || IsNullOrUndefined(canonicalArgs[computedParam]))
+                if (!canonicalArgs.ContainsKey(computedParam) ||
+                    IsNullOrUndefined(canonicalArgs[computedParam]) ||
+                    IsBlankCollection(canonicalArgs[computedParam]))
                 {
                     try
                     {
-                        var computedVal = computer(caseInsensitiveRaw);
+                        var computedVal = computer(computationContext);
                         if (computedVal != null)
                         {
                             canonicalArgs[computedParam] = computedVal;
+                            computationContext[computedParam] = computedVal;
                             Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, "<computed>", computedParam, SessionId);
                         }
                     }
@@ -424,15 +612,6 @@ public partial class LenientToolDispatcher
         foreach (var key in currentKeys)
         {
             var val = canonicalArgs[key];
-            if (IsNullOrUndefined(val))
-            {
-                if (val is JsonElement)
-                {
-                    canonicalArgs[key] = null;
-                }
-                continue;
-            }
-
             string canonicalKey = key;
             JsonElement? paramSchema = null;
 
@@ -440,6 +619,25 @@ public partial class LenientToolDispatcher
             {
                 canonicalKey = schemaEntry.CanonicalName;
                 paramSchema = schemaEntry.Schema;
+            }
+
+            if (IsNullOrUndefined(val))
+            {
+                if (mapping != null &&
+                    (mapping.ShouldCoerceNullToEmptyString(string.Empty, key) ||
+                     mapping.ShouldCoerceNullToEmptyString(string.Empty, canonicalKey)))
+                {
+                    canonicalArgs[key] = string.Empty;
+                    val = string.Empty;
+                }
+                else
+                {
+                    if (val is JsonElement)
+                    {
+                        canonicalArgs[key] = null;
+                    }
+                    continue;
+                }
             }
 
             var normalizedVal = NormalizeValueDeep(val, paramSchema, mapping, canonicalKey, rootSchema);
@@ -516,12 +714,19 @@ public partial class LenientToolDispatcher
             throw new InvalidOperationException($"Tool '{dispatched.CanonicalToolName}' (from original '{rawToolName}') is not registered.");
         }
 
-        var rawResult = await tool.InvokeAsync(dispatched.Arguments, ct).ConfigureAwait(false);
-        if (rawResult is JsonElement je)
+        try
         {
-            return ToolCallHealingTransform.UnwrapJsonElement(je);
+            var rawResult = await tool.InvokeAsync(dispatched.Arguments, ct).ConfigureAwait(false);
+            if (rawResult is JsonElement je)
+            {
+                return ToolCallHealingTransform.UnwrapJsonElement(je);
+            }
+            return rawResult;
         }
-        return rawResult;
+        catch (JsonException ex)
+        {
+            throw new ArgumentException($"Failed to deserialize arguments for tool '{dispatched.CanonicalToolName}': {ex.Message}", ex);
+        }
     }
 
     private DispatchedToolCall RenderTranslationCall(ToolTranslation translation, IDictionary<string, object?> rawArgs, string originalName)
@@ -535,17 +740,43 @@ public partial class LenientToolDispatcher
             var defaultValue = match.Groups[2].Value;
 
             object? val = null;
-            if (!TryGetValueCaseInsensitive(rawArgs, paramName, out val))
+            if (TryGetValueCaseInsensitive(rawArgs, paramName, out var directVal) && !IsNullOrUndefined(directVal))
             {
-                // Resolve via the flat parameter alias map: find every alias whose target is
+                val = directVal is JsonElement je ? ConvertJsonElementToClr(je) : directVal;
+            }
+
+            if (val == null)
+            {
+                // 1. Resolve via translation's own ParameterAliases
+                if (translation.ParameterAliases != null && translation.ParameterAliases.Count > 0)
+                {
+                    foreach (var (alias, target) in translation.ParameterAliases)
+                    {
+                        if (string.Equals(target, paramName, StringComparison.OrdinalIgnoreCase) &&
+                            TryGetValueCaseInsensitive(rawArgs, alias, out var aliasVal) &&
+                            !IsNullOrUndefined(aliasVal))
+                        {
+                            val = aliasVal is JsonElement je ? ConvertJsonElementToClr(je) : aliasVal;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (val == null)
+            {
+                // 2. Resolve via the flat parameter alias map: find every alias whose target is
                 // the placeholder parameter and probe the raw arguments (case-insensitively).
-                if (_configuration.Tools.TryGetValue(translation.SourceTool, out var sourceMapping))
+                if (_configuration.Tools.TryGetValue(translation.SourceTool, out var sourceMapping) ||
+                    _configuration.Tools.TryGetValue(originalName, out sourceMapping))
                 {
                     foreach (var (alias, target) in sourceMapping.ParameterAliases)
                     {
                         if (string.Equals(target, paramName, StringComparison.OrdinalIgnoreCase) &&
-                            TryGetValueCaseInsensitive(rawArgs, alias, out val))
+                            TryGetValueCaseInsensitive(rawArgs, alias, out var aliasVal) &&
+                            !IsNullOrUndefined(aliasVal))
                         {
+                            val = aliasVal is JsonElement je ? ConvertJsonElementToClr(je) : aliasVal;
                             break;
                         }
                     }
@@ -681,28 +912,58 @@ public partial class LenientToolDispatcher
         }
 
         // 2. Resolve canonical tool name (exact match always wins over aliases)
-        var (canonicalTool, _, _) = ResolveCanonicalToolAndMapping(toolName);
+        var (canonicalTool, _, _, _) = ResolveCanonicalToolAndMapping(toolName);
         return canonicalTool;
     }
 
-    private (string CanonicalName, ToolMapping? Mapping, bool WasAliasResolved) ResolveCanonicalToolAndMapping(string toolName)
+    private (string CanonicalName, ToolMapping? Mapping, bool WasAliasResolved, bool WasCasingNormalized) ResolveCanonicalToolAndMapping(string toolName)
     {
-        if (_registeredTools.TryGetValue(toolName, out var registeredTool))
+        // 1. Direct case-insensitive match on registered tools
+        if (_registeredTools.TryGetExactValue(toolName, out var registeredTool))
         {
             _configuration.Tools.TryGetValue(registeredTool.Name, out var mapping);
-            return (registeredTool.Name, mapping, false);
+            bool wasCasing = !string.Equals(registeredTool.Name, toolName, StringComparison.Ordinal);
+            return (registeredTool.Name, mapping, false, wasCasing);
         }
+
+        // 2. Exact case-insensitive alias lookup from configuration
+        if (_configuration.TryGetExactAlias(toolName, out var exactConfiguredCanonical))
+        {
+            bool isAlias = !string.Equals(exactConfiguredCanonical, toolName, StringComparison.OrdinalIgnoreCase);
+            bool wasCasing = !isAlias && !string.Equals(exactConfiguredCanonical, toolName, StringComparison.Ordinal);
+
+            _configuration.Tools.TryGetValue(exactConfiguredCanonical, out var mapping);
+            if (_registeredTools.TryGetValue(exactConfiguredCanonical, out var rt))
+            {
+                return (rt.Name, mapping, isAlias, wasCasing);
+            }
+            return (exactConfiguredCanonical, mapping, isAlias, wasCasing);
+        }
+
+        // 3. Fallback to separator/casing-normalized registered tool
+        if (_registeredTools.TryGetValue(toolName, out var normTool))
+        {
+            _configuration.Tools.TryGetValue(normTool.Name, out var mapping);
+            return (normTool.Name, mapping, false, true);
+        }
+
+        // 4. Fallback to separator/casing-normalized alias lookup from configuration
         if (_configuration.TryGetAlias(toolName, out var configuredCanonical))
         {
-            var isAlias = !string.Equals(configuredCanonical, toolName, StringComparison.OrdinalIgnoreCase);
+            bool isAlias = !string.Equals(ToolHelpers.NormalizeToolIdentifier(configuredCanonical),
+                                          ToolHelpers.NormalizeToolIdentifier(toolName),
+                                          StringComparison.Ordinal);
+            bool wasCasing = !isAlias && !string.Equals(configuredCanonical, toolName, StringComparison.Ordinal);
+
             _configuration.Tools.TryGetValue(configuredCanonical, out var mapping);
             if (_registeredTools.TryGetValue(configuredCanonical, out var rt))
             {
-                return (rt.Name, mapping, isAlias);
+                return (rt.Name, mapping, isAlias, wasCasing);
             }
-            return (configuredCanonical, mapping, isAlias);
+            return (configuredCanonical, mapping, isAlias, wasCasing);
         }
-        return (toolName, null, false);
+
+        return (toolName, null, false, false);
     }
 
     /// <summary>
@@ -722,7 +983,11 @@ public partial class LenientToolDispatcher
                _registeredTools.ContainsKey(canonical) ||
                _registeredTools.ContainsKey(stripped) ||
                _configuration.Tools.ContainsKey(rawToolName) ||
-               _configuration.Tools.ContainsKey(canonical);
+               _configuration.Tools.ContainsKey(canonical) ||
+               _configuration.TryGetAlias(rawToolName, out _) ||
+               _configuration.TryGetAlias(stripped, out _) ||
+               _configuration.TryGetTranslation(rawToolName, out _) ||
+               _configuration.TryGetTranslation(stripped, out _);
     }
 
     /// <summary>
@@ -738,6 +1003,9 @@ public partial class LenientToolDispatcher
 
         var canonical = ResolveCanonicalToolName(rawToolName);
         var stripped = StripNamespace(rawToolName.Trim());
+        var normRaw = ToolHelpers.NormalizeToolIdentifier(rawToolName);
+        var normStripped = ToolHelpers.NormalizeToolIdentifier(stripped);
+        var normCanonical = ToolHelpers.NormalizeToolIdentifier(canonical);
 
         foreach (var tool in availableTools)
         {
@@ -749,13 +1017,22 @@ public partial class LenientToolDispatcher
 
             var declaredCanonical = ResolveCanonicalToolName(name);
             var declaredStripped = StripNamespace(name.Trim());
+            var normName = ToolHelpers.NormalizeToolIdentifier(name);
+            var normDeclaredCanonical = ToolHelpers.NormalizeToolIdentifier(declaredCanonical);
+            var normDeclaredStripped = ToolHelpers.NormalizeToolIdentifier(declaredStripped);
 
-            // Direct match or canonical match
+            // Direct match, canonical match, or normalized identifier match
             if (string.Equals(name, rawToolName, StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(name, canonical, StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(name, stripped, StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(declaredCanonical, canonical, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(declaredStripped, stripped, StringComparison.OrdinalIgnoreCase))
+                string.Equals(declaredStripped, stripped, StringComparison.OrdinalIgnoreCase) ||
+                (!string.IsNullOrEmpty(normName) &&
+                 (string.Equals(normName, normRaw, StringComparison.Ordinal) ||
+                  string.Equals(normName, normCanonical, StringComparison.Ordinal) ||
+                  string.Equals(normName, normStripped, StringComparison.Ordinal) ||
+                  string.Equals(normDeclaredCanonical, normCanonical, StringComparison.Ordinal) ||
+                  string.Equals(normDeclaredStripped, normStripped, StringComparison.Ordinal))))
             {
                 return true;
             }
@@ -777,13 +1054,11 @@ public partial class LenientToolDispatcher
                 }
             }
 
-            // If declared tool is target of a translation whose SourceTool matches rawToolName, stripped, or canonical
-            if (_configuration.Translations.Any(t =>
-                (string.Equals(t.TargetTool, name, StringComparison.OrdinalIgnoreCase) ||
-                 string.Equals(t.TargetTool, declaredCanonical, StringComparison.OrdinalIgnoreCase)) &&
-                (string.Equals(t.SourceTool, rawToolName, StringComparison.OrdinalIgnoreCase) ||
-                 string.Equals(t.SourceTool, stripped, StringComparison.OrdinalIgnoreCase) ||
-                 string.Equals(t.SourceTool, canonical, StringComparison.OrdinalIgnoreCase))))
+            // If declared tool is target of a translation whose SourceTool or Aliases match rawToolName, stripped, or canonical
+            if ((_configuration.TryGetTranslation(rawToolName, out var trans) ||
+                 _configuration.TryGetTranslation(stripped, out trans)) &&
+                (string.Equals(trans.TargetTool, name, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(trans.TargetTool, declaredCanonical, StringComparison.OrdinalIgnoreCase)))
             {
                 return true;
             }
@@ -800,10 +1075,10 @@ public partial class LenientToolDispatcher
         if (string.IsNullOrWhiteSpace(name)) return name;
 
         var idx = name.LastIndexOf("__", StringComparison.Ordinal);
-        if (idx >= 0) return name.Substring(idx + 2);
+        if (idx >= 0 && idx < name.Length - 2) return name.Substring(idx + 2);
 
         idx = name.LastIndexOf(':');
-        if (idx >= 0) return name.Substring(idx + 1);
+        if (idx >= 0 && idx < name.Length - 1) return name.Substring(idx + 1);
 
         if (name.StartsWith("functions.", StringComparison.OrdinalIgnoreCase))
         {
@@ -865,6 +1140,72 @@ public partial class LenientToolDispatcher
                 arguments[key] = coercedVal;
             }
         }
+    }
+
+    private static object? CoerceScalarArrayItem(string paramName, object value, JsonElement resolvedItemSchema, ToolMapping? mapping = null)
+    {
+        if (value is string)
+        {
+            return CoerceParameterValue(paramName, value, resolvedItemSchema, mapping);
+        }
+
+        bool isBooleanTarget = SchemaTypeMatches(resolvedItemSchema, "boolean");
+        bool isIntegerTarget = SchemaTypeMatches(resolvedItemSchema, "integer");
+        bool isNumberTarget = SchemaTypeMatches(resolvedItemSchema, "number");
+        bool isStringTarget = SchemaTypeMatches(resolvedItemSchema, "string");
+
+        if (isIntegerTarget && !isNumberTarget)
+        {
+            if (value is int or long or short or byte)
+            {
+                return value;
+            }
+            if (value is double d && Math.Floor(d) == d && d >= long.MinValue && d <= long.MaxValue)
+            {
+                var lv = (long)d;
+                return lv >= int.MinValue && lv <= int.MaxValue ? (object)(int)lv : lv;
+            }
+            if (value is bool && isBooleanTarget)
+            {
+                return value;
+            }
+            var rawName = paramName.EndsWith("[]", StringComparison.Ordinal) ? paramName[..^2] : paramName;
+            throw new ArgumentException($"Element '{value}' of parameter '{rawName}' is not a valid integer.");
+        }
+
+        if (isNumberTarget)
+        {
+            if (value is int or long or short or byte or double or float or decimal)
+            {
+                return value;
+            }
+            if (value is bool && isBooleanTarget)
+            {
+                return value;
+            }
+            var rawName = paramName.EndsWith("[]", StringComparison.Ordinal) ? paramName[..^2] : paramName;
+            throw new ArgumentException($"Element '{value}' of parameter '{rawName}' is not a valid number.");
+        }
+
+        if (isBooleanTarget && !isStringTarget)
+        {
+            if (value is bool)
+            {
+                return value;
+            }
+            if (value is int i && (i == 0 || i == 1))
+            {
+                return i == 1;
+            }
+            if (value is long l && (l == 0 || l == 1))
+            {
+                return l == 1;
+            }
+            var rawName = paramName.EndsWith("[]", StringComparison.Ordinal) ? paramName[..^2] : paramName;
+            throw new ArgumentException($"Element '{value}' of parameter '{rawName}' is not a valid boolean.");
+        }
+
+        return value;
     }
 
     private static object? CoerceParameterValue(string paramName, object value, JsonElement? schema, ToolMapping? mapping = null)
@@ -929,6 +1270,9 @@ public partial class LenientToolDispatcher
 
         // 2. Boolean coercion (schema or heuristic)
         bool isBooleanTarget = schema.HasValue && SchemaTypeMatches(schema.Value, "boolean");
+        bool isIntegerTarget = schema.HasValue && SchemaTypeMatches(schema.Value, "integer");
+        bool isNumberTarget = schema.HasValue && SchemaTypeMatches(schema.Value, "number");
+        bool allowsString = schema.HasValue && SchemaTypeMatches(schema.Value, "string");
 
         if (isBooleanTarget || (!schema.HasValue && IsBooleanParameterName(paramName)))
         {
@@ -940,12 +1284,16 @@ public partial class LenientToolDispatcher
             {
                 return false;
             }
+            if (isBooleanTarget && !allowsString)
+            {
+                var displayName = paramName.EndsWith("[]", StringComparison.Ordinal)
+                    ? $"Element '{strVal}' of parameter '{paramName.Substring(0, paramName.Length - 2)}'"
+                    : $"Parameter '{paramName}' with value '{strVal}'";
+                throw new ArgumentException($"{displayName} is not a valid boolean.");
+            }
         }
 
         // 3. Number coercion (schema or heuristic)
-        bool isIntegerTarget = schema.HasValue && SchemaTypeMatches(schema.Value, "integer");
-        bool isNumberTarget = schema.HasValue && SchemaTypeMatches(schema.Value, "number");
-
         if (isIntegerTarget || (!schema.HasValue && IsNumericParameterName(paramName)))
         {
             var intCandidate = isIntegerTarget && trimmed.StartsWith('#') ? trimmed[1..].Trim() : trimmed;
@@ -957,6 +1305,13 @@ public partial class LenientToolDispatcher
                 }
                 return longVal;
             }
+            if (isIntegerTarget && !allowsString)
+            {
+                var displayName = paramName.EndsWith("[]", StringComparison.Ordinal)
+                    ? $"Element '{strVal}' of parameter '{paramName.Substring(0, paramName.Length - 2)}'"
+                    : $"Parameter '{paramName}' with value '{strVal}'";
+                throw new ArgumentException($"{displayName} is not a valid integer.");
+            }
         }
 
         if (isNumberTarget || (!schema.HasValue && IsNumericParameterName(paramName)))
@@ -964,6 +1319,13 @@ public partial class LenientToolDispatcher
             if (double.TryParse(trimmed, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var dblVal))
             {
                 return dblVal;
+            }
+            if (isNumberTarget && !allowsString)
+            {
+                var displayName = paramName.EndsWith("[]", StringComparison.Ordinal)
+                    ? $"Element '{strVal}' of parameter '{paramName.Substring(0, paramName.Length - 2)}'"
+                    : $"Parameter '{paramName}' with value '{strVal}'";
+                throw new ArgumentException($"{displayName} is not a valid number.");
             }
         }
 
@@ -1001,12 +1363,12 @@ public partial class LenientToolDispatcher
                         {
                             return lv >= int.MinValue && lv <= int.MaxValue ? (object)(int)lv : lv;
                         }
-                        return (object)p;
+                        throw new ArgumentException($"Element '{p}' of parameter '{paramName}' is not a valid integer.");
                     }).ToArray();
                 }
                 if (itemType.ValueEquals("number"))
                 {
-                    return parts.Select(p => double.TryParse(p, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var dv) ? (object)dv : p).ToArray();
+                    return parts.Select(p => double.TryParse(p, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var dv) ? (object)dv : throw new ArgumentException($"Element '{p}' of parameter '{paramName}' is not a valid number.")).ToArray();
                 }
             }
 
@@ -1140,7 +1502,7 @@ public partial class LenientToolDispatcher
                 var normalizedItem = NormalizeValueDeep(effectiveItem, itemsSchema, mapping, paramPath + "[]", rootSchema);
                 if (_options.EnableParameterCoercion && isScalarItemSchema && normalizedItem != null)
                 {
-                    normalizedItem = CoerceParameterValue(paramPath + "[]", normalizedItem, resolvedItemSchema, mapping);
+                    normalizedItem = CoerceScalarArrayItem(paramPath + "[]", normalizedItem, resolvedItemSchema!.Value, mapping);
                 }
                 normalizedList.Add(normalizedItem);
             }
@@ -1199,7 +1561,7 @@ public partial class LenientToolDispatcher
 
         if (dict != null)
         {
-            var normalizedDict = new Dictionary<string, object?>(StringComparer.Ordinal);
+            var normalizedDict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
             var expectedProperties = new Dictionary<string, (string CanonicalName, JsonElement Schema)>(StringComparer.OrdinalIgnoreCase);
 
             if (resolvedSchema.HasValue && resolvedSchema.Value.ValueKind == JsonValueKind.Object &&
@@ -1255,9 +1617,16 @@ public partial class LenientToolDispatcher
                     propSchema = strippedEntry.Schema;
                 }
 
+                var effectiveRawVal = rawVal;
+                var isExplicitNull = effectiveRawVal == null || (effectiveRawVal is JsonElement jsonEl && jsonEl.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined);
+                if (isExplicitNull && mapping != null && mapping.ShouldCoerceNullToEmptyString(paramPath, canonicalKey))
+                {
+                    effectiveRawVal = string.Empty;
+                }
+
                 if (normalizedDict.TryGetValue(canonicalKey, out var existingNestedVal) &&
                     !IsNullOrUndefined(existingNestedVal) &&
-                    IsNullOrUndefined(rawVal))
+                    IsNullOrUndefined(effectiveRawVal))
                 {
                     continue;
                 }
@@ -1275,7 +1644,7 @@ public partial class LenientToolDispatcher
                     }
                 }
 
-                var normalizedSubVal = NormalizeValueDeep(rawVal, propSchema, mapping, paramPath + "." + canonicalKey, rootSchema);
+                var normalizedSubVal = NormalizeValueDeep(effectiveRawVal, propSchema, mapping, paramPath + "." + canonicalKey, rootSchema);
                 if (_options.EnableParameterCoercion && normalizedSubVal is string && propSchema.HasValue)
                 {
                     var resolvedPropSchema = rootSchema.HasValue ? ResolveSchema(propSchema.Value, rootSchema.Value) : propSchema.Value;
@@ -1417,14 +1786,53 @@ public partial class LenientToolDispatcher
             topLevelParams.Remove(canonicalParamName);
             topLevelParams.Remove(propKey);
 
+            HashSet<string>? explicitPromoted = null;
+            if (mapping?.PromotedCollectionParameters != null)
+            {
+                if (mapping.PromotedCollectionParameters.TryGetValue(canonicalParamName, out var p1))
+                {
+                    explicitPromoted = p1;
+                }
+                else if (mapping.PromotedCollectionParameters.TryGetValue(canonicalParamName + "[]", out var p2))
+                {
+                    explicitPromoted = p2;
+                }
+            }
+
+            HashSet<string>? requiredProps = null;
+            if (rootSchema.HasValue && rootSchema.Value.TryGetProperty("required", out var reqEl) && reqEl.ValueKind == JsonValueKind.Array)
+            {
+                requiredProps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var r in reqEl.EnumerateArray())
+                {
+                    var rStr = r.GetString();
+                    if (!string.IsNullOrEmpty(rStr))
+                    {
+                        requiredProps.Add(rStr);
+                    }
+                }
+            }
+
             var extractedItem = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
             var matchedRootKeys = new List<string>();
 
             foreach (var (argKey, argVal) in canonicalArgs)
             {
-                if (topLevelParams.Contains(argKey))
+                bool isExplicitPromoted = explicitPromoted != null && explicitPromoted.Contains(argKey);
+                bool isRequiredTopLevel = requiredProps != null && requiredProps.Contains(argKey);
+
+                if (!isExplicitPromoted)
                 {
-                    continue;
+                    if (topLevelParams.Contains(argKey))
+                    {
+                        // If it's a top-level schema parameter, only allow promotion if:
+                        // - it's NOT a required top-level parameter
+                        // - AND it matches an item property name/alias
+                        if (isRequiredTopLevel || !itemPropNames.Contains(argKey))
+                        {
+                            continue;
+                        }
+                    }
                 }
 
                 if (itemPropNames.Contains(argKey) && argVal != null)
@@ -1805,7 +2213,7 @@ public partial class LenientToolDispatcher
         return null;
     }
 
-    private static bool IsNullOrUndefined(object? value)
+    internal static bool IsNullOrUndefined(object? value)
     {
         if (value == null) return true;
         if (value is JsonElement je)
@@ -1813,6 +2221,143 @@ public partial class LenientToolDispatcher
             return je.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined;
         }
         return false;
+    }
+
+    internal static bool IsBlankCollection(object? value)
+    {
+        if (value == null) return true;
+        if (value is JsonElement je)
+        {
+            if (je.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in je.EnumerateArray())
+                {
+                    if (!IsBlankCollectionElement(item)) return false;
+                }
+                return true;
+            }
+            return IsBlankCollectionElement(je);
+        }
+        if (value is System.Collections.IEnumerable enumerable and not string and not IDictionary<string, object?> and not System.Collections.IDictionary)
+        {
+            foreach (var item in enumerable)
+            {
+                if (!IsBlankCollectionElement(item))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private void ApplyRangeToLimitRules(AIFunctionArguments canonicalArgs, IDictionary<string, object?> rawArgs, ToolMapping mapping)
+    {
+        foreach (var rule in mapping.RangeToLimitRules)
+        {
+            bool hasLimit = canonicalArgs.TryGetValue(rule.CountParameter, out var existingLimit) &&
+                            !IsNullOrUndefined(existingLimit);
+
+            string? matchedEndKey = null;
+            int? endLine = null;
+
+            foreach (var alias in rule.EndParameterAliases)
+            {
+                if (canonicalArgs.TryGetValue(alias, out var val) && !IsNullOrUndefined(val))
+                {
+                    if (ToolParameterComputationContext.TryParseInt(val, out var parsed))
+                    {
+                        endLine = parsed;
+                        matchedEndKey = alias;
+                        break;
+                    }
+                }
+                else if (TryGetValueCaseInsensitive(canonicalArgs, alias, out var ciVal, out var ciKey) && !IsNullOrUndefined(ciVal))
+                {
+                    if (ToolParameterComputationContext.TryParseInt(ciVal, out var parsed))
+                    {
+                        endLine = parsed;
+                        matchedEndKey = ciKey ?? alias;
+                        break;
+                    }
+                }
+                else if (TryGetValueCaseInsensitive(rawArgs, alias, out var rawVal, out var rawKey) && !IsNullOrUndefined(rawVal))
+                {
+                    if (ToolParameterComputationContext.TryParseInt(rawVal, out var parsed))
+                    {
+                        endLine = parsed;
+                        matchedEndKey = rawKey ?? alias;
+                        break;
+                    }
+                }
+            }
+
+            if (endLine.HasValue)
+            {
+                if (!hasLimit)
+                {
+                    int startLine = rule.DefaultStart;
+                    if (canonicalArgs.TryGetValue(rule.StartParameter, out var startVal) && !IsNullOrUndefined(startVal))
+                    {
+                        if (ToolParameterComputationContext.TryParseInt(startVal, out var parsedStart))
+                        {
+                            startLine = parsedStart;
+                        }
+                    }
+                    else if (TryGetValueCaseInsensitive(canonicalArgs, rule.StartParameter, out var ciStart) && !IsNullOrUndefined(ciStart))
+                    {
+                        if (ToolParameterComputationContext.TryParseInt(ciStart, out var parsedStart))
+                        {
+                            startLine = parsedStart;
+                        }
+                    }
+                    else if (TryGetValueCaseInsensitive(rawArgs, rule.StartParameter, out var rawStart) && !IsNullOrUndefined(rawStart))
+                    {
+                        if (ToolParameterComputationContext.TryParseInt(rawStart, out var parsedStart))
+                        {
+                            startLine = parsedStart;
+                        }
+                    }
+
+                    int limit = Math.Max(1, endLine.Value - startLine + (rule.Inclusive ? 1 : 0));
+                    canonicalArgs[rule.CountParameter] = limit;
+
+                    if (!canonicalArgs.ContainsKey(rule.StartParameter) || IsNullOrUndefined(canonicalArgs[rule.StartParameter]))
+                    {
+                        canonicalArgs[rule.StartParameter] = startLine;
+                    }
+
+                    Telemetry?.Record(LenientDispatchEventType.ParameterAliasResolved, matchedEndKey ?? "<end_line>", rule.CountParameter, SessionId);
+                }
+
+                if (matchedEndKey != null)
+                {
+                    canonicalArgs.Remove(matchedEndKey);
+                }
+                foreach (var alias in rule.EndParameterAliases)
+                {
+                    canonicalArgs.Remove(alias);
+                    if (TryGetValueCaseInsensitive(canonicalArgs, alias, out _, out var ciAliasKey) && ciAliasKey != null)
+                    {
+                        canonicalArgs.Remove(ciAliasKey);
+                    }
+                }
+            }
+        }
+    }
+
+    private static HashSet<string> ExtractTemplatePlaceholders(string template)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrEmpty(template))
+        {
+            foreach (Match m in TemplatePlaceholderRegex().Matches(template))
+            {
+                set.Add(m.Groups[1].Value);
+            }
+        }
+        return set;
     }
 
     private static bool IsBlankCollectionElement(object? item)
