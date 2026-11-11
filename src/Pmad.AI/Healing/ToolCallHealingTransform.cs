@@ -239,6 +239,7 @@ public static partial class ToolCallHealingTransform
                         var generatedId = $"call_{Guid.NewGuid():N}"[..12];
                         tcObj["id"] = generatedId;
                         logger?.LogInformation("Injected missing tool call ID '{ToolCallId}' for tool '{ToolName}'", generatedId, toolName);
+                        options?.Telemetry?.Record(ToolCallHealingEventType.CallIdGenerated, toolName, options.SessionId);
                     }
 
                     if (string.IsNullOrWhiteSpace(tcObj["type"]?.GetValue<string>()))
@@ -251,13 +252,21 @@ public static partial class ToolCallHealingTransform
                     {
                         if (funcObj["arguments"] is JsonValue jVal && jVal.TryGetValue<string>(out var strArgVal))
                         {
-                            var cleanedArgs = SanitizeArgumentsJson(strArgVal, logger, toolName);
+                            var cleanedArgs = SanitizeArgumentsJson(strArgVal, logger, toolName, options);
+                            if (!IsValidJson(cleanedArgs))
+                            {
+                                var recovered = ParseArgumentsJson(cleanedArgs, logger, toolName, options);
+                                if (recovered.Count > 0)
+                                {
+                                    cleanedArgs = SerializeArgumentsToJson(recovered);
+                                }
+                            }
                             funcObj["arguments"] = cleanedArgs;
                         }
                         else
                         {
                             var rawArgs = funcObj["arguments"]!.ToJsonString();
-                            var cleanedArgs = SanitizeArgumentsJson(rawArgs, logger, toolName);
+                            var cleanedArgs = SanitizeArgumentsJson(rawArgs, logger, toolName, options);
                             if (cleanedArgs != rawArgs)
                             {
                                 try
@@ -526,7 +535,19 @@ public static partial class ToolCallHealingTransform
         }
         catch (Exception ex)
         {
-            logger?.LogWarning(ex, "Failed to parse sanitized JSON arguments for tool '{ToolName}'", toolName ?? "unknown");
+            if (sanitized.StartsWith('[') && JsonRepairUtilities.ExtractBalancedJsonElements(sanitized).Count > 0)
+            {
+                dict[RootArraySentinelKey] = sanitized;
+                options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Corrupted array container");
+            }
+            else if (sanitized.StartsWith('{') && JsonRepairUtilities.TryExtractTopLevelPropertiesFromCorruptedObject(sanitized, dict))
+            {
+                options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Corrupted object container");
+            }
+            else
+            {
+                logger?.LogWarning(ex, "Failed to parse sanitized JSON arguments for tool '{ToolName}'", toolName ?? "unknown");
+            }
         }
         return dict;
     }
@@ -569,14 +590,8 @@ public static partial class ToolCallHealingTransform
         try
         {
             var sanitizedPayload = SanitizeJson(balancedJson, logger);
-            var payloadNode = JsonNode.Parse(sanitizedPayload);
-            var toolName = payloadNode?["name"]?.GetValue<string>();
-            var argsNode = payloadNode?["arguments"] ?? payloadNode?["parameters"];
-            var toolArgs = argsNode is JsonValue argVal && argVal.TryGetValue<string>(out var strArg)
-                ? strArg
-                : argsNode?.ToJsonString() ?? "{}";
-
-            if (!string.IsNullOrEmpty(toolName))
+            if (TryExtractToolCallEnvelopeFields(sanitizedPayload, out var toolName, out var rawArgsJson, out var fallbackArgsDict, out var wasCorruptedEnvelope) &&
+                !string.IsNullOrEmpty(toolName))
             {
                 if (!ShouldPromoteToolCall(toolName, options, chatOptions))
                 {
@@ -585,7 +600,7 @@ public static partial class ToolCallHealingTransform
                 }
 
                 var generatedId = $"call_{Guid.NewGuid():N}"[..12];
-                var parsedArgs = ParseArgumentsJson(toolArgs, logger, toolName, options);
+                var parsedArgs = ResolveEnvelopeArguments(toolName, rawArgsJson, fallbackArgsDict, wasCorruptedEnvelope, logger, options);
                 toolCall = new FunctionCallContent(generatedId, toolName, parsedArgs);
 
                 proseBefore = content[..match.Index].Trim();
@@ -657,14 +672,8 @@ public static partial class ToolCallHealingTransform
                 try
                 {
                     var sanitizedPayload = SanitizeJson(match.Groups["payload"].Value, logger);
-                    var payloadNode = JsonNode.Parse(sanitizedPayload);
-                    var toolName = payloadNode?["name"]?.GetValue<string>();
-                    var argsNode = payloadNode?["arguments"] ?? payloadNode?["parameters"];
-                    var toolArgs = argsNode is JsonValue argVal && argVal.TryGetValue<string>(out var strArg)
-                        ? strArg
-                        : argsNode?.ToJsonString() ?? "{}";
-
-                    if (!string.IsNullOrEmpty(toolName))
+                    if (TryExtractToolCallEnvelopeFields(sanitizedPayload, out var toolName, out var rawArgsJson, out var fallbackArgsDict, out var wasCorruptedEnvelope) &&
+                        !string.IsNullOrEmpty(toolName))
                     {
                         if (!ShouldPromoteToolCall(toolName, options, chatOptions))
                         {
@@ -673,7 +682,7 @@ public static partial class ToolCallHealingTransform
                         }
 
                         var generatedId = $"call_{Guid.NewGuid():N}"[..12];
-                        var parsedArgs = ParseArgumentsJson(toolArgs, logger, toolName, options);
+                        var parsedArgs = ResolveEnvelopeArguments(toolName, rawArgsJson, fallbackArgsDict, wasCorruptedEnvelope, logger, options);
                         toolCalls.Add(new FunctionCallContent(generatedId, toolName, parsedArgs));
                         promotedMatches.Add(match);
                         logger?.LogInformation("Extracted pseudo-tool-call from text for '{ToolName}' (id: {ToolCallId})", toolName, generatedId);
@@ -866,30 +875,7 @@ public static partial class ToolCallHealingTransform
         {
             if (message.Contents[i] is FunctionCallContent fcc)
             {
-                var isCallIdGenerated = string.IsNullOrWhiteSpace(fcc.CallId);
-                var callId = isCallIdGenerated ? $"call_{Guid.NewGuid():N}"[..12] : fcc.CallId;
-                if (isCallIdGenerated)
-                {
-                    options?.Telemetry?.Record(ToolCallHealingEventType.CallIdGenerated, fcc.Name, options.SessionId);
-                }
-
-                var arguments = fcc.Arguments;
-
-                // If arguments contains a single "input" property with a string that looks like JSON
-                if (arguments is { Count: 1 } && arguments.TryGetValue("input", out var inputVal) && inputVal is string strInput && (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith('[') || strInput.TrimStart().StartsWith("```")))
-                {
-                    var parsed = ParseArgumentsJson(strInput, logger, fcc.Name, options);
-                    if (parsed.Count > 0)
-                    {
-                        arguments = parsed;
-                        options?.Telemetry?.Record(ToolCallHealingEventType.ArgumentUnwrapped, fcc.Name, options.SessionId);
-                    }
-                }
-
-                if (callId != fcc.CallId || !ReferenceEquals(arguments, fcc.Arguments))
-                {
-                    message.Contents[i] = new FunctionCallContent(callId, fcc.Name, arguments);
-                }
+                message.Contents[i] = SanitizeFunctionCallContent(fcc, logger, options);
             }
         }
 
@@ -1038,6 +1024,42 @@ public static partial class ToolCallHealingTransform
     public static ChatResponse HealChatResponse(ChatResponse response, ILogger? logger)
         => HealChatResponse(response, logger, null, null);
 
+    internal static FunctionCallContent SanitizeFunctionCallContent(
+        FunctionCallContent fcc,
+        ILogger? logger,
+        ToolCallHealingOptions? options)
+    {
+        var isCallIdGenerated = string.IsNullOrWhiteSpace(fcc.CallId);
+        var callId = isCallIdGenerated ? $"call_{Guid.NewGuid():N}"[..12] : fcc.CallId;
+        if (isCallIdGenerated)
+        {
+            options?.Telemetry?.Record(ToolCallHealingEventType.CallIdGenerated, fcc.Name, options.SessionId);
+        }
+
+        var arguments = fcc.Arguments;
+
+        // If arguments contains a single "input" property with a string that looks like JSON
+        if (arguments is { Count: 1 } &&
+            arguments.TryGetValue("input", out var inputVal) &&
+            inputVal is string strInput &&
+            (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith('[') || strInput.TrimStart().StartsWith("```")))
+        {
+            var parsed = ParseArgumentsJson(strInput, logger, fcc.Name, options);
+            if (parsed.Count > 0)
+            {
+                arguments = parsed;
+                options?.Telemetry?.Record(ToolCallHealingEventType.ArgumentUnwrapped, fcc.Name, options.SessionId);
+            }
+        }
+
+        if (callId != fcc.CallId || !ReferenceEquals(arguments, fcc.Arguments))
+        {
+            return new FunctionCallContent(callId, fcc.Name, arguments);
+        }
+
+        return fcc;
+    }
+
     internal static object? UnwrapJsonElement(JsonElement element)
     {
         if (element.ValueKind == JsonValueKind.Number)
@@ -1108,5 +1130,103 @@ public static partial class ToolCallHealingTransform
             return ja;
         }
         return JsonValue.Create(value.ToString());
+    }
+
+    private static bool IsValidJson(string json)
+    {
+        try
+        {
+            using var _ = JsonDocument.Parse(json);
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryExtractToolCallEnvelopeFields(
+        string sanitizedPayload,
+        out string? toolName,
+        out string? rawArgsJson,
+        out IDictionary<string, object?>? fallbackArgsDict,
+        out bool wasCorruptedEnvelope)
+    {
+        toolName = null;
+        rawArgsJson = null;
+        fallbackArgsDict = null;
+        wasCorruptedEnvelope = false;
+
+        try
+        {
+            var payloadNode = JsonNode.Parse(sanitizedPayload);
+            toolName = payloadNode?["name"]?.GetValue<string>();
+            var argsNode = payloadNode?["arguments"] ?? payloadNode?["parameters"];
+            rawArgsJson = argsNode is JsonValue argVal && argVal.TryGetValue<string>(out var strArg)
+                ? strArg
+                : argsNode?.ToJsonString() ?? "{}";
+            return !string.IsNullOrEmpty(toolName);
+        }
+        catch (JsonException)
+        {
+            var envelopeDict = new Dictionary<string, object?>(StringComparer.Ordinal);
+            if (!JsonRepairUtilities.TryExtractTopLevelPropertiesFromCorruptedObject(sanitizedPayload, envelopeDict))
+            {
+                return false;
+            }
+
+            if (!envelopeDict.TryGetValue("name", out var nameObj) || nameObj is not string recoveredName || string.IsNullOrEmpty(recoveredName))
+            {
+                return false;
+            }
+
+            toolName = recoveredName;
+            wasCorruptedEnvelope = true;
+
+            if (envelopeDict.TryGetValue("arguments", out var argsObj) || envelopeDict.TryGetValue("parameters", out argsObj))
+            {
+                if (argsObj is IDictionary<string, object?> argsDict)
+                {
+                    fallbackArgsDict = argsDict;
+                }
+                else if (argsObj is string argsStr)
+                {
+                    rawArgsJson = argsStr;
+                }
+                else
+                {
+                    fallbackArgsDict = new Dictionary<string, object?>();
+                }
+            }
+            else
+            {
+                fallbackArgsDict = new Dictionary<string, object?>();
+            }
+
+            return true;
+        }
+    }
+
+    private static IDictionary<string, object?> ResolveEnvelopeArguments(
+        string toolName,
+        string? rawArgsJson,
+        IDictionary<string, object?>? fallbackArgsDict,
+        bool wasCorruptedEnvelope,
+        ILogger? logger,
+        ToolCallHealingOptions? options)
+    {
+        if (fallbackArgsDict != null)
+        {
+            logger?.LogInformation("Recovered arguments dictionary from corrupted tool call envelope for '{ToolName}'.", toolName);
+            options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId);
+            return fallbackArgsDict;
+        }
+
+        if (wasCorruptedEnvelope)
+        {
+            options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId);
+        }
+
+        return ParseArgumentsJson(rawArgsJson ?? "{}", logger, toolName, options);
     }
 }

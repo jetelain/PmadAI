@@ -581,4 +581,141 @@ public class ToolCallHealingChatClientTests
         Assert.NotNull(call.Arguments);
         Assert.True(call.Arguments.ContainsKey("pattern"));
     }
+
+    [Theory]
+    [InlineData(StreamingHealingMode.FullBuffer)]
+    [InlineData(StreamingHealingMode.PrefixTriggered)]
+    public async Task GetStreamingResponseAsync_ExistingFunctionCallWithWrappedCorruptedInput_SanitizesAndRecordsOptionsTelemetry(StreamingHealingMode mode)
+    {
+        static async IAsyncEnumerable<ChatResponseUpdate> GenerateUpdates()
+        {
+            var wrappedArgs = new Dictionary<string, object?>
+            {
+                ["input"] = "```json\n{\"edits\": [{\"oldText\": \"a\", \"newText\": \"b\"}, \"rogue\": null], \"path\": \"Main.cs\"}\n```"
+            };
+            var update = new ChatResponseUpdate { Role = ChatRole.Assistant, FinishReason = ChatFinishReason.ToolCalls };
+            update.Contents.Add(new FunctionCallContent("", "edit_file", wrappedArgs));
+            yield return update;
+            await Task.CompletedTask;
+        }
+
+        var telemetry = new ToolCallHealingTelemetry();
+        var innerClient = new FakeChatClient(getStreamingResponse: (_, _, _) => GenerateUpdates());
+        var client = new ToolCallHealingChatClient(innerClient, new ToolCallHealingOptions
+        {
+            StreamingMode = mode,
+            Telemetry = telemetry,
+            SessionId = "default-session"
+        });
+
+        Assert.Same(telemetry, client.GetService(typeof(ToolCallHealingTelemetry)));
+
+        var chatOptions = new ChatOptions { ConversationId = "conv-override" };
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var update in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "edit")], chatOptions))
+        {
+            updates.Add(update);
+        }
+
+        var fcc = Assert.Single(updates.SelectMany(u => u.Contents).OfType<FunctionCallContent>());
+        Assert.StartsWith("call_", fcc.CallId);
+        Assert.Equal("Main.cs", fcc.Arguments?["path"]);
+        Assert.True(fcc.Arguments?.ContainsKey("edits"));
+
+        // Effective ToolCallHealingOptions uses ChatOptions.ConversationId and records all four healing events
+        Assert.Equal(0, telemetry.CreateSnapshot("default-session").TotalInterventions);
+        var snap = telemetry.CreateSnapshot("conv-override");
+        Assert.Equal(1, snap.CallIdsGenerated);
+        Assert.Equal(1, snap.ArgumentsUnwrapped);
+        Assert.Equal(1, snap.FencesStripped);
+        Assert.Equal(1, snap.JsonRepairs);
+    }
+
+    [Theory]
+    [InlineData(StreamingHealingMode.FullBuffer)]
+    [InlineData(StreamingHealingMode.PrefixTriggered)]
+    public async Task GetStreamingResponseAsync_CorruptedInlineArrayPseudoTag_ExtractsAndRecordsOptionsTelemetry(StreamingHealingMode mode)
+    {
+        static async IAsyncEnumerable<ChatResponseUpdate> GenerateUpdates()
+        {
+            yield return new ChatResponseUpdate { Role = ChatRole.Assistant, Contents = { new TextContent("Patching file: <tool") } };
+            yield return new ChatResponseUpdate { Role = ChatRole.Assistant, Contents = { new TextContent("_call>{\"name\": \"edit_file\", \"arguments\": {\"edits\": [{\"oldText\": \"x\", \"newText\": \"y\"}, \"rogue\": null], \"path\": \"File.cs\"}}</tool_call>") } };
+        }
+
+        var telemetry = new ToolCallHealingTelemetry();
+        var innerClient = new FakeChatClient(getStreamingResponse: (_, _, _) => GenerateUpdates());
+        var client = new ToolCallHealingChatClient(innerClient, new ToolCallHealingOptions
+        {
+            StreamingMode = mode,
+            Telemetry = telemetry,
+            SessionId = "stream-session",
+            EnforceAvailableToolsGuardrail = false
+        });
+
+        var chatOptions = new ChatOptions
+        {
+            Tools = [AIFunctionFactory.Create(() => "ok", "other_tool")]
+        };
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var update in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "patch")], chatOptions))
+        {
+            updates.Add(update);
+        }
+
+        var fcc = Assert.Single(updates.SelectMany(u => u.Contents).OfType<FunctionCallContent>());
+        Assert.Equal("edit_file", fcc.Name);
+        Assert.Equal("File.cs", fcc.Arguments?["path"]);
+        Assert.True(fcc.Arguments?.ContainsKey("edits"));
+
+        var snap = telemetry.CreateSnapshot("stream-session");
+        Assert.Equal(1, snap.PseudoTagsExtracted);
+        Assert.Equal(1, snap.JsonRepairs);
+    }
+
+    [Fact]
+    public async Task GetStreamingResponseAsync_PrefixTriggered_SanitizesFunctionCallArrivingWhileBufferingTag()
+    {
+        static async IAsyncEnumerable<ChatResponseUpdate> GenerateUpdates()
+        {
+            yield return new ChatResponseUpdate { Role = ChatRole.Assistant, Contents = { new TextContent("<tool_call>{\"name\": \"read_file\"") } };
+
+            var midStreamCallUpdate = new ChatResponseUpdate { Role = ChatRole.Assistant };
+            midStreamCallUpdate.Contents.Add(new FunctionCallContent("", "other_call", new Dictionary<string, object?>
+            {
+                ["input"] = "{\"path\": \"side.cs\"}"
+            }));
+            yield return midStreamCallUpdate;
+
+            yield return new ChatResponseUpdate { Role = ChatRole.Assistant, Contents = { new TextContent(", \"arguments\": {\"path\": \"main.cs\"}}</tool_call>") } };
+            await Task.CompletedTask;
+        }
+
+        var telemetry = new ToolCallHealingTelemetry();
+        var innerClient = new FakeChatClient(getStreamingResponse: (_, _, _) => GenerateUpdates());
+        var client = new ToolCallHealingChatClient(innerClient, new ToolCallHealingOptions
+        {
+            StreamingMode = StreamingHealingMode.PrefixTriggered,
+            Telemetry = telemetry,
+            SessionId = "mid-buffer-session"
+        });
+
+        var calls = new List<FunctionCallContent>();
+        await foreach (var update in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "go")]))
+        {
+            calls.AddRange(update.Contents.OfType<FunctionCallContent>());
+        }
+
+        Assert.Equal(2, calls.Count);
+        Assert.Equal("other_call", calls[0].Name);
+        Assert.StartsWith("call_", calls[0].CallId);
+        Assert.Equal("side.cs", calls[0].Arguments?["path"]);
+        Assert.Equal("read_file", calls[1].Name);
+        Assert.Equal("main.cs", calls[1].Arguments?["path"]);
+
+        var snap = telemetry.CreateSnapshot("mid-buffer-session");
+        Assert.Equal(1, snap.CallIdsGenerated);
+        Assert.Equal(1, snap.ArgumentsUnwrapped);
+        Assert.Equal(1, snap.PseudoTagsExtracted);
+    }
 }

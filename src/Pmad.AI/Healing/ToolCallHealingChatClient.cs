@@ -197,18 +197,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
         {
             if (allContents[i] is FunctionCallContent fcc)
             {
-                var callId = string.IsNullOrWhiteSpace(fcc.CallId) ? $"call_{Guid.NewGuid():N}"[..12] : fcc.CallId;
-                var arguments = fcc.Arguments;
-                if (arguments is { Count: 1 } && arguments.TryGetValue("input", out var inputVal) && inputVal is string strInput &&
-                    (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith('[') || strInput.TrimStart().StartsWith("```")))
-                {
-                    var parsed = ToolCallHealingTransform.ParseArgumentsJson(strInput, optionsToUse.Logger, fcc.Name);
-                    if (parsed.Count > 0)
-                    {
-                        arguments = parsed;
-                    }
-                }
-                allContents[i] = new FunctionCallContent(callId, fcc.Name, arguments);
+                allContents[i] = ToolCallHealingTransform.SanitizeFunctionCallContent(fcc, optionsToUse.Logger, optionsToUse);
             }
         }
 
@@ -321,7 +310,9 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                     };
                     foreach (var c in otherContents)
                     {
-                        otherUpdate.Contents.Add(c);
+                        otherUpdate.Contents.Add(c is FunctionCallContent fcc
+                            ? ToolCallHealingTransform.SanitizeFunctionCallContent(fcc, _logger, _options)
+                            : c);
                     }
                     output.Add(otherUpdate);
                 }
@@ -386,7 +377,21 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                         _heldPrefix = string.Empty;
                     }
 
-                    output.Add(update);
+                    var sanitizedUpdate = new ChatResponseUpdate
+                    {
+                        Role = update.Role,
+                        FinishReason = update.FinishReason,
+                        ResponseId = update.ResponseId,
+                        CreatedAt = update.CreatedAt,
+                        ModelId = update.ModelId
+                    };
+                    foreach (var c in otherContents)
+                    {
+                        sanitizedUpdate.Contents.Add(c is FunctionCallContent fcc
+                            ? ToolCallHealingTransform.SanitizeFunctionCallContent(fcc, _logger, _options)
+                            : c);
+                    }
+                    output.Add(sanitizedUpdate);
                 }
                 else
                 {
