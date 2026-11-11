@@ -590,6 +590,12 @@ public class ToolMapping
             return true;
         }
 
+        if (paramPath.EndsWith("[]", StringComparison.Ordinal) &&
+            FindNestedAlias("*[]", aliasOrKey, out canonicalName))
+        {
+            return true;
+        }
+
         if (FindNestedAlias("*", aliasOrKey, out canonicalName))
         {
             return true;

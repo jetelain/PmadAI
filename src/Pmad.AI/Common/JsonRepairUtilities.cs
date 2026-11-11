@@ -139,6 +139,7 @@ public static class JsonRepairUtilities
         bool escaped = false;
         bool pendingStringIsKey = false;
         bool inScalar = false;
+        bool sawContainer = false;
         int scalarStart = -1;
 
         int TopRole() => roles.Count > 0 ? roles.Peek() : -1;
@@ -163,11 +164,19 @@ public static class JsonRepairUtilities
                     if (pendingStringIsKey)
                     {
                         // The key is complete; the object now expects a ':' (stays R_KEY while the key string was open).
-                        roles.Pop(); roles.Push(R_COLON);
+                        if (roles.Count > 0)
+                        {
+                            roles.Pop();
+                            roles.Push(R_COLON);
+                        }
                     }
                     else
                     {
-                        roles.Pop(); roles.Push(R_AFTER);
+                        if (roles.Count > 0)
+                        {
+                            roles.Pop();
+                            roles.Push(R_AFTER);
+                        }
                         safeCut = i + 1;
                     }
                     pendingStringIsKey = false;
@@ -196,6 +205,12 @@ public static class JsonRepairUtilities
 
             if (c is ' ' or '\t' or '\r' or '\n') continue;
 
+            if (sawContainer && stack.Count == 0)
+            {
+                // Trailing tokens after a complete root container (e.g. `{"a": 1}, {"b": 2`): not a single truncated JSON value.
+                return null;
+            }
+
             switch (c)
             {
                 case '"':
@@ -203,10 +218,12 @@ public static class JsonRepairUtilities
                     pendingStringIsKey = TopRole() == R_KEY;
                     break;
                 case '{':
+                    sawContainer = true;
                     openCuts.Push(safeCut);
                     stack.Push('{'); roles.Push(R_KEY); safeCut = i + 1;
                     break;
                 case '[':
+                    sawContainer = true;
                     openCuts.Push(safeCut);
                     stack.Push('['); roles.Push(R_VALUE); safeCut = i + 1;
                     break;
@@ -214,19 +231,27 @@ public static class JsonRepairUtilities
                     if (TopRole() == R_COLON) { roles.Pop(); roles.Push(R_VALUE); }
                     break;
                 case ',':
-                    if (roles.Count > 0)
+                    if (stack.Count > 0 && roles.Count > 0)
                     {
                         roles.Pop();
                         roles.Push(stack.Peek() == '{' ? R_KEY : R_VALUE);
                     }
                     break;
                 case '}':
-                    if (stack.Count > 0 && stack.Peek() == '{') { stack.Pop(); roles.Pop(); openCuts.Pop(); }
+                    if (stack.Count == 0 || stack.Peek() != '{')
+                    {
+                        return null;
+                    }
+                    stack.Pop(); roles.Pop(); openCuts.Pop();
                     if (roles.Count > 0) { roles.Pop(); roles.Push(R_AFTER); }
                     safeCut = i + 1;
                     break;
                 case ']':
-                    if (stack.Count > 0 && stack.Peek() == '[') { stack.Pop(); roles.Pop(); openCuts.Pop(); }
+                    if (stack.Count == 0 || stack.Peek() != '[')
+                    {
+                        return null;
+                    }
+                    stack.Pop(); roles.Pop(); openCuts.Pop();
                     if (roles.Count > 0) { roles.Pop(); roles.Push(R_AFTER); }
                     safeCut = i + 1;
                     break;
@@ -549,7 +574,7 @@ public static class JsonRepairUtilities
         return null;
     }
 
-    private static readonly JsonDocumentOptions LenientDocumentOptions = new()
+    internal static readonly JsonDocumentOptions LenientDocumentOptions = new()
     {
         AllowTrailingCommas = true
     };
@@ -615,14 +640,16 @@ public static class JsonRepairUtilities
 
             // If an earlier element was missing its closing brace/bracket before the next element or had an extra closer,
             // attempt to repair the prefix up to the corruption boundary.
-            if (TryRepairElementBeforeNextSibling(text, nextOpen, containerEnd, openDelimiter, out var repairedSiblingBlock, out int nextSiblingIndex))
+            if (TryRepairElementBeforeNextSibling(text, nextOpen, containerEnd, openDelimiter, out var repairedSiblingBlock, out int nextSiblingIndex, out bool reachedBalancedEnd))
             {
                 elements.Add(repairedSiblingBlock);
                 currentIndex = nextSiblingIndex;
                 continue;
             }
 
-            currentIndex = nextOpen + 1;
+            currentIndex = reachedBalancedEnd && !isTruncated && consumedLength > 0
+                ? nextOpen + consumedLength
+                : nextOpen + 1;
         }
 
         return elements;
@@ -635,19 +662,8 @@ public static class JsonRepairUtilities
             return true;
         }
 
-        int i = firstBracket + 1;
-        while (i < text.Length && text[i] is ' ' or '\t' or '\r' or '\n')
-        {
-            i++;
-        }
-
-        if (i < text.Length && text[i] is '{' or '[' or ']')
-        {
-            return true;
-        }
-
-        // If the leading '[' starts a self-contained 1D array (e.g. "[1, 2], [3, 4]") followed by another '[' or '{' element,
-        // treat the leading '[' as the first element rather than an outer container.
+        // If the leading '[' starts a self-contained array (e.g. "[1, 2], [3, 4]" or "[[1]], [[2]]")
+        // followed by another '[' or '{' element, treat the leading '[' as the first element rather than an outer container.
         var firstBlock = ExtractBalancedJson(text, firstBracket, out int consumedLength, out bool isTruncated);
         if (!isTruncated && !string.IsNullOrEmpty(firstBlock) && consumedLength > 0)
         {
@@ -752,21 +768,29 @@ public static class JsonRepairUtilities
         int endIndex,
         char? openDelimiter,
         out string repairedBlock,
-        out int nextIndex)
+        out int nextIndex,
+        out bool reachedBalancedEnd)
     {
         repairedBlock = string.Empty;
         nextIndex = startIndex + 1;
+        reachedBalancedEnd = false;
 
-        if (startIndex < 0 || startIndex >= endIndex || text[startIndex] != '{')
+        if (startIndex < 0 || startIndex >= endIndex)
+        {
+            return false;
+        }
+
+        char startChar = text[startIndex];
+        if (startChar is not ('{' or '['))
         {
             return false;
         }
 
         var containerStack = new Stack<char>(8);
-        containerStack.Push('{');
+        containerStack.Push(startChar);
         bool inString = false;
         bool escaped = false;
-        char lastSigChar = '{';
+        char lastSigChar = startChar;
 
         for (int i = startIndex + 1; i < endIndex; i++)
         {
@@ -813,6 +837,10 @@ public static class JsonRepairUtilities
                 {
                     containerStack.Pop();
                     lastSigChar = ']';
+                    if (containerStack.Count == 0)
+                    {
+                        break;
+                    }
                     continue;
                 }
 
@@ -858,12 +886,13 @@ public static class JsonRepairUtilities
                     lastSigChar = '}';
                     if (containerStack.Count == 0)
                     {
+                        reachedBalancedEnd = startChar == '{';
                         break;
                     }
                     continue;
                 }
 
-                // Mismatched '}' while inside '[' (e.g. model wrote '["A", "B"}' instead of '["A", "B"]}').
+                // Mismatched '}' while inside '[' (e.g. model wrote '["A", "B"}' instead of '["A", "B"]}' or '[3, 4}]').
                 var slice = text.Substring(startIndex, i - startIndex);
                 var candidate = TryRepairTruncatedJson(slice);
                 if (!string.IsNullOrEmpty(candidate) && IsValidExtractedElement(candidate, openDelimiter, rejectEmptyContainer: true))
@@ -921,13 +950,22 @@ public static class JsonRepairUtilities
     /// are preserved as raw strings so downstream schema-aware normalization can recover valid elements.
     /// </summary>
     internal static bool TryExtractTopLevelPropertiesFromCorruptedObject(string json, IDictionary<string, object?> target)
+        => TryExtractTopLevelPropertiesFromCorruptedObject(json, 0, target, out _, depth: 0);
+
+    private static bool TryExtractTopLevelPropertiesFromCorruptedObject(
+        string json,
+        int searchFrom,
+        IDictionary<string, object?> target,
+        out int consumedEndIndex,
+        int depth)
     {
-        if (string.IsNullOrWhiteSpace(json))
+        consumedEndIndex = searchFrom;
+        if (depth > 8 || string.IsNullOrWhiteSpace(json) || searchFrom < 0 || searchFrom >= json.Length)
         {
             return false;
         }
 
-        int firstBrace = json.IndexOf('{');
+        int firstBrace = json.IndexOf('{', searchFrom);
         if (firstBrace < 0)
         {
             return false;
@@ -944,8 +982,15 @@ public static class JsonRepairUtilities
                 i++;
             }
 
-            if (i >= len || json[i] == '}')
+            if (i >= len)
             {
+                consumedEndIndex = len;
+                break;
+            }
+
+            if (json[i] == '}')
+            {
+                consumedEndIndex = i + 1;
                 break;
             }
 
@@ -984,39 +1029,34 @@ public static class JsonRepairUtilities
             char valChar = json[i];
             if (valChar == '"')
             {
-                if (!TryReadJsonString(json, i, out var strVal, out int afterStr))
+                if (TryReadJsonString(json, i, out var strVal, out int afterStr))
                 {
-                    break;
+                    target[propName] = strVal;
+                    extractedAny = true;
+                    i = afterStr;
+                    consumedEndIndex = i;
                 }
-                target[propName] = strVal;
-                extractedAny = true;
-                i = afterStr;
-            }
-            else if (valChar is '[' or '{')
-            {
-                int endPos;
-                string rawContainer;
-
-                if (valChar == '[')
+                else if (TryReadTruncatedTailJsonString(json, i, out var repairedStrVal))
                 {
-                    endPos = FindTopLevelArrayEnd(json, i);
-                    if (endPos <= i)
-                    {
-                        break;
-                    }
-                    rawContainer = json.Substring(i, endPos - i);
+                    target[propName] = repairedStrVal;
+                    extractedAny = true;
+                    i = len;
+                    consumedEndIndex = len;
                 }
                 else
                 {
-                    var extracted = ExtractBalancedJson(json, i, out int consumed, out _);
-                    if (string.IsNullOrEmpty(extracted) || consumed <= 0)
-                    {
-                        break;
-                    }
-                    endPos = i + consumed;
-                    rawContainer = extracted;
+                    break;
+                }
+            }
+            else if (valChar == '[')
+            {
+                int endPos = FindTopLevelArrayEnd(json, i);
+                if (endPos <= i)
+                {
+                    break;
                 }
 
+                var rawContainer = json.Substring(i, endPos - i);
                 try
                 {
                     using var doc = JsonDocument.Parse(rawContainer, LenientDocumentOptions);
@@ -1030,6 +1070,47 @@ public static class JsonRepairUtilities
 
                 extractedAny = true;
                 i = endPos;
+                consumedEndIndex = i;
+            }
+            else if (valChar == '{')
+            {
+                var extracted = ExtractBalancedJson(json, i, out int consumed, out bool isTruncated);
+                if (!isTruncated && !string.IsNullOrEmpty(extracted) && consumed > 0)
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(extracted, LenientDocumentOptions);
+                        target[propName] = ConvertJsonElementToClr(doc.RootElement);
+                        extractedAny = true;
+                        i += consumed;
+                        consumedEndIndex = i;
+                        continue;
+                    }
+                    catch (JsonException)
+                    {
+                        // Fall through to recursive corrupted-object extraction below.
+                    }
+                }
+
+                var nestedDict = new Dictionary<string, object?>(StringComparer.Ordinal);
+                if (TryExtractTopLevelPropertiesFromCorruptedObject(json, i, nestedDict, out int nestedEnd, depth + 1) && nestedEnd > i)
+                {
+                    target[propName] = nestedDict;
+                    extractedAny = true;
+                    i = nestedEnd;
+                    consumedEndIndex = i;
+                }
+                else if (!string.IsNullOrEmpty(extracted) && consumed > 0)
+                {
+                    target[propName] = extracted;
+                    extractedAny = true;
+                    i += consumed;
+                    consumedEndIndex = i;
+                }
+                else
+                {
+                    break;
+                }
             }
             else
             {
@@ -1044,15 +1125,75 @@ public static class JsonRepairUtilities
                     using var doc = JsonDocument.Parse(rawScalar);
                     target[propName] = ConvertJsonElementToClr(doc.RootElement);
                     extractedAny = true;
+                    consumedEndIndex = i;
                 }
                 catch (JsonException)
                 {
+                    if (i >= len && TryRepairPartialScalar(rawScalar.AsSpan(), out var repairedScalar))
+                    {
+                        try
+                        {
+                            using var doc = JsonDocument.Parse(repairedScalar);
+                            target[propName] = ConvertJsonElementToClr(doc.RootElement);
+                            extractedAny = true;
+                            consumedEndIndex = len;
+                            break;
+                        }
+                        catch (JsonException) { }
+                    }
                     break;
                 }
             }
         }
 
         return extractedAny;
+    }
+
+    private static bool TryReadTruncatedTailJsonString(string json, int startQuoteIndex, out string value)
+    {
+        value = string.Empty;
+
+        // Only treat as a truncated tail string if no unescaped closing quote exists before EOF.
+        bool escaped = false;
+        for (int i = startQuoteIndex + 1; i < json.Length; i++)
+        {
+            char c = json[i];
+            if (escaped)
+            {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+            if (c == '"')
+            {
+                return false;
+            }
+        }
+
+        var repaired = TryRepairTruncatedJson("[" + json.Substring(startQuoteIndex));
+        if (string.IsNullOrEmpty(repaired))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(repaired);
+            if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() == 1)
+            {
+                value = doc.RootElement[0].GetString() ?? string.Empty;
+                return true;
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return false;
     }
 
     private static int FindTopLevelArrayEnd(string json, int arrayStartIndex)
@@ -1152,6 +1293,13 @@ public static class JsonRepairUtilities
                     return i;
                 }
 
+                // If the model mistyped the array's closing ']' as '}' before subsequent top-level properties
+                // (e.g. `{"edits": [{"oldText": "a", "newText": "b"}}, "path": "Program.cs"}`), stop the array here.
+                if (lastSigChar is '}' or ']' && json[afterBrace] == ',' && IsValidRemainingObjectProperties(json, afterBrace))
+                {
+                    return i + 1;
+                }
+
                 // Otherwise it is a rogue '}' between array elements (e.g. `}, "options": null}, {`); skip it.
                 lastSigChar = '}';
                 continue;
@@ -1169,14 +1317,23 @@ public static class JsonRepairUtilities
                 // Either elementStack is empty (normal array close) or has an unclosed '{' (e.g. `]]` instead of `]}` or `{"a": 1]`).
                 // Look ahead to see if another '{' or '[' array element follows.
                 int probe = i + 1;
+                bool sawCommaOrBrace = false;
                 while (probe < len && json[probe] is ' ' or '\t' or '\r' or '\n' or ',' or ']' or '}')
                 {
                     if (json[probe] == ']')
                     {
-                        i = probe;
+                        if (!sawCommaOrBrace)
+                        {
+                            i = probe;
+                        }
+                    }
+                    else if (json[probe] == ',')
+                    {
+                        sawCommaOrBrace = true;
                     }
                     else if (json[probe] == '}')
                     {
+                        sawCommaOrBrace = true;
                         int afterBrace = probe + 1;
                         while (afterBrace < len && json[afterBrace] is ' ' or '\t' or '\r' or '\n')
                         {
@@ -1204,6 +1361,37 @@ public static class JsonRepairUtilities
         }
 
         return len;
+    }
+
+    private static bool IsValidRemainingObjectProperties(string json, int commaIndex)
+    {
+        int p = commaIndex + 1;
+        while (p < json.Length && json[p] is ' ' or '\t' or '\r' or '\n')
+        {
+            p++;
+        }
+
+        if (p >= json.Length || json[p] != '"')
+        {
+            return false;
+        }
+
+        var candidate = "{" + json.Substring(p);
+        var balanced = ExtractBalancedJson(candidate, 0, out _, out bool isTruncated);
+        if (isTruncated || string.IsNullOrEmpty(balanced))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(balanced, LenientDocumentOptions);
+            return doc.RootElement.ValueKind == JsonValueKind.Object;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private static bool TryReadJsonString(string json, int startQuoteIndex, out string value, out int nextIndex)

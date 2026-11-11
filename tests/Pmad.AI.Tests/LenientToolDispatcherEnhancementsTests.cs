@@ -8,8 +8,16 @@ namespace Pmad.AI.Tests;
 
 public class LenientToolDispatcherEnhancementsTests
 {
+    public enum TestPriority
+    {
+        Low,
+        Medium,
+        High
+    }
+
     public record TestEditItem(string OldText, string NewText, bool ReplaceAll = false);
     public record TestQuestionItem(string Prompt, string? Rationale = null, List<string>? Options = null);
+    public record TestTypedQuestionItem(string Prompt, int? Priority = null, bool? Optional = null, TestPriority? Level = null);
 
     [Fact]
     public void CustomToolMapping_ComputesLimitFromEndLineAndStartLine()
@@ -1475,6 +1483,324 @@ public class LenientToolDispatcherEnhancementsTests
         Assert.Equal(0, snap.StringifiedJsonRepaired);
         Assert.Equal(0, snap.ToolAliasesResolved);
         Assert.Equal(0, snap.ParameterAliasesResolved);
+    }
+
+    [Fact]
+    public async Task NormalizeCall_ResilientArrayExtraction_DoesNotInflateTelemetryCounts()
+    {
+        var telemetry = new LenientDispatchTelemetry();
+        var mapping = new ToolMapping();
+        mapping.AddNestedParameterAlias("edits[]", "newText", "replacement");
+
+        var config = new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["edit_items"] = mapping
+            }
+        };
+
+        var dispatcher = new LenientToolDispatcher(config, new LenientToolDispatcherOptions { Telemetry = telemetry });
+        var editTool = AIFunctionFactory.Create(
+            (string filePath, IReadOnlyList<TestEditItem> edits) =>
+                $"{filePath}:{edits.Count}:{edits[0].OldText}->{edits[0].NewText}({edits[0].ReplaceAll})",
+            "edit_items");
+        dispatcher.RegisterTool(editTool);
+
+        // Corrupted array passed alongside a propagated root parameter:
+        // Previously PromoteFlattenedParametersToArrays + PropagateUnmappedParametersToCollections + NormalizeValueDeep
+        // normalized each extracted item multiple times and inflated telemetry counts.
+        var d = dispatcher.NormalizeCall("edit_items", new Dictionary<string, object?>
+        {
+            ["filePath"] = "App.cs",
+            ["edits"] = "[{\"old_text\": \"foo\", \"replacement\": \"bar\"}, \"rogue\": null]",
+            ["replace_all"] = true
+        });
+
+        var res = await editTool.InvokeAsync(d.Arguments);
+        Assert.Equal("App.cs:1:foo->bar(True)", res?.ToString());
+
+        var snap = telemetry.CreateSnapshot();
+        Assert.Equal(1, snap.StringifiedJsonRepaired);
+        Assert.Equal(1, snap.CasingNormalized);         // old_text -> oldText (exactly once)
+        Assert.Equal(2, snap.ParameterAliasesResolved); // replace_all -> <propagated_to_collection> + replacement -> newText (once each)
+    }
+
+    [Fact]
+    public async Task NormalizeCall_RootSchemaResolutionInCoercion_CoercesNullableAndRefItemPropertiesAndCommaArrays()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var askTypedTool = AIFunctionFactory.Create(
+            (IReadOnlyList<TestTypedQuestionItem> questions) =>
+                $"{questions[0].Prompt}:{questions[0].Priority}:{questions[0].Optional}:{questions[0].Level}",
+            "ask_typed");
+        var filterTool = AIFunctionFactory.Create(
+            (IReadOnlyList<int?> ids, IReadOnlyList<TestPriority> priorities) =>
+                $"ids={string.Join(",", ids)};priorities={string.Join(",", priorities)}",
+            "filter_items");
+
+        dispatcher.RegisterTool(askTypedTool);
+        dispatcher.RegisterTool(filterTool);
+
+        // 1. Root string parameters propagated into nullable int?, bool?, and $ref enum item properties
+        var d1 = dispatcher.NormalizeCall("ask_typed", new Dictionary<string, object?>
+        {
+            ["questions"] = new List<object?>
+            {
+                new Dictionary<string, object?> { ["prompt"] = "Deploy?" }
+            },
+            ["priority"] = "42",
+            ["optional"] = "true",
+            ["level"] = "high"
+        });
+
+        var res1 = await askTypedTool.InvokeAsync(d1.Arguments);
+        Assert.Equal("Deploy?:42:True:High", res1?.ToString());
+
+        // 2. Comma-separated string coercion on nullable int?[] and $ref enum[] parameters
+        var d2 = dispatcher.NormalizeCall("filter_items", new Dictionary<string, object?>
+        {
+            ["ids"] = "10, 20, 30",
+            ["priorities"] = "low, medium, high"
+        });
+
+        var res2 = await filterTool.InvokeAsync(d2.Arguments);
+        Assert.Equal("ids=10,20,30;priorities=Low,Medium,High", res2?.ToString());
+    }
+
+    [Fact]
+    public async Task NormalizeCall_SingleObjectShortcutOnArrayParameter_PropagatesRootParameters()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var askTool = AIFunctionFactory.Create(
+            (IReadOnlyList<TestQuestionItem> questions) =>
+                $"Count: {questions.Count}, Q1: {questions[0].Prompt} ({questions[0].Rationale})",
+            "ask");
+        dispatcher.RegisterTool(askTool);
+
+        // Case 1: Stringified single object on an array parameter + root parameter propagation
+        var d1 = dispatcher.NormalizeCall("ask", new Dictionary<string, object?>
+        {
+            ["questions"] = "{\"prompt\": \"Q1\"}",
+            ["rationale"] = "Shared stringified"
+        });
+        Assert.False(d1.Arguments.ContainsKey("rationale"));
+        var res1 = await askTool.InvokeAsync(d1.Arguments);
+        Assert.Equal("Count: 1, Q1: Q1 (Shared stringified)", res1?.ToString());
+
+        // Case 2: Structured single dictionary on an array parameter + root parameter propagation
+        var d2 = dispatcher.NormalizeCall("ask", new Dictionary<string, object?>
+        {
+            ["questions"] = new Dictionary<string, object?> { ["prompt"] = "Q2" },
+            ["rationale"] = "Shared structured"
+        });
+        Assert.False(d2.Arguments.ContainsKey("rationale"));
+        var res2 = await askTool.InvokeAsync(d2.Arguments);
+        Assert.Equal("Count: 1, Q1: Q2 (Shared structured)", res2?.ToString());
+    }
+
+    [Fact]
+    public async Task NormalizeCall_ArrayContainingStringifiedArrayOrCorruptedMultiObjectString_FlattensAndPropagates()
+    {
+        var telemetry = new LenientDispatchTelemetry();
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions { Telemetry = telemetry });
+        var askTool = AIFunctionFactory.Create(
+            (IReadOnlyList<TestQuestionItem> questions) =>
+                $"Count: {questions.Count}, Q1: {questions[0].Prompt} ({questions[0].Rationale}), Q2: {questions[1].Prompt} ({questions[1].Rationale})",
+            "ask");
+        dispatcher.RegisterTool(askTool);
+
+        // Case 1: Array containing repaired stringified object, repaired stringified array, and corrupted multi-object string (without propagation)
+        var d1 = dispatcher.NormalizeCall("ask", new Dictionary<string, object?>
+        {
+            ["questions"] = new List<object?>
+            {
+                "{\"prompt\": \"Q0\",}",
+                "[{\"prompt\": \"Q1\",}, {\"prompt\": \"Q2\",}]",
+                "{\"prompt\": \"Q3\"}, \"options\": null}, {\"prompt\": \"Q4\"}"
+            }
+        });
+        var list1 = Assert.IsAssignableFrom<IList<object?>>(d1.Arguments["questions"]);
+        Assert.Equal(5, list1.Count);
+        Assert.Equal(3, telemetry.CreateSnapshot().StringifiedJsonRepaired);
+
+        // Case 2: Array containing repaired stringified array + corrupted multi-object string + root propagation
+        var d2 = dispatcher.NormalizeCall("ask", new Dictionary<string, object?>
+        {
+            ["questions"] = new List<object?>
+            {
+                "[{\"prompt\": \"Q1\",}]",
+                "{\"prompt\": \"Q2\"}"
+            },
+            ["rationale"] = "Shared"
+        });
+        Assert.False(d2.Arguments.ContainsKey("rationale"));
+        var res2 = await askTool.InvokeAsync(d2.Arguments);
+        Assert.Equal("Count: 2, Q1: Q1 (Shared), Q2: Q2 (Shared)", res2?.ToString());
+
+        // Case 3: Corrupted multi-object string inside array + root propagation + JsonElement array root propagation
+        var d3 = dispatcher.NormalizeCall("ask", new Dictionary<string, object?>
+        {
+            ["questions"] = new List<object?> { "{\"prompt\": \"Q1\"}, \"options\": null}, {\"prompt\": \"Q2\"}" },
+            ["rationale"] = "Shared2"
+        });
+        Assert.Equal("Count: 2, Q1: Q1 (Shared2), Q2: Q2 (Shared2)", (await askTool.InvokeAsync(d3.Arguments))?.ToString());
+
+        using var jeDoc = JsonDocument.Parse("[{\"prompt\": \"Q1\"}]");
+        var d4 = dispatcher.NormalizeCall("ask", new Dictionary<string, object?>
+        {
+            ["questions"] = jeDoc.RootElement.Clone(),
+            ["rationale"] = "FromJsonElement"
+        });
+        var list4 = Assert.IsAssignableFrom<IList<object?>>(d4.Arguments["questions"]);
+        var item4 = Assert.IsAssignableFrom<IDictionary<string, object?>>(Assert.Single(list4));
+        Assert.Equal("FromJsonElement", item4["rationale"]);
+    }
+
+    [Fact]
+    public async Task NormalizeCall_Resilient2DArrayExtraction_RecoversValidSubArrays()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var matrixTool = AIFunctionFactory.Create(
+            (IReadOnlyList<IReadOnlyList<int>> matrix) =>
+                string.Join("|", matrix.Select(row => string.Join(",", row))),
+            "set_matrix");
+        dispatcher.RegisterTool(matrixTool);
+
+        var d1 = dispatcher.NormalizeCall("set_matrix", new Dictionary<string, object?>
+        {
+            ["matrix"] = "[[1, \"2\"], rogue, [3, 4}]]"
+        });
+        var res1 = await matrixTool.InvokeAsync(d1.Arguments);
+        Assert.Equal("1,2|3,4", res1?.ToString());
+
+        var d2 = dispatcher.NormalizeCall("set_matrix", new Dictionary<string, object?>
+        {
+            ["matrix"] = "[1, 2], [3, 4]"
+        });
+        var res2 = await matrixTool.InvokeAsync(d2.Arguments);
+        Assert.Equal("1,2|3,4", res2?.ToString());
+    }
+
+    [Fact]
+    public async Task NormalizeCall_WildcardCollectionNestedAlias_ResolvesMatchingItemPropertiesInExtractionPromotionAndPropagation()
+    {
+        var mapping = new ToolMapping();
+        mapping.AddNestedParameterAlias("*[]", "prompt", "question_text");
+        mapping.AddNestedParameterAlias("*[]", "rationale", "reason");
+
+        var config = new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["ask"] = mapping
+            }
+        };
+        var dispatcher = new LenientToolDispatcher(config);
+        var askTool = AIFunctionFactory.Create(
+            (IReadOnlyList<TestQuestionItem> questions) =>
+                $"Count: {questions.Count}, Q1: {questions[0].Prompt} ({questions[0].Rationale})",
+            "ask");
+        dispatcher.RegisterTool(askTool);
+
+        // 1. Resilient extraction + root propagation via "*[]" wildcard aliases
+        var d1 = dispatcher.NormalizeCall("ask", new Dictionary<string, object?>
+        {
+            ["questions"] = "[{\"question_text\": \"First?\"}, \"rogue\": null]",
+            ["reason"] = "Shared reason"
+        });
+        Assert.False(d1.Arguments.ContainsKey("reason"));
+        var res1 = await askTool.InvokeAsync(d1.Arguments);
+        Assert.Equal("Count: 1, Q1: First? (Shared reason)", res1?.ToString());
+
+        // 2. Flattened parameter promotion via "*[]" wildcard aliases
+        var d2 = dispatcher.NormalizeCall("ask", new Dictionary<string, object?>
+        {
+            ["question_text"] = "Promoted?",
+            ["reason"] = "Promoted reason"
+        });
+        var res2 = await askTool.InvokeAsync(d2.Arguments);
+        Assert.Equal("Count: 1, Q1: Promoted? (Promoted reason)", res2?.ToString());
+    }
+
+    [Fact]
+    public async Task EndToEnd_PseudoToolCallAndHttpResponseHealing_RecoversInlineCorruptedArrayArguments()
+    {
+        var dispatcher = new LenientToolDispatcher();
+        var editTool = AIFunctionFactory.Create(
+            (string path, IReadOnlyList<TestEditItem> edits) =>
+                $"Path: {path}, Count: {edits.Count}, E1: {edits[0].OldText}->{edits[0].NewText}, E2: {edits[1].OldText}->{edits[1].NewText}",
+            "edit");
+        dispatcher.RegisterTool(editTool);
+
+        var chatOptions = new ChatOptions { Tools = [editTool] };
+
+        // 1. Closed <tool_call> with inline middle-corrupted array
+        var closedContent = "Applying edits:\n<tool_call>{\"name\": \"edit\", \"arguments\": {\"edits\": [{\"oldText\": \"a\", \"newText\": \"b\"}, \"rogue\": null, {\"oldText\": \"c\", \"newText\": \"d\"}], \"path\": \"Program.cs\"}}</tool_call>";
+        Assert.True(ToolCallHealingTransform.TryExtractToolCalls(ref closedContent, out var closedCalls, logger: null, options: null, chatOptions: chatOptions));
+        var closedCall = Assert.Single(closedCalls);
+        var dClosed = dispatcher.NormalizeCall(closedCall);
+        Assert.Equal("Path: Program.cs, Count: 2, E1: a->b, E2: c->d", (await editTool.InvokeAsync(dClosed.Arguments))?.ToString());
+
+        // 2. Unclosed/truncated <tool_call> with inline middle-corrupted array
+        var unclosedContent = "<tool_call>{\"name\": \"edit\", \"arguments\": {\"edits\": [{\"oldText\": \"a\", \"newText\": \"b\"}, \"rogue\": null, {\"oldText\": \"c\", \"newText\": \"d\"}], \"path\": \"Program.cs\"";
+        Assert.True(ToolCallHealingTransform.TryExtractToolCalls(ref unclosedContent, out var unclosedCalls, logger: null, options: null, chatOptions: chatOptions));
+        var unclosedCall = Assert.Single(unclosedCalls);
+        var dUnclosed = dispatcher.NormalizeCall(unclosedCall);
+        Assert.Equal("Path: Program.cs, Count: 2, E1: a->b, E2: c->d", (await editTool.InvokeAsync(dUnclosed.Arguments))?.ToString());
+
+        // 3. Undeclared <tool_call> with corrupted envelope must be rejected without recording repair telemetry
+        var rejectTelemetry = new ToolCallHealingTelemetry();
+        var rejectOptions = new ToolCallHealingOptions { Telemetry = rejectTelemetry };
+        var undeclaredContent = "<tool_call>{\"name\": \"undeclared_tool\", \"arguments\": {\"items\": [{\"a\": 1}, \"rogue\": null]}}</tool_call>";
+        Assert.False(ToolCallHealingTransform.TryExtractToolCalls(ref undeclaredContent, out _, logger: null, options: rejectOptions, chatOptions: chatOptions));
+        Assert.Equal(0, rejectTelemetry.CreateSnapshot().TotalInterventions);
+
+        // 4. OpenAI HTTP response JSON with middle-corrupted function.arguments string
+        var httpResponseJson = JsonSerializer.Serialize(new
+        {
+            id = "chatcmpl-999",
+            choices = new[]
+            {
+                new
+                {
+                    message = new
+                    {
+                        role = "assistant",
+                        tool_calls = new[]
+                        {
+                            new
+                            {
+                                id = "call_edit1",
+                                type = "function",
+                                function = new
+                                {
+                                    name = "edit",
+                                    arguments = "{\"edits\": [{\"oldText\": \"x\", \"newText\": \"y\"}, \"rogue\": null, {\"oldText\": \"m\", \"newText\": \"n\"}], \"path\": \"App.cs\"}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        var healedHttpJson = ToolCallHealingTransform.HealResponseText(httpResponseJson, logger: null);
+        using var healedDoc = JsonDocument.Parse(healedHttpJson);
+        var healedArgsJson = healedDoc.RootElement
+            .GetProperty("choices")[0]
+            .GetProperty("message")
+            .GetProperty("tool_calls")[0]
+            .GetProperty("function")
+            .GetProperty("arguments")
+            .GetString()!;
+
+        // Must be strictly valid JSON so M.E.AI FunctionCallContent.CreateFromParsedArguments does not null out Arguments
+        using var strictArgsDoc = JsonDocument.Parse(healedArgsJson);
+        Assert.Equal(JsonValueKind.Object, strictArgsDoc.RootElement.ValueKind);
+
+        var dHttp = dispatcher.NormalizeCall("edit", healedArgsJson);
+        Assert.Equal("Path: App.cs, Count: 2, E1: x->y, E2: m->n", (await editTool.InvokeAsync(dHttp.Arguments))?.ToString());
     }
 
     private sealed class FakeSimpleChatClient(Func<IEnumerable<ChatMessage>, ChatOptions?, CancellationToken, Task<ChatResponse>> handler) : IChatClient

@@ -1142,11 +1142,11 @@ public partial class LenientToolDispatcher
         }
     }
 
-    private static object? CoerceScalarArrayItem(string paramName, object value, JsonElement resolvedItemSchema, ToolMapping? mapping = null)
+    private static object? CoerceScalarArrayItem(string paramName, object value, JsonElement resolvedItemSchema, ToolMapping? mapping = null, JsonElement? rootSchema = null)
     {
         if (value is string)
         {
-            return CoerceParameterValue(paramName, value, resolvedItemSchema, mapping);
+            return CoerceParameterValue(paramName, value, resolvedItemSchema, mapping, rootSchema);
         }
 
         bool isBooleanTarget = SchemaTypeMatches(resolvedItemSchema, "boolean");
@@ -1213,6 +1213,11 @@ public partial class LenientToolDispatcher
         if (value is not string strVal)
         {
             return value;
+        }
+
+        if (schema.HasValue && rootSchema.HasValue)
+        {
+            schema = ResolveSchema(schema.Value, rootSchema.Value);
         }
 
         var trimmed = strVal.Trim();
@@ -1358,23 +1363,21 @@ public partial class LenientToolDispatcher
 
             var parts = trimmed.Split(',').Select(p => p.Trim()).Where(p => !string.IsNullOrEmpty(p)).ToArray();
 
-            if (schema.HasValue && schema.Value.TryGetProperty("items", out var itemsSchema) && itemsSchema.TryGetProperty("type", out var itemType))
+            if (schema.HasValue && schema.Value.TryGetProperty("items", out var itemsSchema))
             {
-                if (itemType.ValueEquals("integer"))
+                var resolvedItemsSchema = rootSchema.HasValue ? ResolveSchema(itemsSchema, rootSchema.Value) : itemsSchema;
+                bool itemAllowsString = SchemaTypeMatches(resolvedItemsSchema, "string");
+                if (!itemAllowsString &&
+                    (SchemaTypeMatches(resolvedItemsSchema, "integer") ||
+                     SchemaTypeMatches(resolvedItemsSchema, "number") ||
+                     SchemaTypeMatches(resolvedItemsSchema, "boolean")))
                 {
-                    return parts.Select(p =>
-                    {
-                        var candidate = p.StartsWith('#') ? p[1..].Trim() : p;
-                        if (long.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out var lv))
-                        {
-                            return lv >= int.MinValue && lv <= int.MaxValue ? (object)(int)lv : lv;
-                        }
-                        throw new ArgumentException($"Element '{p}' of parameter '{paramName}' is not a valid integer.");
-                    }).ToArray();
+                    return parts.Select(p => CoerceParameterValue(paramName + "[]", p, resolvedItemsSchema, mapping, rootSchema)).ToArray();
                 }
-                if (itemType.ValueEquals("number"))
+
+                if (TryGetEnumOrConstMembers(resolvedItemsSchema, out _) || mapping != null)
                 {
-                    return parts.Select(p => double.TryParse(p, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var dv) ? (object)dv : throw new ArgumentException($"Element '{p}' of parameter '{paramName}' is not a valid number.")).ToArray();
+                    return parts.Select(p => CoerceParameterValue(paramName + "[]", p, resolvedItemsSchema, mapping, rootSchema) as string ?? p).ToArray();
                 }
             }
 
@@ -1444,9 +1447,7 @@ public partial class LenientToolDispatcher
                 if (resolvedSchema.Value.TryGetProperty("items", out var arrItemsEl) && arrItemsEl.ValueKind == JsonValueKind.Object)
                 {
                     var resolvedArrItems = rootSchema.HasValue ? ResolveSchema(arrItemsEl, rootSchema.Value) : arrItemsEl;
-                    arrayAllowsObjectItems = SchemaTypeMatches(resolvedArrItems, "object") ||
-                                             (resolvedArrItems.ValueKind == JsonValueKind.Object && resolvedArrItems.TryGetProperty("properties", out _)) ||
-                                             (resolvedArrItems.ValueKind == JsonValueKind.Object && !resolvedArrItems.TryGetProperty("type", out _));
+                    arrayAllowsObjectItems = IsObjectItemSchema(resolvedArrItems);
                 }
                 else
                 {
@@ -1509,17 +1510,58 @@ public partial class LenientToolDispatcher
                  SchemaTypeMatches(resolvedItemSchema.Value, "boolean") ||
                  SchemaTypeMatches(resolvedItemSchema.Value, "string"));
 
+            bool expectsObjectItems = resolvedItemSchema.HasValue &&
+                IsObjectItemSchema(resolvedItemSchema.Value) &&
+                !SchemaTypeMatches(resolvedItemSchema.Value, "string");
+
             var normalizedList = new List<object?>();
             foreach (var item in list)
             {
                 var effectiveItem = item;
                 if (effectiveItem is string strItem && resolvedItemSchema.HasValue)
                 {
-                    var trimmedItem = strItem.TrimStart();
-                    if (!trimmedItem.StartsWith('{') && !trimmedItem.StartsWith('[') &&
-                        resolvedItemSchema.Value.ValueKind == JsonValueKind.Object &&
-                        resolvedItemSchema.Value.TryGetProperty("properties", out var itemProps) &&
-                        itemProps.ValueKind == JsonValueKind.Object)
+                    var trimmedItem = strItem.Trim();
+                    if (expectsObjectItems && (trimmedItem.StartsWith('{') || trimmedItem.StartsWith('[')))
+                    {
+                        var parsedItem = TryParseStringifiedJson(trimmedItem, out bool itemWasRepaired);
+                        if (parsedItem is IDictionary<string, object?> parsedItemDict)
+                        {
+                            if (itemWasRepaired)
+                            {
+                                Telemetry?.Record(LenientDispatchEventType.StringifiedJsonRepaired, "<stringified_json>", paramPath + "[]", SessionId);
+                            }
+                            normalizedList.Add(NormalizeValueDeep(parsedItemDict, itemsSchema, mapping, paramPath + "[]", rootSchema));
+                            continue;
+                        }
+
+                        if (parsedItem is System.Collections.IEnumerable parsedSubList and not string and not System.Collections.IDictionary)
+                        {
+                            if (itemWasRepaired)
+                            {
+                                Telemetry?.Record(LenientDispatchEventType.StringifiedJsonRepaired, "<stringified_json>", paramPath + "[]", SessionId);
+                            }
+                            foreach (var subItem in parsedSubList)
+                            {
+                                normalizedList.Add(NormalizeValueDeep(subItem, itemsSchema, mapping, paramPath + "[]", rootSchema));
+                            }
+                            continue;
+                        }
+
+                        if (resolvedSchema.HasValue)
+                        {
+                            var recoveredSubItems = TryExtractAndNormalizeResilientArray(trimmedItem, resolvedSchema.Value, rootSchema, mapping, paramPath);
+                            if (recoveredSubItems != null && recoveredSubItems.Count > 0)
+                            {
+                                Telemetry?.Record(LenientDispatchEventType.StringifiedJsonRepaired, "<stringified_json>", paramPath + "[]", SessionId);
+                                normalizedList.AddRange(recoveredSubItems);
+                                continue;
+                            }
+                        }
+                    }
+                    else if (!trimmedItem.StartsWith('{') && !trimmedItem.StartsWith('[') &&
+                             resolvedItemSchema.Value.ValueKind == JsonValueKind.Object &&
+                             resolvedItemSchema.Value.TryGetProperty("properties", out var itemProps) &&
+                             itemProps.ValueKind == JsonValueKind.Object)
                     {
                         var primaryProp = FindPrimaryStringProperty(itemProps, resolvedItemSchema.Value, mapping, paramPath + "[]");
                         if (primaryProp != null)
@@ -1535,7 +1577,7 @@ public partial class LenientToolDispatcher
                 var normalizedItem = NormalizeValueDeep(effectiveItem, itemsSchema, mapping, paramPath + "[]", rootSchema);
                 if (_options.EnableParameterCoercion && isScalarItemSchema && normalizedItem != null)
                 {
-                    normalizedItem = CoerceScalarArrayItem(paramPath + "[]", normalizedItem, resolvedItemSchema!.Value, mapping);
+                    normalizedItem = CoerceScalarArrayItem(paramPath + "[]", normalizedItem, resolvedItemSchema!.Value, mapping, rootSchema);
                 }
                 normalizedList.Add(normalizedItem);
             }
@@ -1693,12 +1735,26 @@ public partial class LenientToolDispatcher
         return value;
     }
 
-    private static readonly JsonDocumentOptions ResilientArrayDocumentOptions = new()
+    private static bool IsObjectItemSchema(JsonElement resolvedItemSchema)
     {
-        AllowTrailingCommas = true
-    };
+        if (resolvedItemSchema.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
 
-    private List<object?>? TryExtractAndNormalizeResilientArray(
+        if (SchemaTypeMatches(resolvedItemSchema, "object") ||
+            resolvedItemSchema.TryGetProperty("properties", out _))
+        {
+            return true;
+        }
+
+        return !resolvedItemSchema.TryGetProperty("type", out _) &&
+               !resolvedItemSchema.TryGetProperty("anyOf", out _) &&
+               !resolvedItemSchema.TryGetProperty("oneOf", out _) &&
+               !TryGetEnumOrConstMembers(resolvedItemSchema, out _);
+    }
+
+    private static List<object?>? TryExtractResilientArrayRawItems(
         string text,
         JsonElement resolvedSchema,
         JsonElement? rootSchema,
@@ -1722,78 +1778,126 @@ public partial class LenientToolDispatcher
             ? ResolveSchema(itemsSchema.Value, rootSchema.Value)
             : itemsSchema.Value;
 
-        bool isObjectSchema = resolvedItemSchema.ValueKind == JsonValueKind.Object &&
-            (SchemaTypeMatches(resolvedItemSchema, "object") ||
-             resolvedItemSchema.TryGetProperty("properties", out _));
-
-        if (!isObjectSchema)
+        if (IsObjectItemSchema(resolvedItemSchema))
         {
-            return null;
-        }
-
-        HashSet<string>? knownProperties = null;
-        if (resolvedItemSchema.TryGetProperty("properties", out var itemProps) && itemProps.ValueKind == JsonValueKind.Object)
-        {
-            knownProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var prop in itemProps.EnumerateObject())
+            HashSet<string>? knownProperties = null;
+            if (resolvedItemSchema.TryGetProperty("properties", out var itemProps) && itemProps.ValueKind == JsonValueKind.Object)
             {
-                knownProperties.Add(prop.Name);
-                knownProperties.Add(ToSnakeCase(prop.Name));
-                knownProperties.Add(ToCamelCase(prop.Name));
-                knownProperties.Add(ToPascalCase(prop.Name));
-            }
-        }
-
-        var rawElements = ExtractBalancedJsonElements(text, '{');
-        if (rawElements.Count == 0)
-        {
-            return null;
-        }
-
-        var normalizedList = new List<object?>();
-        foreach (var rawBlock in rawElements)
-        {
-            try
-            {
-                using var doc = JsonDocument.Parse(rawBlock, ResilientArrayDocumentOptions);
-                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                knownProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var prop in itemProps.EnumerateObject())
                 {
-                    var clrObj = ConvertJsonElementToClr(doc.RootElement);
-                    if (clrObj is IDictionary<string, object?> dictItem && dictItem.Count > 0)
+                    knownProperties.Add(prop.Name);
+                    knownProperties.Add(ToSnakeCase(prop.Name));
+                    knownProperties.Add(ToCamelCase(prop.Name));
+                    knownProperties.Add(ToPascalCase(prop.Name));
+                }
+            }
+
+            var rawElements = ExtractBalancedJsonElements(text, '{');
+            if (rawElements.Count == 0)
+            {
+                return null;
+            }
+
+            var rawList = new List<object?>();
+            var itemPath = paramPath + "[]";
+            foreach (var rawBlock in rawElements)
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(rawBlock, LenientDocumentOptions);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                        ConvertJsonElementToClr(doc.RootElement) is IDictionary<string, object?> dictItem &&
+                        dictItem.Count > 0)
                     {
-                        bool matches = false;
-                        if (knownProperties != null && knownProperties.Count > 0)
+                        bool matches = knownProperties == null || knownProperties.Count == 0;
+                        if (!matches)
                         {
-                            var itemPath = paramPath + "[]";
                             foreach (var key in dictItem.Keys)
                             {
-                                if (MatchesKnownItemProperty(key, knownProperties, mapping, itemPath))
+                                if (MatchesKnownItemProperty(key, knownProperties!, mapping, itemPath))
                                 {
                                     matches = true;
                                     break;
                                 }
                             }
                         }
-                        else
-                        {
-                            matches = true;
-                        }
 
                         if (matches)
                         {
-                            var normalizedItem = NormalizeValueDeep(dictItem, itemsSchema, mapping, paramPath + "[]", rootSchema);
-                            normalizedList.Add(normalizedItem);
+                            rawList.Add(dictItem);
                         }
                     }
                 }
+                catch (JsonException)
+                {
+                    // Discard invalid blocks
+                }
             }
-            catch (JsonException)
-            {
-                // Discard invalid blocks
-            }
+
+            return rawList.Count > 0 ? rawList : null;
         }
 
-        return normalizedList.Count > 0 ? normalizedList : null;
+        if (SchemaTypeMatches(resolvedItemSchema, "array") && text.AsSpan().TrimStart().StartsWith("[", StringComparison.Ordinal))
+        {
+            var rawElements = ExtractBalancedJsonElements(text, '[');
+            if (rawElements.Count == 0)
+            {
+                return null;
+            }
+
+            var rawList = new List<object?>();
+            foreach (var rawBlock in rawElements)
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(rawBlock, LenientDocumentOptions);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Array &&
+                        ConvertJsonElementToClr(doc.RootElement) is List<object?> innerList)
+                    {
+                        rawList.Add(innerList);
+                    }
+                }
+                catch (JsonException)
+                {
+                    // Discard invalid blocks
+                }
+            }
+
+            return rawList.Count > 0 ? rawList : null;
+        }
+
+        return null;
+    }
+
+    private List<object?>? TryExtractAndNormalizeResilientArray(
+        string text,
+        JsonElement resolvedSchema,
+        JsonElement? rootSchema,
+        ToolMapping? mapping,
+        string paramPath)
+    {
+        var rawItems = TryExtractResilientArrayRawItems(text, resolvedSchema, rootSchema, mapping, paramPath);
+        if (rawItems == null || rawItems.Count == 0)
+        {
+            return null;
+        }
+
+        JsonElement? itemsSchema = null;
+        if (resolvedSchema.ValueKind == JsonValueKind.Object &&
+            resolvedSchema.TryGetProperty("items", out var isEl) &&
+            isEl.ValueKind == JsonValueKind.Object)
+        {
+            itemsSchema = isEl;
+        }
+
+        var normalizedList = new List<object?>(rawItems.Count);
+        foreach (var rawItem in rawItems)
+        {
+            normalizedList.Add(NormalizeValueDeep(rawItem, itemsSchema, mapping, paramPath + "[]", rootSchema));
+        }
+
+        return normalizedList;
     }
 
     private static bool MatchesKnownItemProperty(
@@ -1840,8 +1944,14 @@ public partial class LenientToolDispatcher
         JsonElement? rootSchema,
         ToolMapping? mapping)
     {
+        var seenArrays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (propKey, (canonicalParamName, paramSchema)) in propDict)
         {
+            if (!seenArrays.Add(canonicalParamName))
+            {
+                continue;
+            }
+
             var resolvedSchema = rootSchema.HasValue ? ResolveSchema(paramSchema, rootSchema.Value) : paramSchema;
             if (!SchemaTypeMatches(resolvedSchema, "array"))
             {
@@ -1901,7 +2011,7 @@ public partial class LenientToolDispatcher
                             var parsed = TryParseStringifiedJson(trimmedStr, out _);
                             if (parsed == null)
                             {
-                                parsed = TryExtractAndNormalizeResilientArray(trimmedStr, resolvedSchema, rootSchema, mapping, canonicalParamName);
+                                parsed = TryExtractResilientArrayRawItems(trimmedStr, resolvedSchema, rootSchema, mapping, canonicalParamName);
                             }
                             if (parsed is System.Collections.IEnumerable parsedEnum and not string and not IDictionary<string, object?> and not System.Collections.IDictionary)
                             {
@@ -1948,13 +2058,22 @@ public partial class LenientToolDispatcher
 
             if (mapping?.NestedParameterAliases != null)
             {
-                var nestedPath = canonicalParamName + "[]";
-                if (mapping.NestedParameterAliases.TryGetValue(nestedPath, out var nestedAliases))
+                string[] candidatePaths = [canonicalParamName + "[]", canonicalParamName, "*[]", "*"];
+                foreach (var candidatePath in candidatePaths)
                 {
-                    foreach (var (alias, target) in nestedAliases)
+                    if (mapping.NestedParameterAliases.TryGetValue(candidatePath, out var nestedAliases))
                     {
-                        itemPropNames.Add(alias);
-                        itemPropNames.Add(target);
+                        foreach (var (alias, target) in nestedAliases)
+                        {
+                            if (itemPropNames.Contains(target) ||
+                                itemPropNames.Contains(ToSnakeCase(target)) ||
+                                itemPropNames.Contains(ToCamelCase(target)) ||
+                                itemPropNames.Contains(ToPascalCase(target)))
+                            {
+                                itemPropNames.Add(alias);
+                                itemPropNames.Add(target);
+                            }
+                        }
                     }
                 }
             }
@@ -1963,6 +2082,9 @@ public partial class LenientToolDispatcher
             var topLevelParams = new HashSet<string>(propDict.Keys, StringComparer.OrdinalIgnoreCase);
             topLevelParams.Remove(canonicalParamName);
             topLevelParams.Remove(propKey);
+            topLevelParams.Remove(ToSnakeCase(canonicalParamName));
+            topLevelParams.Remove(ToCamelCase(canonicalParamName));
+            topLevelParams.Remove(ToPascalCase(canonicalParamName));
 
             HashSet<string>? explicitPromoted = null;
             if (mapping?.PromotedCollectionParameters != null)
@@ -2056,7 +2178,7 @@ public partial class LenientToolDispatcher
             if (val is string strVal)
             {
                 var trimmed = strVal.Trim();
-                if (trimmed.StartsWith('['))
+                if (trimmed.StartsWith('[') || trimmed.StartsWith('{'))
                 {
                     val = TryParseStringifiedJson(trimmed, out _) ?? TryParseStringifiedJsonArrayElements(trimmed) ?? val;
                 }
@@ -2099,7 +2221,11 @@ public partial class LenientToolDispatcher
                 bool unpackedAny = false;
                 foreach (var (itemK, itemV) in firstItemDict)
                 {
-                    if (propDict.TryGetValue(itemK, out var entry) && !canonicalArgs.ContainsKey(entry.CanonicalName))
+                    if ((propDict.TryGetValue(itemK, out var entry) ||
+                         propDict.TryGetValue(ToSnakeCase(itemK), out entry) ||
+                         propDict.TryGetValue(ToCamelCase(itemK), out entry) ||
+                         propDict.TryGetValue(ToPascalCase(itemK), out entry)) &&
+                        !canonicalArgs.ContainsKey(entry.CanonicalName))
                     {
                         canonicalArgs[entry.CanonicalName] = itemV;
                         unpackedAny = true;
@@ -2160,6 +2286,11 @@ public partial class LenientToolDispatcher
                 }
 
                 bool stringArrayWasRepaired = false;
+                if (arrayVal is JsonElement arrayJe)
+                {
+                    arrayVal = ConvertJsonElementToClr(arrayJe);
+                }
+
                 if (arrayVal is string strVal)
                 {
                     var trimmed = strVal.Trim();
@@ -2168,7 +2299,7 @@ public partial class LenientToolDispatcher
                         var parsed = TryParseStringifiedJson(trimmed, out stringArrayWasRepaired);
                         if (parsed == null)
                         {
-                            parsed = TryExtractAndNormalizeResilientArray(trimmed, resolvedSchema, rootSchema, mapping, canonicalParamName);
+                            parsed = TryExtractResilientArrayRawItems(trimmed, resolvedSchema, rootSchema, mapping, canonicalParamName);
                             if (parsed != null)
                             {
                                 stringArrayWasRepaired = true;
@@ -2179,6 +2310,11 @@ public partial class LenientToolDispatcher
                             arrayVal = parsed;
                         }
                     }
+                }
+
+                if (arrayVal is IDictionary<string, object?> singleObjDict)
+                {
+                    arrayVal = new List<object?> { singleObjDict };
                 }
 
                 if (arrayVal is not System.Collections.IEnumerable list ||
@@ -2214,13 +2350,18 @@ public partial class LenientToolDispatcher
                     }
                 }
 
-                if (targetItemPropName == null && mapping?.NestedParameterAliases != null)
+                if (targetItemPropName == null &&
+                    mapping != null &&
+                    mapping.TryGetNestedAlias(canonicalParamName + "[]", rootKey, out var aliasedTarget))
                 {
-                    var nestedPath = canonicalParamName + "[]";
-                    if (mapping.NestedParameterAliases.TryGetValue(nestedPath, out var nestedAliases) &&
-                        nestedAliases.TryGetValue(rootKey, out var aliasedTarget))
+                    foreach (var prop in itemProps.EnumerateObject())
                     {
-                        targetItemPropName = aliasedTarget;
+                        if (string.Equals(prop.Name, aliasedTarget, StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(ToSnakeCase(prop.Name), ToSnakeCase(aliasedTarget), StringComparison.OrdinalIgnoreCase))
+                        {
+                            targetItemPropName = prop.Name;
+                            break;
+                        }
                     }
                 }
 
@@ -2229,41 +2370,75 @@ public partial class LenientToolDispatcher
                     continue;
                 }
 
-                var newItemsList = new List<object?>();
+                var candidateItems = new List<object?>();
                 bool collectionModified = false;
 
                 foreach (var item in list)
                 {
-                    var effectiveItem = item;
-
-                    if (effectiveItem is string strItem)
+                    if (item is string strItem)
                     {
                         var trimmedItem = strItem.Trim();
-                        if (trimmedItem.StartsWith('{'))
+                        if (trimmedItem.StartsWith('{') || trimmedItem.StartsWith('['))
                         {
-                            if (TryParseStringifiedJson(trimmedItem, out bool itemRepaired) is IDictionary<string, object?> parsedItemDict)
+                            var parsedItem = TryParseStringifiedJson(trimmedItem, out bool itemRepaired);
+                            if (parsedItem is IDictionary<string, object?> parsedItemDict)
                             {
-                                effectiveItem = parsedItemDict;
+                                candidateItems.Add(parsedItemDict);
                                 collectionModified = true;
                                 if (itemRepaired)
                                 {
                                     stringArrayWasRepaired = true;
                                 }
+                                continue;
+                            }
+
+                            if (parsedItem is System.Collections.IEnumerable parsedSubList and not string and not System.Collections.IDictionary)
+                            {
+                                foreach (var sub in parsedSubList)
+                                {
+                                    candidateItems.Add(sub);
+                                }
+                                collectionModified = true;
+                                if (itemRepaired)
+                                {
+                                    stringArrayWasRepaired = true;
+                                }
+                                continue;
+                            }
+
+                            var resilientSubItems = TryExtractResilientArrayRawItems(trimmedItem, resolvedSchema, rootSchema, mapping, canonicalParamName);
+                            if (resilientSubItems != null && resilientSubItems.Count > 0)
+                            {
+                                candidateItems.AddRange(resilientSubItems);
+                                collectionModified = true;
+                                stringArrayWasRepaired = true;
+                                continue;
                             }
                         }
-                        else if (!trimmedItem.StartsWith('['))
+                        else
                         {
                             var primaryProp = FindPrimaryStringProperty(itemProps, resolvedItemSchema, mapping, canonicalParamName + "[]");
                             if (primaryProp != null)
                             {
-                                effectiveItem = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                                candidateItems.Add(new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
                                 {
                                     [primaryProp] = strItem
-                                };
+                                });
                                 collectionModified = true;
+                                continue;
                             }
                         }
                     }
+
+                    candidateItems.Add(item);
+                }
+
+                var newItemsList = new List<object?>(candidateItems.Count);
+                foreach (var candidate in candidateItems)
+                {
+                    var effectiveItem = candidate is JsonElement candidateJe
+                        ? ConvertJsonElementToClr(candidateJe)
+                        : candidate;
 
                     if (effectiveItem is IDictionary<string, object?> itemDict)
                     {
@@ -2272,13 +2447,15 @@ public partial class LenientToolDispatcher
                                           (itemDict.TryGetValue(ToCamelCase(targetItemPropName), out var v3) && v3 != null) ||
                                           (itemDict.TryGetValue(ToPascalCase(targetItemPropName), out var v4) && v4 != null);
 
-                        if (!alreadyHas && mapping?.NestedParameterAliases != null &&
-                            mapping.NestedParameterAliases.TryGetValue(canonicalParamName + "[]", out var nestedAliases))
+                        if (!alreadyHas && mapping != null)
                         {
-                            foreach (var (alias, target) in nestedAliases)
+                            var itemPath = canonicalParamName + "[]";
+                            foreach (var (existingKey, existingVal) in itemDict)
                             {
-                                if (string.Equals(target, targetItemPropName, StringComparison.OrdinalIgnoreCase) &&
-                                    itemDict.TryGetValue(alias, out var va) && va != null)
+                                if (existingVal != null &&
+                                    mapping.TryGetNestedAlias(itemPath, existingKey, out var mappedExisting) &&
+                                    (string.Equals(mappedExisting, targetItemPropName, StringComparison.OrdinalIgnoreCase) ||
+                                     string.Equals(ToSnakeCase(mappedExisting), ToSnakeCase(targetItemPropName), StringComparison.OrdinalIgnoreCase)))
                                 {
                                     alreadyHas = true;
                                     break;

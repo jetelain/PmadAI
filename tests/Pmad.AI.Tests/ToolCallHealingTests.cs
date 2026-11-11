@@ -552,4 +552,220 @@ public class ToolCallHealingTests
         Assert.Contains("\"name\":\"grep_code\"", healed);
         Assert.DoesNotContain("<tool_call>", healed);
     }
+
+    [Fact]
+    public void HealChatCompletionResponse_WithOptionsTelemetry_RepairsCorruptedArgumentsAndRecordsInterventions()
+    {
+        var telemetry = new ToolCallHealingTelemetry();
+        var options = new ToolCallHealingOptions
+        {
+            Telemetry = telemetry,
+            SessionId = "http-session"
+        };
+
+        var inputJson = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            choices = new[]
+            {
+                new
+                {
+                    message = new
+                    {
+                        role = "assistant",
+                        tool_calls = new object[]
+                        {
+                            new
+                            {
+                                id = "",
+                                type = "",
+                                function = new
+                                {
+                                    name = "edit_file",
+                                    arguments = "```json\n{\"edits\": [{\"oldText\": \"a\", \"newText\": \"b\"}, \"rogue\": null, {\"oldText\": \"c\", \"newText\": \"d\"}], \"path\": \"App.cs\"}\n```"
+                                }
+                            },
+                            new
+                            {
+                                id = "call_keep",
+                                type = "function",
+                                function = new
+                                {
+                                    name = "raw_tool",
+                                    arguments = "not json at all"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        var healedJson = ToolCallHealingTransform.HealResponseText(inputJson, logger: null, options: options);
+        var root = JsonNode.Parse(healedJson)!;
+        var toolCalls = root["choices"]![0]!["message"]!["tool_calls"]!.AsArray();
+
+        var firstCall = toolCalls[0]!.AsObject();
+        Assert.StartsWith("call_", firstCall["id"]!.GetValue<string>());
+        Assert.Equal("function", firstCall["type"]!.GetValue<string>());
+
+        var healedEditArgs = firstCall["function"]!["arguments"]!.GetValue<string>();
+        using var strictDoc = System.Text.Json.JsonDocument.Parse(healedEditArgs);
+        Assert.Equal("App.cs", strictDoc.RootElement.GetProperty("path").GetString());
+        Assert.True(strictDoc.RootElement.TryGetProperty("edits", out _));
+
+        // Unrecoverable non-JSON string arguments remain untouched
+        var secondArgs = toolCalls[1]!["function"]!["arguments"]!.GetValue<string>();
+        Assert.Equal("not json at all", secondArgs);
+
+        // Structured JsonObject arguments (Ollama format) are also preserved cleanly with ToolCallHealingOptions
+        var ollamaJson = "{\"message\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_obj\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.cs\"}}}]}}";
+        var healedOllama = ToolCallHealingTransform.HealResponseText(ollamaJson, logger: null, options: options);
+        Assert.Contains("\"path\":\"a.cs\"", healedOllama);
+
+        var snap = telemetry.CreateSnapshot("http-session");
+        Assert.Equal(1, snap.CallIdsGenerated);
+        Assert.Equal(1, snap.FencesStripped);
+        Assert.Equal(1, snap.JsonRepairs);
+    }
+
+    [Fact]
+    public void ParseArgumentsJson_CorruptedArrayAndObjectContainers_RecordsOptionsTelemetryAndLogsUnrecoverable()
+    {
+        var telemetry = new ToolCallHealingTelemetry();
+        var options = new ToolCallHealingOptions
+        {
+            Telemetry = telemetry,
+            SessionId = "parse-session"
+        };
+        var mockLogger = new Mock<ILogger>();
+
+        // 1. Corrupted root array container -> sentinel key + JsonRepaired telemetry
+        var corruptedArray = "[{\"prompt\": \"Q1\"}, \"rogue\": null, {\"prompt\": \"Q2\"}]";
+        var arrDict = ToolCallHealingTransform.ParseArgumentsJson(corruptedArray, mockLogger.Object, "ask", options);
+        Assert.Equal(corruptedArray, arrDict[ToolCallHealingTransform.RootArraySentinelKey]);
+        Assert.Equal(1, telemetry.CreateSnapshot("parse-session").JsonRepairs);
+
+        // 2. Corrupted root object container -> extracted top-level properties + JsonRepaired telemetry
+        var corruptedObj = "{\"edits\": [{\"oldText\": \"a\"}, \"rogue\": null], \"path\": \"Program.cs\"}";
+        var objDict = ToolCallHealingTransform.ParseArgumentsJson(corruptedObj, mockLogger.Object, "edit", options);
+        Assert.Equal("Program.cs", objDict["path"]);
+        Assert.True(objDict.ContainsKey("edits"));
+        Assert.Equal(2, telemetry.CreateSnapshot("parse-session").JsonRepairs);
+
+        // 3. Unrecoverable container strings -> empty dictionary, warning logged, no extra repair telemetry
+        var badObj = ToolCallHealingTransform.ParseArgumentsJson("{unrecoverable}", mockLogger.Object, "edit", options);
+        var badArr = ToolCallHealingTransform.ParseArgumentsJson("[unrecoverable]", mockLogger.Object, "ask", options);
+        Assert.Empty(badObj);
+        Assert.Empty(badArr);
+        Assert.Equal(2, telemetry.CreateSnapshot("parse-session").JsonRepairs);
+        mockLogger.Verify(
+            x => x.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.IsAny<It.IsAnyType>(),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Exactly(2));
+    }
+
+    [Fact]
+    public void TryExtractToolCalls_CorruptedEnvelopeVariants_HandlesParametersStringNullAndGuardrailsWithOptions()
+    {
+        var telemetry = new ToolCallHealingTelemetry();
+        var options = new ToolCallHealingOptions
+        {
+            Telemetry = telemetry,
+            SessionId = "env-session",
+            EnforceAvailableToolsGuardrail = true
+        };
+        var chatOptions = new ChatOptions
+        {
+            Tools =
+            [
+                AIFunctionFactory.Create(() => "ok", "edit"),
+                AIFunctionFactory.Create(() => "ok", "read_file"),
+                AIFunctionFactory.Create(() => "ok", "ping")
+            ]
+        };
+
+        // 1. Corrupted envelope using "parameters" inline object
+        var c1 = "<tool_call>{\"name\": \"edit\", \"parameters\": {\"edits\": [{\"oldText\": \"a\"}, \"rogue\": null], \"path\": \"A.cs\"}}</tool_call>";
+        Assert.True(ToolCallHealingTransform.TryExtractToolCalls(ref c1, out var calls1, null, options, chatOptions));
+        Assert.Equal("A.cs", Assert.Single(calls1).Arguments?["path"]);
+
+        // 2. Corrupted envelope where "arguments" is a JSON string (exercises wasCorruptedEnvelope + string args branch)
+        var c2 = "<tool_call>{\"name\": \"read_file\", \"extra\": [{\"k\": 1}, \"rogue\": null], \"arguments\": \"{\\\"path\\\": \\\"B.cs\\\"}\"}</tool_call>";
+        Assert.True(ToolCallHealingTransform.TryExtractToolCalls(ref c2, out var calls2, null, options, chatOptions));
+        Assert.Equal("B.cs", Assert.Single(calls2).Arguments?["path"]);
+
+        // 3. Corrupted envelope with omitted arguments and with explicit null arguments
+        var c3 = "<tool_call>{\"name\": \"ping\", \"extra\": [{\"k\": 1}, \"rogue\": null]}</tool_call>";
+        Assert.True(ToolCallHealingTransform.TryExtractToolCalls(ref c3, out var calls3, null, options, chatOptions));
+        Assert.Empty(Assert.Single(calls3).Arguments!);
+
+        var c4 = "<tool_call>{\"name\": \"ping\", \"arguments\": null, \"extra\": [{\"k\": 1}, \"rogue\": null]}</tool_call>";
+        Assert.True(ToolCallHealingTransform.TryExtractToolCalls(ref c4, out var calls4, null, options, chatOptions));
+        Assert.Empty(Assert.Single(calls4).Arguments!);
+
+        var snapAfterValid = telemetry.CreateSnapshot("env-session");
+        Assert.Equal(4, snapAfterValid.PseudoTagsExtracted);
+        Assert.Equal(4, snapAfterValid.JsonRepairs);
+
+        // 4. Corrupted envelopes missing "name", completely broken JSON, or undeclared tool with guardrail enabled -> rejected with zero new telemetry
+        var missingName = "<tool_call>{\"arguments\": {\"a\": 1}, \"extra\": [{\"k\": 1}, \"rogue\": null]}</tool_call>";
+        var brokenJson = "<tool_call>{broken}</tool_call>";
+        var undeclared = "<tool_call>{\"name\": \"unknown_tool\", \"arguments\": {\"items\": [{\"k\": 1}, \"rogue\": null]}}</tool_call>";
+        Assert.False(ToolCallHealingTransform.TryExtractToolCalls(ref missingName, out _, null, options, chatOptions));
+        Assert.False(ToolCallHealingTransform.TryExtractToolCalls(ref brokenJson, out _, null, options, chatOptions));
+        Assert.False(ToolCallHealingTransform.TryExtractToolCalls(ref undeclared, out _, null, options, chatOptions));
+        Assert.Equal(snapAfterValid.TotalInterventions, telemetry.CreateSnapshot("env-session").TotalInterventions);
+
+        // 5. Disabling EnforceAvailableToolsGuardrail on ToolCallHealingOptions allows promoting the undeclared corrupted tool call
+        options.EnforceAvailableToolsGuardrail = false;
+        Assert.True(ToolCallHealingTransform.TryExtractToolCalls(ref undeclared, out var undeclaredCalls, null, options, chatOptions));
+        Assert.Equal("unknown_tool", Assert.Single(undeclaredCalls).Name);
+        Assert.Equal(5, telemetry.CreateSnapshot("env-session").PseudoTagsExtracted);
+        Assert.Equal(5, telemetry.CreateSnapshot("env-session").JsonRepairs);
+    }
+
+    [Fact]
+    public void TryExtractUnclosedToolCall_CorruptedInlineArgumentsWithOptionsAndDispatcher_PromotesAndRecordsTelemetry()
+    {
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["edit_file"] = new ToolMapping(aliases: ["apply_edits"])
+            }
+        });
+        var telemetry = new ToolCallHealingTelemetry();
+        var options = new ToolCallHealingOptions
+        {
+            Dispatcher = dispatcher,
+            Telemetry = telemetry,
+            SessionId = "unclosed-session"
+        };
+        var chatOptions = new ChatOptions
+        {
+            Tools = [AIFunctionFactory.Create(() => "ok", "edit_file")]
+        };
+
+        // Undeclared unclosed corrupted tool call -> rejected with zero telemetry
+        var rejectedContent = "Preface <tool_call>{\"name\": \"rogue_tool\", \"arguments\": {\"edits\": [{\"oldText\": \"a\"}, \"rogue\": null]";
+        Assert.False(ToolCallHealingTransform.TryExtractUnclosedToolCall(ref rejectedContent, out var rejectedCall, out _, out _, null, options, chatOptions));
+        Assert.Null(rejectedCall);
+        Assert.Equal(0, telemetry.CreateSnapshot("unclosed-session").TotalInterventions);
+
+        // Aliased unclosed corrupted tool call -> promoted via options.Dispatcher and records PseudoTagExtracted + JsonRepaired
+        var validContent = "Applying now: <tool_call>{\"name\": \"apply_edits\", \"arguments\": {\"edits\": [{\"oldText\": \"a\", \"newText\": \"b\"}, \"rogue\": null], \"path\": \"Main.cs\"";
+        Assert.True(ToolCallHealingTransform.TryExtractUnclosedToolCall(ref validContent, out var promotedCall, out var proseBefore, out _, null, options, chatOptions));
+        Assert.NotNull(promotedCall);
+        Assert.Equal("apply_edits", promotedCall!.Name);
+        Assert.Equal("Main.cs", promotedCall.Arguments?["path"]);
+        Assert.Equal("Applying now:", proseBefore);
+
+        var snap = telemetry.CreateSnapshot("unclosed-session");
+        Assert.Equal(1, snap.PseudoTagsExtracted);
+        Assert.Equal(1, snap.JsonRepairs);
+    }
 }
