@@ -781,4 +781,62 @@ public class ToolCallHealingChatClientTests
 
         Assert.Equal(0, telemetry.CreateSnapshot("legit-input-session").ArgumentsUnwrapped);
     }
+
+    [Fact]
+    public async Task GetResponseAndStreaming_UnwrapSyntheticInputArgumentDisabled_AndMixedTextAndToolCallUpdate_PreservesContents()
+    {
+        const string jsonInput = "{\"path\": \"Program.cs\"}";
+
+        static async IAsyncEnumerable<ChatResponseUpdate> GenerateMixedUpdate()
+        {
+            var mixedUpdate = new ChatResponseUpdate { Role = ChatRole.Assistant, FinishReason = ChatFinishReason.ToolCalls };
+            mixedUpdate.Contents.Add(new TextContent("Checking <tool"));
+            mixedUpdate.Contents.Add(new FunctionCallContent("", "custom_tool", new Dictionary<string, object?>
+            {
+                ["input"] = jsonInput
+            }));
+            yield return mixedUpdate;
+            await Task.CompletedTask;
+        }
+
+        var telemetry = new ToolCallHealingTelemetry();
+        var innerClient = new FakeChatClient(
+            getResponse: (_, _, _) => Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, [
+                new FunctionCallContent("", "custom_tool", new Dictionary<string, object?> { ["input"] = jsonInput })
+            ]))),
+            getStreamingResponse: (_, _, _) => GenerateMixedUpdate());
+
+        var client = new ToolCallHealingChatClient(innerClient, new ToolCallHealingOptions
+        {
+            StreamingMode = StreamingHealingMode.PrefixTriggered,
+            UnwrapSyntheticInputArgument = false,
+            Telemetry = telemetry,
+            SessionId = "default-session"
+        });
+
+        // ConversationId override forces ResolveEffectiveOptions to clone ToolCallHealingOptions
+        var chatOptions = new ChatOptions { ConversationId = "no-unwrap-session" };
+
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "run")], chatOptions);
+        var respCall = Assert.Single(response.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        Assert.StartsWith("call_", respCall.CallId);
+        Assert.Equal(jsonInput, respCall.Arguments?["input"]);
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var update in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "run")], chatOptions))
+        {
+            updates.Add(update);
+        }
+
+        var combinedText = string.Concat(updates.Select(u => u.Text));
+        Assert.Equal("Checking <tool", combinedText);
+
+        var streamCall = Assert.Single(updates.SelectMany(u => u.Contents).OfType<FunctionCallContent>());
+        Assert.StartsWith("call_", streamCall.CallId);
+        Assert.Equal(jsonInput, streamCall.Arguments?["input"]);
+
+        var snap = telemetry.CreateSnapshot("no-unwrap-session");
+        Assert.Equal(2, snap.CallIdsGenerated);
+        Assert.Equal(0, snap.ArgumentsUnwrapped);
+    }
 }

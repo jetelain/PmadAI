@@ -801,6 +801,141 @@ public class ToolCallHealingTests
         Assert.Equal("[a-z, ]", parsedMalformed["regex"]);
         var snapAfterMalformed = telemetry.CreateSnapshot("comma-in-string");
         Assert.Equal(1, snapAfterMalformed.JsonRepairs);
+
+        // 4. Multiple consecutive structural trailing commas before } or ]
+        var multipleTrailingCommas = "{\"items\": [1, 2, , ], \"name\": \"ok\", , }";
+        var parsedMultiComma = ToolCallHealingTransform.ParseArgumentsJson(multipleTrailingCommas, null, "edit_file", options);
+        Assert.Equal("ok", parsedMultiComma["name"]);
+        Assert.Equal(2, telemetry.CreateSnapshot("comma-in-string").JsonRepairs);
+    }
+
+    [Fact]
+    public void SanitizeArgumentsJson_And_HealChatMessage_NonJsonFencedOrUnrecoverablePayloads_DoNotCorruptOrRecordFalseTelemetry()
+    {
+        var telemetry = new ToolCallHealingTelemetry();
+        var options = new ToolCallHealingOptions
+        {
+            Telemetry = telemetry,
+            SessionId = "non-json-guard"
+        };
+        var mockLogger = new Mock<ILogger>();
+
+        // 1. Fenced code block or unrecoverable string with ", }" passed to SanitizeArgumentsJson
+        const string fencedCode = "```csharp\npublic class Foo { int[] a = { 1, 2, }; }\n```";
+        const string fencedBash = "```bash\n{ echo hello, }\n```";
+        const string plainWithCloser = "not json, }";
+        const string unrecoverableBraceWithComma = "{unrecoverable, }";
+
+        Assert.Equal(fencedCode, ToolCallHealingTransform.SanitizeArgumentsJson(fencedCode, mockLogger.Object, "compile", options));
+        Assert.Equal(fencedBash, ToolCallHealingTransform.SanitizeArgumentsJson(fencedBash, mockLogger.Object, "bash", options));
+        Assert.Equal(plainWithCloser, ToolCallHealingTransform.SanitizeArgumentsJson(plainWithCloser, mockLogger.Object, "raw", options));
+        Assert.Equal(unrecoverableBraceWithComma, ToolCallHealingTransform.SanitizeArgumentsJson(unrecoverableBraceWithComma, mockLogger.Object, "raw", options));
+        Assert.Equal(0, telemetry.CreateSnapshot("non-json-guard").TotalInterventions);
+
+        // 2. FunctionCallContent with "input" containing fenced code or shell block (even when chatOptions is null)
+        // must remain untouched with zero telemetry and zero warning logs
+        var msg = new ChatMessage(ChatRole.Assistant, [
+            new FunctionCallContent("call_code", "run_python", new Dictionary<string, object?> { ["input"] = "```python\nprint('hi')\n```" }),
+            new FunctionCallContent("call_sh", "run_shell", new Dictionary<string, object?> { ["input"] = "{ echo hi; }" })
+        ]);
+
+        var healed = ToolCallHealingTransform.HealChatMessage(msg, mockLogger.Object, options, chatOptions: null);
+        var calls = healed.SelectMany(m => m.Contents).OfType<FunctionCallContent>().ToList();
+        Assert.Equal(2, calls.Count);
+        Assert.Equal("```python\nprint('hi')\n```", calls[0].Arguments?["input"]);
+        Assert.Equal("{ echo hi; }", calls[1].Arguments?["input"]);
+        Assert.Equal(0, telemetry.CreateSnapshot("non-json-guard").TotalInterventions);
+        mockLogger.Verify(
+            x => x.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.IsAny<It.IsAnyType>(),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public void HealChatMessage_TranslationAndAdvancedDispatcherMappings_HandlesInputParameterAccurately()
+    {
+        var telemetry = new ToolCallHealingTelemetry();
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                // Parameter alias configured on Tools[SourceTool] for a translated tool invoked via translation alias
+                ["jq_filter"] = new ToolMapping(parameterAliases: new Dictionary<string, IEnumerable<string>>
+                {
+                    ["query"] = ["input"]
+                }),
+                // Promoted collection parameter named "input"
+                ["batch_collect"] = new ToolMapping().AddPromotedCollectionParameter("items", "input"),
+                // Propagated parameter named "input"
+                ["propagate_tool"] = new ToolMapping().AddPropagatedParameter("input"),
+                // RangeToLimitRule end alias named "input"
+                ["range_tool"] = new ToolMapping().MapEndLineToLimit("start", "limit", ["input"])
+            },
+            Translations =
+            [
+                new ToolTranslation
+                {
+                    SourceTool = "jq_filter",
+                    TargetTool = "bash",
+                    CommandTemplate = "jq {query}",
+                    Aliases = ["jq"]
+                },
+                new ToolTranslation
+                {
+                    SourceTool = "grep_search",
+                    TargetTool = "bash",
+                    CommandTemplate = "grep -rn {pattern} {path}"
+                }
+            ]
+        });
+
+        var options = new ToolCallHealingOptions
+        {
+            Dispatcher = dispatcher,
+            Telemetry = telemetry,
+            SessionId = "adv-input-session"
+        };
+
+        // TargetTool "bash" declares an "input" parameter (stdin), but "grep_search" translation only takes {pattern} and {path}
+        var chatOptions = new ChatOptions
+        {
+            Tools =
+            [
+                AIFunctionFactory.Create((string command, string? input) => command, "bash")
+            ]
+        };
+
+        // 1. "grep_search" does NOT declare "input" even though its TargetTool ("bash") does -> synthetic "input" IS unwrapped
+        var grepMsg = new ChatMessage(ChatRole.Assistant, [
+            new FunctionCallContent("call_grep", "grep_search", new Dictionary<string, object?>
+            {
+                ["input"] = "{\"pattern\": \"TODO\", \"path\": \"src\"}"
+            })
+        ]);
+        var healedGrep = ToolCallHealingTransform.HealChatMessage(grepMsg, null, options, chatOptions);
+        var grepCall = Assert.Single(healedGrep.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        Assert.Equal("TODO", grepCall.Arguments?["pattern"]);
+        Assert.Equal("src", grepCall.Arguments?["path"]);
+        Assert.False(grepCall.Arguments?.ContainsKey("input"));
+        Assert.Equal(1, telemetry.CreateSnapshot("adv-input-session").ArgumentsUnwrapped);
+
+        // 2. Translation alias "jq" (mapped via Tools["jq_filter"]) and advanced ToolMapping declarations preserve "input"
+        const string jsonPayload = "{\"a\": 1}";
+        var preservedMsg = new ChatMessage(ChatRole.Assistant, [
+            new FunctionCallContent("c1", "jq", new Dictionary<string, object?> { ["input"] = jsonPayload }),
+            new FunctionCallContent("c2", "batch_collect", new Dictionary<string, object?> { ["input"] = jsonPayload }),
+            new FunctionCallContent("c3", "propagate_tool", new Dictionary<string, object?> { ["input"] = jsonPayload }),
+            new FunctionCallContent("c4", "range_tool", new Dictionary<string, object?> { ["input"] = jsonPayload })
+        ]);
+        var healedPreserved = ToolCallHealingTransform.HealChatMessage(preservedMsg, null, options, chatOptions);
+        var preservedCalls = healedPreserved.SelectMany(m => m.Contents).OfType<FunctionCallContent>().ToList();
+        Assert.Equal(4, preservedCalls.Count);
+        Assert.All(preservedCalls, c => Assert.Equal(jsonPayload, c.Arguments?["input"]));
+        Assert.Equal(1, telemetry.CreateSnapshot("adv-input-session").ArgumentsUnwrapped);
     }
 
     [Fact]

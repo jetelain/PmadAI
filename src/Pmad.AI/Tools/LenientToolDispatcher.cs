@@ -991,6 +991,22 @@ public partial class LenientToolDispatcher
     }
 
     /// <summary>
+    /// Determines whether the specified candidate tool name matches a configured virtual tool translation.
+    /// </summary>
+    internal bool IsTranslation(string rawToolName)
+    {
+        if (string.IsNullOrWhiteSpace(rawToolName))
+        {
+            return false;
+        }
+
+        var toolName = rawToolName.Trim();
+        var stripped = _options.StripNamespacePrefixes ? StripNamespace(toolName) : toolName;
+        return _configuration.TryGetTranslation(toolName, out _) ||
+               _configuration.TryGetTranslation(stripped, out _);
+    }
+
+    /// <summary>
     /// Determines whether the specified tool declares or maps a top-level parameter with the given name
     /// in its registered JSON schema, parameter aliases, computed parameters, or translation rules.
     /// </summary>
@@ -1018,10 +1034,23 @@ public partial class LenientToolDispatcher
 
             if (translation.ParameterAliases != null &&
                 (translation.ParameterAliases.ContainsKey(parameterName) ||
-                 translation.ParameterAliases.Values.Any(v => string.Equals(v, parameterName, StringComparison.OrdinalIgnoreCase))))
+                 translation.ParameterAliases.Keys.Any(k => string.Equals(ToolHelpers.NormalizeToolIdentifier(k), normParam, StringComparison.Ordinal)) ||
+                 translation.ParameterAliases.Values.Any(v =>
+                     string.Equals(v, parameterName, StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(ToolHelpers.NormalizeToolIdentifier(v), normParam, StringComparison.Ordinal))))
             {
                 return true;
             }
+
+            if ((_configuration.Tools.TryGetValue(translation.SourceTool, out var sourceMapping) ||
+                 _configuration.Tools.TryGetValue(toolName, out sourceMapping) ||
+                 _configuration.Tools.TryGetValue(stripped, out sourceMapping)) &&
+                MappingDeclaresParameter(sourceMapping, parameterName, normParam))
+            {
+                return true;
+            }
+
+            return false;
         }
 
         // 2. Resolve canonical tool and mapping
@@ -1036,14 +1065,57 @@ public partial class LenientToolDispatcher
             }
         }
 
-        if (mapping != null)
+        if (mapping != null && MappingDeclaresParameter(mapping, parameterName, normParam))
         {
-            if (mapping.ParameterAliases.ContainsKey(parameterName) ||
-                mapping.ParameterAliases.Values.Any(v => string.Equals(v, parameterName, StringComparison.OrdinalIgnoreCase)) ||
-                (mapping.ComputedParameters != null && mapping.ComputedParameters.ContainsKey(parameterName)))
-            {
-                return true;
-            }
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool MappingDeclaresParameter(ToolMapping mapping, string parameterName, string normParam)
+    {
+        if (mapping.ParameterAliases.ContainsKey(parameterName) ||
+            mapping.ParameterAliases.Keys.Any(k => string.Equals(ToolHelpers.NormalizeToolIdentifier(k), normParam, StringComparison.Ordinal)) ||
+            mapping.ParameterAliases.Values.Any(v =>
+                string.Equals(v, parameterName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(ToolHelpers.NormalizeToolIdentifier(v), normParam, StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        if (mapping.ComputedParameters != null &&
+            (mapping.ComputedParameters.ContainsKey(parameterName) ||
+             mapping.ComputedParameters.Keys.Any(k => string.Equals(ToolHelpers.NormalizeToolIdentifier(k), normParam, StringComparison.Ordinal))))
+        {
+            return true;
+        }
+
+        if (mapping.PromotedCollectionParameters != null &&
+            mapping.PromotedCollectionParameters.Values.Any(set =>
+                set.Contains(parameterName) ||
+                set.Any(p => string.Equals(ToolHelpers.NormalizeToolIdentifier(p), normParam, StringComparison.Ordinal))))
+        {
+            return true;
+        }
+
+        if (mapping.PropagatedParameters != null &&
+            (mapping.PropagatedParameters.Contains(parameterName) ||
+             mapping.PropagatedParameters.Any(p => string.Equals(ToolHelpers.NormalizeToolIdentifier(p), normParam, StringComparison.Ordinal))))
+        {
+            return true;
+        }
+
+        if (mapping.RangeToLimitRules != null &&
+            mapping.RangeToLimitRules.Any(r =>
+                string.Equals(r.StartParameter, parameterName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(ToolHelpers.NormalizeToolIdentifier(r.StartParameter), normParam, StringComparison.Ordinal) ||
+                string.Equals(r.CountParameter, parameterName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(ToolHelpers.NormalizeToolIdentifier(r.CountParameter), normParam, StringComparison.Ordinal) ||
+                r.EndParameterAliases.Contains(parameterName) ||
+                r.EndParameterAliases.Any(a => string.Equals(ToolHelpers.NormalizeToolIdentifier(a), normParam, StringComparison.Ordinal))))
+        {
+            return true;
         }
 
         return false;

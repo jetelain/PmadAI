@@ -307,21 +307,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
 
                 if (otherContents != null && otherContents.Count > 0)
                 {
-                    var otherUpdate = new ChatResponseUpdate
-                    {
-                        Role = update.Role,
-                        FinishReason = update.FinishReason,
-                        ResponseId = update.ResponseId,
-                        CreatedAt = update.CreatedAt,
-                        ModelId = update.ModelId
-                    };
-                    foreach (var c in otherContents)
-                    {
-                        otherUpdate.Contents.Add(c is FunctionCallContent fcc
-                            ? ToolCallHealingTransform.SanitizeFunctionCallContent(fcc, _logger, _options, _chatOptions)
-                            : c);
-                    }
-                    output.Add(otherUpdate);
+                    output.Add(CreateSanitizedOtherContentsUpdate(update, otherContents));
                 }
 
                 if (_activeClosingTag != null && _tagBuffer.ToString().Contains(_activeClosingTag, StringComparison.OrdinalIgnoreCase))
@@ -373,6 +359,19 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                     var chunkToProcess = _heldPrefix + updateText;
                     _heldPrefix = string.Empty;
                     ProcessText(chunkToProcess, update, output);
+
+                    if (otherContents != null && otherContents.Count > 0)
+                    {
+                        if (!_isBufferingTag && !string.IsNullOrEmpty(_heldPrefix))
+                        {
+                            var heldUpdate = new ChatResponseUpdate { Role = update.Role };
+                            heldUpdate.Contents.Add(new TextContent(_heldPrefix));
+                            output.Add(heldUpdate);
+                            _heldPrefix = string.Empty;
+                        }
+
+                        output.Add(CreateSanitizedOtherContentsUpdate(update, otherContents));
+                    }
                 }
                 else if (otherContents != null && otherContents.Count > 0)
                 {
@@ -384,27 +383,32 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                         _heldPrefix = string.Empty;
                     }
 
-                    var sanitizedUpdate = new ChatResponseUpdate
-                    {
-                        Role = update.Role,
-                        FinishReason = update.FinishReason,
-                        ResponseId = update.ResponseId,
-                        CreatedAt = update.CreatedAt,
-                        ModelId = update.ModelId
-                    };
-                    foreach (var c in otherContents)
-                    {
-                        sanitizedUpdate.Contents.Add(c is FunctionCallContent fcc
-                            ? ToolCallHealingTransform.SanitizeFunctionCallContent(fcc, _logger, _options, _chatOptions)
-                            : c);
-                    }
-                    output.Add(sanitizedUpdate);
+                    output.Add(CreateSanitizedOtherContentsUpdate(update, otherContents));
                 }
                 else
                 {
                     output.Add(update);
                 }
             }
+        }
+
+        private ChatResponseUpdate CreateSanitizedOtherContentsUpdate(ChatResponseUpdate update, List<AIContent> otherContents)
+        {
+            var sanitizedUpdate = new ChatResponseUpdate
+            {
+                Role = update.Role,
+                FinishReason = update.FinishReason,
+                ResponseId = update.ResponseId,
+                CreatedAt = update.CreatedAt,
+                ModelId = update.ModelId
+            };
+            foreach (var c in otherContents)
+            {
+                sanitizedUpdate.Contents.Add(c is FunctionCallContent fcc
+                    ? ToolCallHealingTransform.SanitizeFunctionCallContent(fcc, _logger, _options, _chatOptions)
+                    : c);
+            }
+            return sanitizedUpdate;
         }
 
         private void ProcessText(string text, ChatResponseUpdate prototype, List<ChatResponseUpdate> output)

@@ -252,13 +252,26 @@ public static partial class ToolCallHealingTransform
                             var cleanedArgs = SanitizeArgumentsJson(strArgVal, logger, toolName, options);
                             if (!IsValidJson(cleanedArgs))
                             {
-                                var recovered = ParseArgumentsJson(cleanedArgs, logger, toolName, options);
+                                var recovered = new Dictionary<string, object?>(StringComparer.Ordinal);
+                                if (cleanedArgs.StartsWith('[') && JsonRepairUtilities.ExtractBalancedJsonElements(cleanedArgs).Count > 0)
+                                {
+                                    recovered[RootArraySentinelKey] = cleanedArgs;
+                                    options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Corrupted array container");
+                                }
+                                else if (cleanedArgs.StartsWith('{') && JsonRepairUtilities.TryExtractTopLevelPropertiesFromCorruptedObject(cleanedArgs, recovered))
+                                {
+                                    options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Corrupted object container");
+                                }
+
                                 if (recovered.Count > 0)
                                 {
                                     cleanedArgs = SerializeArgumentsToJson(recovered);
                                 }
                             }
-                            funcObj["arguments"] = cleanedArgs;
+                            if (IsValidJson(cleanedArgs))
+                            {
+                                funcObj["arguments"] = cleanedArgs;
+                            }
                         }
                         else
                         {
@@ -294,64 +307,67 @@ public static partial class ToolCallHealingTransform
             return "{}";
         }
 
-        var s = raw.Trim();
+        var trimmedRaw = raw.Trim();
+        var s = trimmedRaw;
+        bool fenceStripped = false;
 
         // Strip ```json ... ``` or ``` ... ```
         if (s.StartsWith("```"))
         {
-            var firstNewline = s.IndexOf('\n');
-            if (firstNewline >= 0)
+            var unFenced = StripMarkdownFences(s);
+            if (!IsObjectPayload(unFenced) && !IsValidJson(unFenced))
             {
-                s = s.Substring(firstNewline + 1);
-            }
-            else if (s.StartsWith("```json", StringComparison.OrdinalIgnoreCase))
-            {
-                s = s.Substring(7);
-            }
-            else
-            {
-                s = s.Substring(3);
+                return trimmedRaw;
             }
 
-            if (s.EndsWith("```"))
-            {
-                s = s.Substring(0, s.Length - 3);
-            }
-
-            s = s.Trim();
-            logger?.LogInformation("Stripped markdown code fences from arguments of tool '{ToolName}'", toolName ?? "unknown");
-            options?.Telemetry?.Record(ToolCallHealingEventType.FenceStripped, toolName, options.SessionId);
+            s = unFenced;
+            fenceStripped = true;
         }
 
         if (IsValidJson(s))
         {
+            if (fenceStripped)
+            {
+                logger?.LogInformation("Stripped markdown code fences from arguments of tool '{ToolName}'", toolName ?? "unknown");
+                options?.Telemetry?.Record(ToolCallHealingEventType.FenceStripped, toolName, options.SessionId);
+            }
             return s;
         }
 
-        // Remove trailing commas before } or ] outside of string literals only if commas and closing brackets exist
-        if (s.IndexOf(',') >= 0 && (s.IndexOf('}') >= 0 || s.IndexOf(']') >= 0))
+        if (!IsObjectPayload(s) && !s.StartsWith('"'))
         {
-            var afterCommas = RemoveTrailingCommasOutsideStrings(s);
-            if (afterCommas != s)
+            return trimmedRaw;
+        }
+
+        var candidate = s;
+        bool commasRepaired = false;
+
+        // Remove trailing commas before } or ] outside of string literals only if commas and closing brackets exist
+        if (candidate.IndexOf(',') >= 0 && (candidate.IndexOf('}') >= 0 || candidate.IndexOf(']') >= 0))
+        {
+            var afterCommas = RemoveTrailingCommasOutsideStrings(candidate);
+            if (afterCommas != candidate)
             {
-                logger?.LogDebug("Repaired trailing commas in arguments of tool '{ToolName}'", toolName ?? "unknown");
-                options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Trailing comma");
-                s = afterCommas;
+                candidate = afterCommas;
+                commasRepaired = true;
             }
         }
 
         // Validate JSON and attempt to escape unescaped control chars if parsing fails
         bool isValidJson = false;
+        bool controlCharsRepaired = false;
         try
         {
-            using var _ = JsonDocument.Parse(s);
+            using var _ = JsonDocument.Parse(candidate);
             isValidJson = true;
         }
         catch (JsonException)
         {
-            var escaped = EscapeControlCharsInStrings(s);
-            if (escaped != s)
+            var escaped = EscapeControlCharsInStrings(candidate);
+            if (escaped != candidate)
             {
+                candidate = escaped;
+                controlCharsRepaired = true;
                 try
                 {
                     using var _ = JsonDocument.Parse(escaped);
@@ -361,27 +377,24 @@ public static partial class ToolCallHealingTransform
                 {
                     // Escaped control chars helped, but payload may still be truncated.
                 }
-
-                logger?.LogInformation("Repaired unescaped control characters in arguments of tool '{ToolName}'", toolName ?? "unknown");
-                options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Control characters");
-                s = escaped;
             }
         }
 
         // Last resort: if the payload is still not valid JSON, it is likely truncated (e.g. the model
         // stopped emitting before the closing ']' or '}', or left a dangling key). Close the open
         // structure so the payload can be parsed and the tool invoked with the data it did emit.
-        if (!isValidJson && IsObjectPayload(s))
+        bool truncatedRepaired = false;
+        if (!isValidJson && IsObjectPayload(candidate))
         {
-            var repaired = JsonRepairUtilities.TryRepairTruncatedJson(s);
+            var repaired = JsonRepairUtilities.TryRepairTruncatedJson(candidate);
             if (repaired != null)
             {
                 try
                 {
                     using var _ = JsonDocument.Parse(repaired);
-                    logger?.LogInformation("Repaired truncated JSON arguments of tool '{ToolName}'", toolName ?? "unknown");
-                    options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Truncated payload");
-                    s = repaired;
+                    isValidJson = true;
+                    truncatedRepaired = true;
+                    candidate = repaired;
                 }
                 catch (JsonException)
                 {
@@ -390,7 +403,77 @@ public static partial class ToolCallHealingTransform
             }
         }
 
-        return s;
+        if (!isValidJson && !IsRecoverableCorruptedContainer(candidate))
+        {
+            return trimmedRaw;
+        }
+
+        if (fenceStripped)
+        {
+            logger?.LogInformation("Stripped markdown code fences from arguments of tool '{ToolName}'", toolName ?? "unknown");
+            options?.Telemetry?.Record(ToolCallHealingEventType.FenceStripped, toolName, options.SessionId);
+        }
+
+        if (commasRepaired)
+        {
+            logger?.LogDebug("Repaired trailing commas in arguments of tool '{ToolName}'", toolName ?? "unknown");
+            options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Trailing comma");
+        }
+
+        if (controlCharsRepaired)
+        {
+            logger?.LogInformation("Repaired unescaped control characters in arguments of tool '{ToolName}'", toolName ?? "unknown");
+            options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Control characters");
+        }
+
+        if (truncatedRepaired)
+        {
+            logger?.LogInformation("Repaired truncated JSON arguments of tool '{ToolName}'", toolName ?? "unknown");
+            options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Truncated payload");
+        }
+
+        return candidate;
+    }
+
+    private static string StripMarkdownFences(string s)
+    {
+        var firstNewline = s.IndexOf('\n');
+        if (firstNewline >= 0)
+        {
+            s = s.Substring(firstNewline + 1);
+        }
+        else if (s.StartsWith("```json", StringComparison.OrdinalIgnoreCase))
+        {
+            s = s.Substring(7);
+        }
+        else
+        {
+            s = s.Substring(3);
+        }
+
+        if (s.EndsWith("```"))
+        {
+            s = s.Substring(0, s.Length - 3);
+        }
+
+        return s.Trim();
+    }
+
+    private static bool IsRecoverableCorruptedContainer(string candidate)
+    {
+        if (candidate.StartsWith('['))
+        {
+            return JsonRepairUtilities.ExtractBalancedJsonElements(candidate).Count > 0;
+        }
+
+        if (candidate.StartsWith('{'))
+        {
+            return JsonRepairUtilities.TryExtractTopLevelPropertiesFromCorruptedObject(
+                candidate,
+                new Dictionary<string, object?>(StringComparer.Ordinal));
+        }
+
+        return false;
     }
 
     private static bool IsObjectPayload(string s)
@@ -436,7 +519,7 @@ public static partial class ToolCallHealingTransform
             if (c == ',')
             {
                 int j = i + 1;
-                while (j < s.Length && char.IsWhiteSpace(s[j]))
+                while (j < s.Length && (char.IsWhiteSpace(s[j]) || s[j] == ','))
                 {
                     j++;
                 }
@@ -541,6 +624,14 @@ public static partial class ToolCallHealingTransform
         ILogger? logger = null,
         string? toolName = null,
         ToolCallHealingOptions? options = null)
+        => ParseArgumentsJsonCore(rawJson, logger, toolName, options, logWarningOnFailure: true);
+
+    private static IDictionary<string, object?> ParseArgumentsJsonCore(
+        string rawJson,
+        ILogger? logger,
+        string? toolName,
+        ToolCallHealingOptions? options,
+        bool logWarningOnFailure)
     {
         if (string.IsNullOrWhiteSpace(rawJson))
         {
@@ -606,7 +697,7 @@ public static partial class ToolCallHealingTransform
             {
                 options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Corrupted object container");
             }
-            else
+            else if (logWarningOnFailure)
             {
                 logger?.LogWarning(ex, "Failed to parse sanitized JSON arguments for tool '{ToolName}'", toolName ?? "unknown");
             }
@@ -1107,10 +1198,10 @@ public static partial class ToolCallHealingTransform
             arguments is { Count: 1 } &&
             arguments.TryGetValue("input", out var inputVal) &&
             inputVal is string strInput &&
-            (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith('[') || strInput.TrimStart().StartsWith("```")) &&
+            LooksLikeJsonOrFencedJsonContainer(strInput) &&
             !ToolDeclaresInputParameter(fcc.Name, options, chatOptions))
         {
-            var parsed = ParseArgumentsJson(strInput, logger, fcc.Name, options);
+            var parsed = ParseArgumentsJsonCore(strInput, logger, fcc.Name, options, logWarningOnFailure: false);
             if (parsed.Count > 0)
             {
                 arguments = parsed;
@@ -1126,6 +1217,23 @@ public static partial class ToolCallHealingTransform
         return fcc;
     }
 
+    private static bool LooksLikeJsonOrFencedJsonContainer(string strInput)
+    {
+        var trimmed = strInput.TrimStart();
+        if (trimmed.StartsWith('{') || trimmed.StartsWith('['))
+        {
+            return true;
+        }
+
+        if (trimmed.StartsWith("```", StringComparison.Ordinal))
+        {
+            var unFenced = StripMarkdownFences(trimmed);
+            return IsObjectPayload(unFenced);
+        }
+
+        return false;
+    }
+
     private static bool ToolDeclaresInputParameter(
         string toolName,
         ToolCallHealingOptions? options,
@@ -1137,9 +1245,17 @@ public static partial class ToolCallHealingTransform
         }
 
         var dispatcher = options?.Dispatcher ?? chatOptions.GetToolDispatcher();
-        if (dispatcher != null && dispatcher.DeclaresParameter(toolName, "input"))
+        if (dispatcher != null)
         {
-            return true;
+            if (dispatcher.DeclaresParameter(toolName, "input"))
+            {
+                return true;
+            }
+
+            if (dispatcher.IsTranslation(toolName))
+            {
+                return false;
+            }
         }
 
         if (chatOptions?.Tools is { Count: > 0 })
