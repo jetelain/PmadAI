@@ -61,6 +61,12 @@ public class ToolCallHealingOptions
     /// Optional session identifier propagated to telemetry events.
     /// </summary>
     public string? SessionId { get; set; }
+
+    /// <summary>
+    /// Whether to unwrap a single synthetic "input" argument containing stringified JSON into top-level arguments
+    /// when the target tool does not declare an "input" parameter. Defaults to true.
+    /// </summary>
+    public bool UnwrapSyntheticInputArgument { get; set; } = true;
 }
 
 /// <summary>
@@ -103,7 +109,8 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                 EnforceAvailableToolsGuardrail = _options.EnforceAvailableToolsGuardrail,
                 Dispatcher = dispatcher,
                 Telemetry = _options.Telemetry,
-                SessionId = sessionId
+                SessionId = sessionId,
+                UnwrapSyntheticInputArgument = _options.UnwrapSyntheticInputArgument
             };
         }
 
@@ -197,7 +204,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
         {
             if (allContents[i] is FunctionCallContent fcc)
             {
-                allContents[i] = ToolCallHealingTransform.SanitizeFunctionCallContent(fcc, optionsToUse.Logger, optionsToUse);
+                allContents[i] = ToolCallHealingTransform.SanitizeFunctionCallContent(fcc, optionsToUse.Logger, optionsToUse, options);
             }
         }
 
@@ -311,7 +318,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                     foreach (var c in otherContents)
                     {
                         otherUpdate.Contents.Add(c is FunctionCallContent fcc
-                            ? ToolCallHealingTransform.SanitizeFunctionCallContent(fcc, _logger, _options)
+                            ? ToolCallHealingTransform.SanitizeFunctionCallContent(fcc, _logger, _options, _chatOptions)
                             : c);
                     }
                     output.Add(otherUpdate);
@@ -388,7 +395,7 @@ public class ToolCallHealingChatClient : DelegatingChatClient
                     foreach (var c in otherContents)
                     {
                         sanitizedUpdate.Contents.Add(c is FunctionCallContent fcc
-                            ? ToolCallHealingTransform.SanitizeFunctionCallContent(fcc, _logger, _options)
+                            ? ToolCallHealingTransform.SanitizeFunctionCallContent(fcc, _logger, _options, _chatOptions)
                             : c);
                     }
                     output.Add(sanitizedUpdate);

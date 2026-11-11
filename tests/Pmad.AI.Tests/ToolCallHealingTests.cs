@@ -768,4 +768,111 @@ public class ToolCallHealingTests
         Assert.Equal(1, snap.PseudoTagsExtracted);
         Assert.Equal(1, snap.JsonRepairs);
     }
+
+    [Fact]
+    public void SanitizeArgumentsJson_CommasBeforeClosersInsideStringLiterals_PreservesStringContentsInValidFencedAndMalformedPayloads()
+    {
+        var telemetry = new ToolCallHealingTelemetry();
+        var options = new ToolCallHealingOptions
+        {
+            Telemetry = telemetry,
+            SessionId = "comma-in-string"
+        };
+
+        // 1. Valid JSON passed directly to SanitizeArgumentsJson
+        var validJson = "{\"code\": \"var arr = new int[] { 1, 2, };\", \"regex\": \"[a-z, ]\"}";
+        var sanitizedValid = ToolCallHealingTransform.SanitizeArgumentsJson(validJson, null, "edit_file", options);
+        Assert.Equal(validJson, sanitizedValid);
+        Assert.Equal(0, telemetry.CreateSnapshot("comma-in-string").TotalInterventions);
+
+        // 2. Valid JSON wrapped in markdown code fences passed to ParseArgumentsJson / SanitizeArgumentsJson
+        var fencedValidJson = $"```json\n{validJson}\n```";
+        var parsedFenced = ToolCallHealingTransform.ParseArgumentsJson(fencedValidJson, null, "edit_file", options);
+        Assert.Equal("var arr = new int[] { 1, 2, };", parsedFenced["code"]);
+        Assert.Equal("[a-z, ]", parsedFenced["regex"]);
+        var snapAfterFenced = telemetry.CreateSnapshot("comma-in-string");
+        Assert.Equal(1, snapAfterFenced.FencesStripped);
+        Assert.Equal(0, snapAfterFenced.JsonRepairs);
+
+        // 3. Malformed JSON with an actual structural trailing comma AND ", }" / ", ]" inside string literals
+        var malformedWithOuterTrailingComma = "{\"code\": \"var arr = new int[] { 1, 2, };\", \"regex\": \"[a-z, ]\",}";
+        var parsedMalformed = ToolCallHealingTransform.ParseArgumentsJson(malformedWithOuterTrailingComma, null, "edit_file", options);
+        Assert.Equal("var arr = new int[] { 1, 2, };", parsedMalformed["code"]);
+        Assert.Equal("[a-z, ]", parsedMalformed["regex"]);
+        var snapAfterMalformed = telemetry.CreateSnapshot("comma-in-string");
+        Assert.Equal(1, snapAfterMalformed.JsonRepairs);
+    }
+
+    [Fact]
+    public void HealChatMessage_ToolWithLegitimateInputParameter_DoesNotUnwrapJsonStringArgument()
+    {
+        var telemetry = new ToolCallHealingTelemetry();
+        var options = new ToolCallHealingOptions
+        {
+            Telemetry = telemetry,
+            SessionId = "input-param-session"
+        };
+        var chatOptions = new ChatOptions
+        {
+            Tools =
+            [
+                AIFunctionFactory.Create((string input) => input, "format_json"),
+                AIFunctionFactory.Create((int id) => id.ToString(), "lookup")
+            ]
+        };
+
+        // 1. Tool declares parameter named "input" -> JSON string must remain under "input"
+        var jsonPayload = "{\"id\": 123, \"name\": \"test\"}";
+        var msgWithDeclaredInput = new ChatMessage(ChatRole.Assistant, [
+            new FunctionCallContent("call_1", "format_json", new Dictionary<string, object?> { ["input"] = jsonPayload })
+        ]);
+
+        var healed1 = ToolCallHealingTransform.HealChatMessage(msgWithDeclaredInput, null, options, chatOptions);
+        var call1 = Assert.Single(healed1.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        Assert.Equal(jsonPayload, call1.Arguments?["input"]);
+        Assert.False(call1.Arguments?.ContainsKey("id"));
+        Assert.Equal(0, telemetry.CreateSnapshot("input-param-session").ArgumentsUnwrapped);
+
+        // 2. Tool does NOT declare "input" -> synthetic "input" wrapper is unwrapped into top-level arguments
+        var msgWithSyntheticInput = new ChatMessage(ChatRole.Assistant, [
+            new FunctionCallContent("call_2", "lookup", new Dictionary<string, object?> { ["input"] = "{\"id\": 123}" })
+        ]);
+
+        var healed2 = ToolCallHealingTransform.HealChatMessage(msgWithSyntheticInput, null, options, chatOptions);
+        var call2 = Assert.Single(healed2.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+        Assert.Equal(123, call2.Arguments?["id"]);
+        Assert.False(call2.Arguments?.ContainsKey("input"));
+        Assert.Equal(1, telemetry.CreateSnapshot("input-param-session").ArgumentsUnwrapped);
+
+        // 3. Dispatcher parameter alias / translation declaring "input" -> preserved without unwrapping
+        var dispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
+        {
+            Tools =
+            {
+                ["transform_payload"] = new ToolMapping(parameterAliases: new Dictionary<string, IEnumerable<string>> { ["payload"] = ["input"] })
+            },
+            Translations =
+            [
+                new ToolTranslation
+                {
+                    SourceTool = "jq_filter",
+                    TargetTool = "bash",
+                    CommandTemplate = "echo {input} | jq ."
+                }
+            ]
+        });
+        options.Dispatcher = dispatcher;
+
+        var msgAliasInput = new ChatMessage(ChatRole.Assistant, [
+            new FunctionCallContent("call_3", "transform_payload", new Dictionary<string, object?> { ["input"] = jsonPayload }),
+            new FunctionCallContent("call_4", "jq_filter", new Dictionary<string, object?> { ["input"] = jsonPayload })
+        ]);
+
+        var healed3 = ToolCallHealingTransform.HealChatMessage(msgAliasInput, null, options, chatOptions: null);
+        var calls3 = healed3.SelectMany(m => m.Contents).OfType<FunctionCallContent>().ToList();
+        Assert.Equal(2, calls3.Count);
+        Assert.Equal(jsonPayload, calls3[0].Arguments?["input"]);
+        Assert.Equal(jsonPayload, calls3[1].Arguments?["input"]);
+        Assert.Equal(1, telemetry.CreateSnapshot("input-param-session").ArgumentsUnwrapped);
+    }
 }

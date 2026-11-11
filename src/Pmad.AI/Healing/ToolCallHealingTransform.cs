@@ -32,9 +32,6 @@ public static partial class ToolCallHealingTransform
     [GeneratedRegex(@"^<(?:think|thought)>\s*([\s\S]*)$")]
     private static partial Regex UnclosedThinkRegex();
 
-    [GeneratedRegex(@",\s*([\}\]])")]
-    private static partial Regex TrailingCommasRegex();
-
     /// <summary>
     /// Evaluates whether a candidate pseudo-tool-call extracted from text passes available tools guardrails.
     /// When tools are declared in <paramref name="chatOptions"/>, candidate tool names must match a declared tool,
@@ -326,10 +323,15 @@ public static partial class ToolCallHealingTransform
             options?.Telemetry?.Record(ToolCallHealingEventType.FenceStripped, toolName, options.SessionId);
         }
 
-        // Remove trailing commas before } or ] only if commas and closing brackets exist
+        if (IsValidJson(s))
+        {
+            return s;
+        }
+
+        // Remove trailing commas before } or ] outside of string literals only if commas and closing brackets exist
         if (s.IndexOf(',') >= 0 && (s.IndexOf('}') >= 0 || s.IndexOf(']') >= 0))
         {
-            var afterCommas = TrailingCommasRegex().Replace(s, "$1");
+            var afterCommas = RemoveTrailingCommasOutsideStrings(s);
             if (afterCommas != s)
             {
                 logger?.LogDebug("Repaired trailing commas in arguments of tool '{ToolName}'", toolName ?? "unknown");
@@ -396,6 +398,66 @@ public static partial class ToolCallHealingTransform
         if (s.Length == 0) return false;
         var first = s[0];
         return first == '{' || first == '[';
+    }
+
+    private static string RemoveTrailingCommasOutsideStrings(string s)
+    {
+        StringBuilder? sb = null;
+        bool inString = false;
+        bool escaped = false;
+        int lastCopiedIndex = 0;
+
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (inString)
+            {
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (c == '\\')
+                {
+                    escaped = true;
+                }
+                else if (c == '"')
+                {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inString = true;
+                continue;
+            }
+
+            if (c == ',')
+            {
+                int j = i + 1;
+                while (j < s.Length && char.IsWhiteSpace(s[j]))
+                {
+                    j++;
+                }
+
+                if (j < s.Length && (s[j] == '}' || s[j] == ']'))
+                {
+                    sb ??= new StringBuilder(s.Length);
+                    sb.Append(s, lastCopiedIndex, i - lastCopiedIndex);
+                    lastCopiedIndex = j;
+                    i = j - 1;
+                }
+            }
+        }
+
+        if (sb == null)
+        {
+            return s;
+        }
+
+        sb.Append(s, lastCopiedIndex, s.Length - lastCopiedIndex);
+        return sb.ToString();
     }
 
     private static string EscapeControlCharsInStrings(string s)
@@ -833,7 +895,16 @@ public static partial class ToolCallHealingTransform
             }
         }
 
-        // 1. Check for pseudo-tool calls in TextContent
+        // 1. Sanitize existing FunctionCallContent items before extracting pseudo-tool calls from text
+        for (int i = 0; i < message.Contents.Count; i++)
+        {
+            if (message.Contents[i] is FunctionCallContent fcc)
+            {
+                message.Contents[i] = SanitizeFunctionCallContent(fcc, logger, options, chatOptions);
+            }
+        }
+
+        // 2. Check for pseudo-tool calls in TextContent
         for (int i = 0; i < message.Contents.Count; i++)
         {
             if (message.Contents[i] is TextContent textContent && !string.IsNullOrWhiteSpace(textContent.Text))
@@ -867,15 +938,6 @@ public static partial class ToolCallHealingTransform
                     // Non-empty text safeguard: if stripping reduced text to whitespace with no tool calls, retain original text
                     message.Contents[i] = new TextContent(originalText.Trim());
                 }
-            }
-        }
-
-        // 2. Sanitize existing FunctionCallContent items
-        for (int i = 0; i < message.Contents.Count; i++)
-        {
-            if (message.Contents[i] is FunctionCallContent fcc)
-            {
-                message.Contents[i] = SanitizeFunctionCallContent(fcc, logger, options);
             }
         }
 
@@ -1027,7 +1089,8 @@ public static partial class ToolCallHealingTransform
     internal static FunctionCallContent SanitizeFunctionCallContent(
         FunctionCallContent fcc,
         ILogger? logger,
-        ToolCallHealingOptions? options)
+        ToolCallHealingOptions? options,
+        ChatOptions? chatOptions = null)
     {
         var isCallIdGenerated = string.IsNullOrWhiteSpace(fcc.CallId);
         var callId = isCallIdGenerated ? $"call_{Guid.NewGuid():N}"[..12] : fcc.CallId;
@@ -1038,11 +1101,14 @@ public static partial class ToolCallHealingTransform
 
         var arguments = fcc.Arguments;
 
-        // If arguments contains a single "input" property with a string that looks like JSON
-        if (arguments is { Count: 1 } &&
+        // If arguments contains a single "input" property with a string that looks like JSON,
+        // unwrap it only when synthetic input unwrapping is enabled and the target tool does not legitimately declare an "input" parameter.
+        if ((options?.UnwrapSyntheticInputArgument ?? true) &&
+            arguments is { Count: 1 } &&
             arguments.TryGetValue("input", out var inputVal) &&
             inputVal is string strInput &&
-            (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith('[') || strInput.TrimStart().StartsWith("```")))
+            (strInput.TrimStart().StartsWith('{') || strInput.TrimStart().StartsWith('[') || strInput.TrimStart().StartsWith("```")) &&
+            !ToolDeclaresInputParameter(fcc.Name, options, chatOptions))
         {
             var parsed = ParseArgumentsJson(strInput, logger, fcc.Name, options);
             if (parsed.Count > 0)
@@ -1058,6 +1124,70 @@ public static partial class ToolCallHealingTransform
         }
 
         return fcc;
+    }
+
+    private static bool ToolDeclaresInputParameter(
+        string toolName,
+        ToolCallHealingOptions? options,
+        ChatOptions? chatOptions)
+    {
+        if (string.IsNullOrWhiteSpace(toolName))
+        {
+            return false;
+        }
+
+        var dispatcher = options?.Dispatcher ?? chatOptions.GetToolDispatcher();
+        if (dispatcher != null && dispatcher.DeclaresParameter(toolName, "input"))
+        {
+            return true;
+        }
+
+        if (chatOptions?.Tools is { Count: > 0 })
+        {
+            var stripped = LenientToolDispatcher.StripNamespace(toolName.Trim());
+            var normToolName = ToolHelpers.NormalizeToolIdentifier(toolName);
+            var normStripped = ToolHelpers.NormalizeToolIdentifier(stripped);
+            var canonical = dispatcher != null ? dispatcher.ResolveCanonicalToolName(toolName) : stripped;
+            var normCanonical = ToolHelpers.NormalizeToolIdentifier(canonical);
+
+            foreach (var tool in chatOptions.Tools)
+            {
+                if (tool is not AIFunctionDeclaration fnDecl || string.IsNullOrWhiteSpace(fnDecl.Name))
+                {
+                    continue;
+                }
+
+                var declaredName = fnDecl.Name;
+                var declaredStripped = LenientToolDispatcher.StripNamespace(declaredName.Trim());
+                var normDeclared = ToolHelpers.NormalizeToolIdentifier(declaredName);
+                var normDeclaredStripped = ToolHelpers.NormalizeToolIdentifier(declaredStripped);
+
+                bool matchesTool =
+                    string.Equals(declaredName, toolName, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(declaredName, stripped, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(declaredName, canonical, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(declaredStripped, stripped, StringComparison.OrdinalIgnoreCase) ||
+                    (!string.IsNullOrEmpty(normDeclared) &&
+                     (string.Equals(normDeclared, normToolName, StringComparison.Ordinal) ||
+                      string.Equals(normDeclared, normStripped, StringComparison.Ordinal) ||
+                      string.Equals(normDeclared, normCanonical, StringComparison.Ordinal) ||
+                      string.Equals(normDeclaredStripped, normStripped, StringComparison.Ordinal))) ||
+                    (dispatcher != null && dispatcher.IsToolAvailable(toolName, [tool]));
+
+                if (matchesTool)
+                {
+                    var props = SchemaHelpers.ExtractSchemaProperties(fnDecl.JsonSchema);
+                    if (props != null &&
+                        (props.Contains("input") ||
+                         props.Any(p => string.Equals(ToolHelpers.NormalizeToolIdentifier(p), "input", StringComparison.Ordinal))))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 
     internal static object? UnwrapJsonElement(JsonElement element)

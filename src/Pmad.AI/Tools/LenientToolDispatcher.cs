@@ -991,6 +991,65 @@ public partial class LenientToolDispatcher
     }
 
     /// <summary>
+    /// Determines whether the specified tool declares or maps a top-level parameter with the given name
+    /// in its registered JSON schema, parameter aliases, computed parameters, or translation rules.
+    /// </summary>
+    internal bool DeclaresParameter(string rawToolName, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(rawToolName) || string.IsNullOrWhiteSpace(parameterName))
+        {
+            return false;
+        }
+
+        var toolName = rawToolName.Trim();
+        var stripped = _options.StripNamespacePrefixes ? StripNamespace(toolName) : toolName;
+        var normParam = ToolHelpers.NormalizeToolIdentifier(parameterName);
+
+        // 1. Check translation rules
+        if (_configuration.TryGetTranslation(toolName, out var translation) ||
+            _configuration.TryGetTranslation(stripped, out translation))
+        {
+            var placeholders = ExtractTemplatePlaceholders(translation.CommandTemplate);
+            if (placeholders.Contains(parameterName) ||
+                placeholders.Any(p => string.Equals(ToolHelpers.NormalizeToolIdentifier(p), normParam, StringComparison.Ordinal)))
+            {
+                return true;
+            }
+
+            if (translation.ParameterAliases != null &&
+                (translation.ParameterAliases.ContainsKey(parameterName) ||
+                 translation.ParameterAliases.Values.Any(v => string.Equals(v, parameterName, StringComparison.OrdinalIgnoreCase))))
+            {
+                return true;
+            }
+        }
+
+        // 2. Resolve canonical tool and mapping
+        var (canonicalTool, mapping, _, _) = ResolveCanonicalToolAndMapping(stripped);
+
+        if (_registeredTools.TryGetSchema(canonicalTool, out var propDict, out _) && propDict != null)
+        {
+            if (propDict.ContainsKey(parameterName) ||
+                propDict.Keys.Any(k => string.Equals(ToolHelpers.NormalizeToolIdentifier(k), normParam, StringComparison.Ordinal)))
+            {
+                return true;
+            }
+        }
+
+        if (mapping != null)
+        {
+            if (mapping.ParameterAliases.ContainsKey(parameterName) ||
+                mapping.ParameterAliases.Values.Any(v => string.Equals(v, parameterName, StringComparison.OrdinalIgnoreCase)) ||
+                (mapping.ComputedParameters != null && mapping.ComputedParameters.ContainsKey(parameterName)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Determines whether the specified candidate tool name matches one of the declared available tools,
     /// taking into account namespace prefixes, tool aliases, and virtual tool translations.
     /// </summary>
