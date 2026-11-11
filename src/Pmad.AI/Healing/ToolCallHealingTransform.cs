@@ -526,7 +526,19 @@ public static partial class ToolCallHealingTransform
         }
         catch (Exception ex)
         {
-            logger?.LogWarning(ex, "Failed to parse sanitized JSON arguments for tool '{ToolName}'", toolName ?? "unknown");
+            if (sanitized.StartsWith('[') && JsonRepairUtilities.ExtractBalancedJsonElements(sanitized).Count > 0)
+            {
+                dict[RootArraySentinelKey] = sanitized;
+                options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Corrupted array container");
+            }
+            else if (sanitized.StartsWith('{') && JsonRepairUtilities.TryExtractTopLevelPropertiesFromCorruptedObject(sanitized, dict))
+            {
+                options?.Telemetry?.Record(ToolCallHealingEventType.JsonRepaired, toolName, options.SessionId, "Corrupted object container");
+            }
+            else
+            {
+                logger?.LogWarning(ex, "Failed to parse sanitized JSON arguments for tool '{ToolName}'", toolName ?? "unknown");
+            }
         }
         return dict;
     }

@@ -463,4 +463,115 @@ public class JsonRepairUtilitiesTests
         Assert.False(isTruncated);
         Assert.Equal("{\"second\": 2}".Length, consumedLen);
     }
+
+    [Fact]
+    public void ExtractBalancedJsonElements_CorruptedArray_ExtractsIndividualBalancedElements()
+    {
+        var input = "[{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"]}, \"options\": null}, {\"prompt\": \"Q2\"}]";
+        var elements = JsonRepairUtilities.ExtractBalancedJsonElements(input);
+
+        Assert.Equal(2, elements.Count);
+        Assert.Equal("{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"]}", elements[0]);
+        Assert.Equal("{\"prompt\": \"Q2\"}", elements[1]);
+    }
+
+    [Fact]
+    public void ExtractBalancedJsonElements_TruncatedTrailingElement_RepairsAndExtracts()
+    {
+        var input = "[{\"prompt\": \"Q1\"}, \"options\": null}, {\"prompt\": \"Q2\"";
+        var elements = JsonRepairUtilities.ExtractBalancedJsonElements(input, '{');
+
+        Assert.Equal(2, elements.Count);
+        Assert.Equal("{\"prompt\": \"Q1\"}", elements[0]);
+        Assert.Equal("{\"prompt\": \"Q2\"}", elements[1]);
+    }
+
+    [Fact]
+    public void ExtractBalancedJsonElements_NestedArrays_ExtractsNestedArrayElements()
+    {
+        var input = "[[1, 2], rogue, [3, 4]]";
+        var elements = JsonRepairUtilities.ExtractBalancedJsonElements(input, '[');
+
+        Assert.Equal(2, elements.Count);
+        Assert.Equal("[1, 2]", elements[0]);
+        Assert.Equal("[3, 4]", elements[1]);
+    }
+
+    [Fact]
+    public void TryParseStringifiedJsonArrayElements_CorruptedArray_ReturnsClrObjects()
+    {
+        var input = "[{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"]}, \"options\": null}, {\"prompt\": \"Q2\"}]";
+        var result = JsonRepairUtilities.TryParseStringifiedJsonArrayElements(input);
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result.Count);
+
+        var first = Assert.IsAssignableFrom<IDictionary<string, object?>>(result[0]);
+        Assert.Equal("Q1", first["prompt"]);
+        var opts = Assert.IsAssignableFrom<IList<object?>>(first["options"]);
+        Assert.Equal(new object?[] { "A", "B" }, opts);
+
+        var second = Assert.IsAssignableFrom<IDictionary<string, object?>>(result[1]);
+        Assert.Equal("Q2", second["prompt"]);
+    }
+
+    [Fact]
+    public void TryParseStringifiedJsonArrayElements_EmptyOrInvalid_ReturnsNull()
+    {
+        Assert.Null(JsonRepairUtilities.TryParseStringifiedJsonArrayElements(""));
+        Assert.Null(JsonRepairUtilities.TryParseStringifiedJsonArrayElements("[]"));
+        Assert.Null(JsonRepairUtilities.TryParseStringifiedJsonArrayElements("not json"));
+    }
+
+    [Fact]
+    public void ExtractBalancedJsonElements_TruncatedOuterArrayWithNestedArrayInFirstElement_ExtractsAllElements()
+    {
+        // First element contains an inner ']', and the outer array is truncated at the end.
+        var input = "[{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"]}, \"options\": null}, {\"prompt\": \"Q2\"";
+        var elements = JsonRepairUtilities.ExtractBalancedJsonElements(input, '{');
+
+        Assert.Equal(2, elements.Count);
+        Assert.Equal("{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"]}", elements[0]);
+        Assert.Equal("{\"prompt\": \"Q2\"}", elements[1]);
+    }
+
+    [Fact]
+    public void ExtractBalancedJsonElements_UnclosedLastObjectBeforeOuterClosingBracket_RepairsAndExtracts()
+    {
+        var input = "[{\"prompt\": \"Q1\"}, \"options\": null}, {\"prompt\": \"Q2\"]";
+        var elements = JsonRepairUtilities.ExtractBalancedJsonElements(input, '{');
+
+        Assert.Equal(2, elements.Count);
+        Assert.Equal("{\"prompt\": \"Q1\"}", elements[0]);
+        Assert.Equal("{\"prompt\": \"Q2\"}", elements[1]);
+    }
+
+    [Fact]
+    public void ExtractBalancedJsonElements_RogueStringLiteralsContainingBracesAndUnclosedBraces_SkipsStringDelimiters()
+    {
+        var input = "[{\"prompt\": \"Q1\"}, \"note\": \"ignore {unclosed brace and {\\\"fake\\\": 1}\", {\"prompt\": \"Q2\"}]";
+        var elements = JsonRepairUtilities.ExtractBalancedJsonElements(input, '{');
+
+        Assert.Equal(2, elements.Count);
+        Assert.Equal("{\"prompt\": \"Q1\"}", elements[0]);
+        Assert.Equal("{\"prompt\": \"Q2\"}", elements[1]);
+    }
+
+    [Fact]
+    public void ExtractBalancedJsonElements_FirstElementMissingClosingBraceOrMistypedAsBracket_RepairsFirstAndExtractsSecond()
+    {
+        // Case 1: Missing closing '}' on first element before ', {"prompt": "Q2"}'
+        var missingBrace = "[{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"], {\"prompt\": \"Q2\"}]";
+        var el1 = JsonRepairUtilities.ExtractBalancedJsonElements(missingBrace, '{');
+        Assert.Equal(2, el1.Count);
+        Assert.Equal("{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"]}", el1[0]);
+        Assert.Equal("{\"prompt\": \"Q2\"}", el1[1]);
+
+        // Case 2: Model wrote ']]' instead of ']}' at the end of the first element
+        var mistypedBracket = "[{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"]]], {\"prompt\": \"Q2\"}]";
+        var el2 = JsonRepairUtilities.ExtractBalancedJsonElements(mistypedBracket, '{');
+        Assert.Equal(2, el2.Count);
+        Assert.Equal("{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"]}", el2[0]);
+        Assert.Equal("{\"prompt\": \"Q2\"}", el2[1]);
+    }
 }
