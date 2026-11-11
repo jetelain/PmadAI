@@ -78,12 +78,21 @@ public static class JsonRepairUtilities
         var repaired = TryRepairTruncatedJsonPrefix(trimmed);
         if (repaired == null)
         {
-            return null;
+            try
+            {
+                using var lenientDoc = JsonDocument.Parse(trimmed, LenientDocumentOptions);
+                wasRepaired = true;
+                return ConvertJsonElementToClr(lenientDoc.RootElement);
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
         }
 
         try
         {
-            using var doc = JsonDocument.Parse(repaired);
+            using var doc = JsonDocument.Parse(repaired, LenientDocumentOptions);
             wasRepaired = true;
             return ConvertJsonElementToClr(doc.RootElement);
         }
@@ -567,8 +576,10 @@ public static class JsonRepairUtilities
         int containerEnd = text.Length;
 
         int firstBracket = text.IndexOf('[');
-        int lastOuterBracket = trimmed.EndsWith(']') ? text.LastIndexOf(']') : -1;
-        if (firstBracket >= 0 && trimmed.StartsWith('['))
+        bool hasOuterArrayBracket = firstBracket >= 0 && trimmed.StartsWith('[') &&
+            IsOuterArrayContainer(text, firstBracket, openDelimiter);
+        int lastOuterBracket = hasOuterArrayBracket && trimmed.EndsWith(']') ? text.LastIndexOf(']') : -1;
+        if (hasOuterArrayBracket)
         {
             searchStart = firstBracket + 1;
         }
@@ -615,6 +626,39 @@ public static class JsonRepairUtilities
         }
 
         return elements;
+    }
+
+    private static bool IsOuterArrayContainer(string text, int firstBracket, char? openDelimiter)
+    {
+        if (openDelimiter == '{')
+        {
+            return true;
+        }
+
+        int i = firstBracket + 1;
+        while (i < text.Length && text[i] is ' ' or '\t' or '\r' or '\n')
+        {
+            i++;
+        }
+
+        if (i < text.Length && text[i] is '{' or '[' or ']')
+        {
+            return true;
+        }
+
+        // If the leading '[' starts a self-contained 1D array (e.g. "[1, 2], [3, 4]") followed by another '[' or '{' element,
+        // treat the leading '[' as the first element rather than an outer container.
+        var firstBlock = ExtractBalancedJson(text, firstBracket, out int consumedLength, out bool isTruncated);
+        if (!isTruncated && !string.IsNullOrEmpty(firstBlock) && consumedLength > 0)
+        {
+            int nextOpen = FindNextOpenDelimiter(text, firstBracket + consumedLength, text.Length, openDelimiter);
+            if (nextOpen >= 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static int FindNextOpenDelimiter(string text, int startIndex, int endIndex, char? openDelimiter)
@@ -718,10 +762,10 @@ public static class JsonRepairUtilities
             return false;
         }
 
+        var containerStack = new Stack<char>(8);
+        containerStack.Push('{');
         bool inString = false;
         bool escaped = false;
-        int braceDepth = 1;
-        int bracketDepth = 0;
         char lastSigChar = '{';
 
         for (int i = startIndex + 1; i < endIndex; i++)
@@ -758,21 +802,21 @@ public static class JsonRepairUtilities
 
             if (c == '[')
             {
-                bracketDepth++;
+                containerStack.Push('[');
                 lastSigChar = '[';
                 continue;
             }
 
             if (c == ']')
             {
-                if (bracketDepth > 0)
+                if (containerStack.Count > 0 && containerStack.Peek() == '[')
                 {
-                    bracketDepth--;
+                    containerStack.Pop();
                     lastSigChar = ']';
                     continue;
                 }
 
-                // Mismatched ']' at bracketDepth == 0 inside an object (e.g. model wrote ']]' instead of ']}').
+                // Mismatched ']' while inside '{' (e.g. model wrote ']]' instead of ']}').
                 var slice = text.Substring(startIndex, i - startIndex);
                 var candidate = TryRepairTruncatedJson(slice);
                 if (!string.IsNullOrEmpty(candidate) && IsValidExtractedElement(candidate, openDelimiter, rejectEmptyContainer: true))
@@ -786,9 +830,9 @@ public static class JsonRepairUtilities
 
             if (c == '{')
             {
-                // Inside an object at depth 1 and bracketDepth 0, '{' is only valid as a property value after ':'.
+                // Inside an object when '{' is on top of the stack, '{' is only valid as a property value after ':'.
                 // If it appears after ',' (where a property key string is required), the current object was missing its closing '}'.
-                if (braceDepth == 1 && bracketDepth == 0 && lastSigChar != ':')
+                if (containerStack.Count > 0 && containerStack.Peek() == '{' && lastSigChar != ':')
                 {
                     var slice = text.Substring(startIndex, i - startIndex);
                     var candidate = TryRepairTruncatedJson(slice);
@@ -801,20 +845,34 @@ public static class JsonRepairUtilities
                     return false;
                 }
 
-                braceDepth++;
+                containerStack.Push('{');
                 lastSigChar = '{';
                 continue;
             }
 
             if (c == '}')
             {
-                braceDepth--;
-                lastSigChar = '}';
-                if (braceDepth <= 0)
+                if (containerStack.Count > 0 && containerStack.Peek() == '{')
                 {
-                    break;
+                    containerStack.Pop();
+                    lastSigChar = '}';
+                    if (containerStack.Count == 0)
+                    {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
+
+                // Mismatched '}' while inside '[' (e.g. model wrote '["A", "B"}' instead of '["A", "B"]}').
+                var slice = text.Substring(startIndex, i - startIndex);
+                var candidate = TryRepairTruncatedJson(slice);
+                if (!string.IsNullOrEmpty(candidate) && IsValidExtractedElement(candidate, openDelimiter, rejectEmptyContainer: true))
+                {
+                    repairedBlock = candidate;
+                    nextIndex = i + 1;
+                    return true;
+                }
+                return false;
             }
 
             lastSigChar = c;
@@ -936,53 +994,28 @@ public static class JsonRepairUtilities
             }
             else if (valChar is '[' or '{')
             {
-                var extracted = ExtractBalancedJson(json, i, out int consumed, out _);
-                if (string.IsNullOrEmpty(extracted) || consumed <= 0)
-                {
-                    break;
-                }
+                int endPos;
+                string rawContainer;
 
-                int endPos = i + consumed;
                 if (valChar == '[')
                 {
-                    // If an extra ']' prematurely closed the array before subsequent '{' or '[' elements,
-                    // extend endPos across those trailing elements.
-                    while (endPos < len)
+                    endPos = FindTopLevelArrayEnd(json, i);
+                    if (endPos <= i)
                     {
-                        int probe = endPos;
-                        while (probe < len && json[probe] is ' ' or '\t' or '\r' or '\n' or ',' or ']' or '}')
-                        {
-                            if (json[probe] == '}' && probe == len - 1)
-                            {
-                                break;
-                            }
-                            probe++;
-                        }
-
-                        if (probe < len && json[probe] is '{' or '[')
-                        {
-                            var more = ExtractBalancedJson(json, probe, out int moreConsumed, out _);
-                            if (!string.IsNullOrEmpty(more) && moreConsumed > 0)
-                            {
-                                endPos = probe + moreConsumed;
-                                while (endPos < len && json[endPos] is ' ' or '\t' or '\r' or '\n')
-                                {
-                                    endPos++;
-                                }
-                                if (endPos < len && json[endPos] == ']')
-                                {
-                                    endPos++;
-                                }
-                                continue;
-                            }
-                        }
                         break;
                     }
+                    rawContainer = json.Substring(i, endPos - i);
                 }
-
-                string rawContainer = endPos > i + consumed
-                    ? json.Substring(i, endPos - i)
-                    : extracted;
+                else
+                {
+                    var extracted = ExtractBalancedJson(json, i, out int consumed, out _);
+                    if (string.IsNullOrEmpty(extracted) || consumed <= 0)
+                    {
+                        break;
+                    }
+                    endPos = i + consumed;
+                    rawContainer = extracted;
+                }
 
                 try
                 {
@@ -1020,6 +1053,157 @@ public static class JsonRepairUtilities
         }
 
         return extractedAny;
+    }
+
+    private static int FindTopLevelArrayEnd(string json, int arrayStartIndex)
+    {
+        int len = json.Length;
+        var elementStack = new Stack<char>(8);
+        bool inString = false;
+        bool escaped = false;
+        char lastSigChar = '[';
+
+        for (int i = arrayStartIndex + 1; i < len; i++)
+        {
+            char c = json[i];
+            if (inString)
+            {
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (c == '\\')
+                {
+                    escaped = true;
+                }
+                else if (c == '"')
+                {
+                    inString = false;
+                    lastSigChar = '"';
+                }
+                continue;
+            }
+
+            if (c is ' ' or '\t' or '\r' or '\n')
+            {
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inString = true;
+                continue;
+            }
+
+            if (c == '[')
+            {
+                elementStack.Push('[');
+                lastSigChar = '[';
+                continue;
+            }
+
+            if (c == '{')
+            {
+                // If an object element inside the array was missing its closing '}' before the next sibling '{',
+                // keep the top-level element '{' rather than nesting deeper.
+                if (elementStack.Count == 1 && elementStack.Peek() == '{' && lastSigChar != ':')
+                {
+                    lastSigChar = '{';
+                    continue;
+                }
+
+                elementStack.Push('{');
+                lastSigChar = '{';
+                continue;
+            }
+
+            if (c == '}')
+            {
+                if (elementStack.Count > 0)
+                {
+                    if (elementStack.Peek() == '{')
+                    {
+                        elementStack.Pop();
+                    }
+                    else
+                    {
+                        // Model omitted ']' before '}' (e.g. `["A", "B"}`). Pop open '['s and the enclosing '{'.
+                        while (elementStack.Count > 0 && elementStack.Peek() == '[')
+                        {
+                            elementStack.Pop();
+                        }
+                        if (elementStack.Count > 0 && elementStack.Peek() == '{')
+                        {
+                            elementStack.Pop();
+                        }
+                    }
+                    lastSigChar = '}';
+                    continue;
+                }
+
+                // elementStack.Count == 0: if only whitespace follows this '}', it is the root object's closing brace.
+                int afterBrace = i + 1;
+                while (afterBrace < len && json[afterBrace] is ' ' or '\t' or '\r' or '\n')
+                {
+                    afterBrace++;
+                }
+                if (afterBrace >= len)
+                {
+                    return i;
+                }
+
+                // Otherwise it is a rogue '}' between array elements (e.g. `}, "options": null}, {`); skip it.
+                lastSigChar = '}';
+                continue;
+            }
+
+            if (c == ']')
+            {
+                if (elementStack.Count > 0 && elementStack.Peek() == '[')
+                {
+                    elementStack.Pop();
+                    lastSigChar = ']';
+                    continue;
+                }
+
+                // Either elementStack is empty (normal array close) or has an unclosed '{' (e.g. `]]` instead of `]}` or `{"a": 1]`).
+                // Look ahead to see if another '{' or '[' array element follows.
+                int probe = i + 1;
+                while (probe < len && json[probe] is ' ' or '\t' or '\r' or '\n' or ',' or ']' or '}')
+                {
+                    if (json[probe] == ']')
+                    {
+                        i = probe;
+                    }
+                    else if (json[probe] == '}')
+                    {
+                        int afterBrace = probe + 1;
+                        while (afterBrace < len && json[afterBrace] is ' ' or '\t' or '\r' or '\n')
+                        {
+                            afterBrace++;
+                        }
+                        if (afterBrace >= len)
+                        {
+                            break;
+                        }
+                    }
+                    probe++;
+                }
+
+                if (probe < len && json[probe] is '{' or '[')
+                {
+                    elementStack.Clear();
+                    lastSigChar = ']';
+                    continue;
+                }
+
+                return i + 1;
+            }
+
+            lastSigChar = c;
+        }
+
+        return len;
     }
 
     private static bool TryReadJsonString(string json, int startQuoteIndex, out string value, out int nextIndex)

@@ -573,5 +573,64 @@ public class JsonRepairUtilitiesTests
         Assert.Equal(2, el2.Count);
         Assert.Equal("{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"]}", el2[0]);
         Assert.Equal("{\"prompt\": \"Q2\"}", el2[1]);
+
+        // Case 3: Model omitted ']' before '}' on inner array of first element (wrote '["A", "B"}' instead of '["A", "B"]}')
+        var missingInnerBracket = "[{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"}, {\"prompt\": \"Q2\"}]";
+        var el3 = JsonRepairUtilities.ExtractBalancedJsonElements(missingInnerBracket, '{');
+        Assert.Equal(2, el3.Count);
+        Assert.Equal("{\"prompt\": \"Q1\", \"options\": [\"A\", \"B\"]}", el3[0]);
+        Assert.Equal("{\"prompt\": \"Q2\"}", el3[1]);
+    }
+
+    [Fact]
+    public void ExtractBalancedJsonElements_BracketlessCommaSeparatedArrays_ExtractsAllArrays()
+    {
+        var input = "[1, 2], [3, 4]";
+        var elements = JsonRepairUtilities.ExtractBalancedJsonElements(input, '[');
+
+        Assert.Equal(2, elements.Count);
+        Assert.Equal("[1, 2]", elements[0]);
+        Assert.Equal("[3, 4]", elements[1]);
+    }
+
+    [Fact]
+    public void TryParseStringifiedJson_TrailingCommaInObjectOrArray_RepairsAndParses()
+    {
+        var parsedObj = JsonRepairUtilities.TryParseStringifiedJson("{\"a\": 1, }", out bool repairedObj);
+        Assert.True(repairedObj);
+        var dict = Assert.IsAssignableFrom<IDictionary<string, object?>>(parsedObj);
+        Assert.Equal(1, dict["a"]);
+
+        var parsedArr = JsonRepairUtilities.TryParseStringifiedJson("[1, 2, ]", out bool repairedArr);
+        Assert.True(repairedArr);
+        var list = Assert.IsAssignableFrom<IList<object?>>(parsedArr);
+        Assert.Equal(new object?[] { 1, 2 }, list);
+    }
+
+    [Fact]
+    public void HealthyJson_WithTrickyDelimitersInsideStrings_IsNotModifiedOrMisclassifiedAsTruncated()
+    {
+        var healthyJson = "[{\"prompt\": \"Why did log show '}, \\\"options\\\": null}, {' and ']]' or '[\\\"A\\\", \\\"B\\\"}' ?\", \"options\": [\"Keep {as-is}\", \"Fix [now]\"]}, {\"prompt\": \"public void Test() { if (x[0] == '}') return; }\"}]";
+
+        // 1. TryRepairTruncatedJson must return null for already-valid JSON
+        Assert.Null(JsonRepairUtilities.TryRepairTruncatedJson(healthyJson));
+
+        // 2. TryParseStringifiedJson must parse cleanly with wasRepaired = false
+        var parsed = JsonRepairUtilities.TryParseStringifiedJson(healthyJson, out bool wasRepaired);
+        Assert.False(wasRepaired);
+        var list = Assert.IsAssignableFrom<IList<object?>>(parsed);
+        Assert.Equal(2, list.Count);
+
+        // 3. ExtractBalancedJson must extract exact string with isTruncated = false
+        var extracted = JsonRepairUtilities.ExtractBalancedJson(healthyJson, 0, out int consumed, out bool isTruncated);
+        Assert.False(isTruncated);
+        Assert.Equal(healthyJson.Length, consumed);
+        Assert.Equal(healthyJson, extracted);
+
+        // 4. ExtractBalancedJsonElements must extract both objects untouched
+        var elements = JsonRepairUtilities.ExtractBalancedJsonElements(healthyJson, '{');
+        Assert.Equal(2, elements.Count);
+        Assert.Equal("{\"prompt\": \"Why did log show '}, \\\"options\\\": null}, {' and ']]' or '[\\\"A\\\", \\\"B\\\"}' ?\", \"options\": [\"Keep {as-is}\", \"Fix [now]\"]}", elements[0]);
+        Assert.Equal("{\"prompt\": \"public void Test() { if (x[0] == '}') return; }\"}", elements[1]);
     }
 }

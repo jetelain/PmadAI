@@ -1350,14 +1350,10 @@ public partial class LenientToolDispatcher
                 }
             }
 
-            // Do not comma-split array/object-shaped strings when targeting an array of objects
-            if ((trimmed.StartsWith('[') || trimmed.StartsWith('{')) && schema.HasValue && schema.Value.TryGetProperty("items", out var itemsEl))
+            // Do not comma-split malformed JSON container strings (starting with '[' or '{')
+            if (trimmed.StartsWith('[') || trimmed.StartsWith('{'))
             {
-                var resolvedItemsEl = rootSchema.HasValue ? ResolveSchema(itemsEl, rootSchema.Value) : itemsEl;
-                if (SchemaTypeMatches(resolvedItemsEl, "object") || resolvedItemsEl.TryGetProperty("properties", out _))
-                {
-                    return value;
-                }
+                return value;
             }
 
             var parts = trimmed.Split(',').Select(p => p.Trim()).Where(p => !string.IsNullOrEmpty(p)).ToArray();
@@ -1442,11 +1438,27 @@ public partial class LenientToolDispatcher
             bool expectsArray = resolvedSchema.HasValue && (SchemaTypeMatches(resolvedSchema.Value, "array") || (resolvedSchema.Value.ValueKind == JsonValueKind.Object && resolvedSchema.Value.TryGetProperty("items", out _)));
             bool expectsObject = resolvedSchema.HasValue && (SchemaTypeMatches(resolvedSchema.Value, "object") || (resolvedSchema.Value.ValueKind == JsonValueKind.Object && resolvedSchema.Value.TryGetProperty("properties", out _)));
 
+            bool arrayAllowsObjectItems = false;
+            if (expectsArray && resolvedSchema.HasValue && resolvedSchema.Value.ValueKind == JsonValueKind.Object)
+            {
+                if (resolvedSchema.Value.TryGetProperty("items", out var arrItemsEl) && arrItemsEl.ValueKind == JsonValueKind.Object)
+                {
+                    var resolvedArrItems = rootSchema.HasValue ? ResolveSchema(arrItemsEl, rootSchema.Value) : arrItemsEl;
+                    arrayAllowsObjectItems = SchemaTypeMatches(resolvedArrItems, "object") ||
+                                             (resolvedArrItems.ValueKind == JsonValueKind.Object && resolvedArrItems.TryGetProperty("properties", out _)) ||
+                                             (resolvedArrItems.ValueKind == JsonValueKind.Object && !resolvedArrItems.TryGetProperty("type", out _));
+                }
+                else
+                {
+                    arrayAllowsObjectItems = true;
+                }
+            }
+
             var trimmed = str.Trim();
             bool isObjectShape = trimmed.StartsWith('{');
             bool isArrayShape = trimmed.StartsWith('[');
             bool shapeAllowed =
-                (isObjectShape && (expectsObject || expectsArray || !resolvedSchema.HasValue)) ||
+                (isObjectShape && (expectsObject || arrayAllowsObjectItems || !resolvedSchema.HasValue)) ||
                 (isArrayShape && (expectsArray || !resolvedSchema.HasValue));
 
             if (shapeAllowed)
@@ -1794,7 +1806,11 @@ public partial class LenientToolDispatcher
             knownProperties.Contains(ToSnakeCase(key)) ||
             knownProperties.Contains(ToCamelCase(key)) ||
             knownProperties.Contains(ToPascalCase(key)) ||
-            (mapping?.TryGetNestedAlias(itemPath, key, out _) == true))
+            (mapping?.TryGetNestedAlias(itemPath, key, out var mappedTarget) == true &&
+             (knownProperties.Contains(mappedTarget) ||
+              knownProperties.Contains(ToSnakeCase(mappedTarget)) ||
+              knownProperties.Contains(ToCamelCase(mappedTarget)) ||
+              knownProperties.Contains(ToPascalCase(mappedTarget)))))
         {
             return true;
         }
@@ -1805,7 +1821,11 @@ public partial class LenientToolDispatcher
              knownProperties.Contains(ToSnakeCase(stripped)) ||
              knownProperties.Contains(ToCamelCase(stripped)) ||
              knownProperties.Contains(ToPascalCase(stripped)) ||
-             (mapping?.TryGetNestedAlias(itemPath, stripped, out _) == true)))
+             (mapping?.TryGetNestedAlias(itemPath, stripped, out var strippedMappedTarget) == true &&
+              (knownProperties.Contains(strippedMappedTarget) ||
+               knownProperties.Contains(ToSnakeCase(strippedMappedTarget)) ||
+               knownProperties.Contains(ToCamelCase(strippedMappedTarget)) ||
+               knownProperties.Contains(ToPascalCase(strippedMappedTarget))))))
         {
             return true;
         }
@@ -2218,8 +2238,20 @@ public partial class LenientToolDispatcher
 
                     if (effectiveItem is string strItem)
                     {
-                        var trimmedItem = strItem.TrimStart();
-                        if (!trimmedItem.StartsWith('{') && !trimmedItem.StartsWith('['))
+                        var trimmedItem = strItem.Trim();
+                        if (trimmedItem.StartsWith('{'))
+                        {
+                            if (TryParseStringifiedJson(trimmedItem, out bool itemRepaired) is IDictionary<string, object?> parsedItemDict)
+                            {
+                                effectiveItem = parsedItemDict;
+                                collectionModified = true;
+                                if (itemRepaired)
+                                {
+                                    stringArrayWasRepaired = true;
+                                }
+                            }
+                        }
+                        else if (!trimmedItem.StartsWith('['))
                         {
                             var primaryProp = FindPrimaryStringProperty(itemProps, resolvedItemSchema, mapping, canonicalParamName + "[]");
                             if (primaryProp != null)
