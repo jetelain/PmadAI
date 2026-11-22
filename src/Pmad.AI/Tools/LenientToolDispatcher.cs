@@ -1273,11 +1273,11 @@ public partial class LenientToolDispatcher
         }
     }
 
-    private static object? CoerceScalarArrayItem(string paramName, object value, JsonElement resolvedItemSchema, ToolMapping? mapping = null, JsonElement? rootSchema = null)
+    private static object? CoerceScalarArrayItem(string paramName, object value, JsonElement resolvedItemSchema, ToolMapping? mapping = null, JsonElement? rootSchema = null, string? paramPath = null)
     {
         if (value is string)
         {
-            return CoerceParameterValue(paramName, value, resolvedItemSchema, mapping, rootSchema);
+            return CoerceParameterValue(paramName, value, resolvedItemSchema, mapping, rootSchema, paramPath);
         }
 
         bool isBooleanTarget = SchemaTypeMatches(resolvedItemSchema, "boolean");
@@ -1287,26 +1287,22 @@ public partial class LenientToolDispatcher
 
         if (isIntegerTarget && !isNumberTarget)
         {
-            if (value is int or long or short or byte)
+            bool allowRounding = mapping != null && mapping.ShouldRoundIntegerParameter(paramPath ?? string.Empty, paramName);
+            if (ToolHelpers.TryCoerceIntegralValue(value, allowHashPrefix: false, out var boxedInt, allowRounding: allowRounding))
             {
-                return value;
-            }
-            if (value is double d && Math.Floor(d) == d && d >= long.MinValue && d <= long.MaxValue)
-            {
-                var lv = (long)d;
-                return lv >= int.MinValue && lv <= int.MaxValue ? (object)(int)lv : lv;
+                return boxedInt;
             }
             if (value is bool && isBooleanTarget)
             {
                 return value;
             }
             var rawName = paramName.EndsWith("[]", StringComparison.Ordinal) ? paramName[..^2] : paramName;
-            throw new ArgumentException($"Element '{value}' of parameter '{rawName}' is not a valid integer.");
+            throw new ArgumentException($"Element '{FormatDisplayValue(value)}' of parameter '{rawName}' is not a valid integer.");
         }
 
         if (isNumberTarget)
         {
-            if (value is int or long or short or byte or double or float or decimal)
+            if (value is int or long or short or byte or sbyte or ushort or uint or ulong or double or float or decimal)
             {
                 return value;
             }
@@ -1315,7 +1311,7 @@ public partial class LenientToolDispatcher
                 return value;
             }
             var rawName = paramName.EndsWith("[]", StringComparison.Ordinal) ? paramName[..^2] : paramName;
-            throw new ArgumentException($"Element '{value}' of parameter '{rawName}' is not a valid number.");
+            throw new ArgumentException($"Element '{FormatDisplayValue(value)}' of parameter '{rawName}' is not a valid number.");
         }
 
         if (isBooleanTarget && !isStringTarget)
@@ -1333,22 +1329,42 @@ public partial class LenientToolDispatcher
                 return l == 1;
             }
             var rawName = paramName.EndsWith("[]", StringComparison.Ordinal) ? paramName[..^2] : paramName;
-            throw new ArgumentException($"Element '{value}' of parameter '{rawName}' is not a valid boolean.");
+            throw new ArgumentException($"Element '{FormatDisplayValue(value)}' of parameter '{rawName}' is not a valid boolean.");
         }
 
         return value;
     }
 
-    private static object? CoerceParameterValue(string paramName, object value, JsonElement? schema, ToolMapping? mapping = null, JsonElement? rootSchema = null)
+    private static object? CoerceParameterValue(string paramName, object value, JsonElement? schema, ToolMapping? mapping = null, JsonElement? rootSchema = null, string? paramPath = null)
     {
-        if (value is not string strVal)
-        {
-            return value;
-        }
-
         if (schema.HasValue && rootSchema.HasValue)
         {
             schema = ResolveSchema(schema.Value, rootSchema.Value);
+        }
+
+        bool allowRounding = mapping != null && mapping.ShouldRoundIntegerParameter(paramPath ?? string.Empty, paramName);
+
+        if (value is not string strVal)
+        {
+            bool coerceNonStringInt =
+                (schema.HasValue &&
+                 SchemaTypeMatches(schema.Value, "integer") &&
+                 !SchemaTypeMatches(schema.Value, "number")) ||
+                (!schema.HasValue && allowRounding);
+
+            if (coerceNonStringInt && value is double or float or decimal or JsonElement { ValueKind: JsonValueKind.Number })
+            {
+                if (ToolHelpers.TryCoerceIntegralValue(value, allowHashPrefix: false, out var boxedInt, allowRounding: allowRounding))
+                {
+                    return boxedInt;
+                }
+
+                if (schema.HasValue)
+                {
+                    throw new ArgumentException($"{FormatParameterDisplayName(paramName, value)} is not a valid integer.");
+                }
+            }
+            return value;
         }
 
         var trimmed = strVal.Trim();
@@ -1422,31 +1438,20 @@ public partial class LenientToolDispatcher
             }
             if (isBooleanTarget && !allowsString)
             {
-                var displayName = paramName.EndsWith("[]", StringComparison.Ordinal)
-                    ? $"Element '{strVal}' of parameter '{paramName.Substring(0, paramName.Length - 2)}'"
-                    : $"Parameter '{paramName}' with value '{strVal}'";
-                throw new ArgumentException($"{displayName} is not a valid boolean.");
+                throw new ArgumentException($"{FormatParameterDisplayName(paramName, strVal)} is not a valid boolean.");
             }
         }
 
         // 3. Number coercion (schema or heuristic)
-        if (isIntegerTarget || (!schema.HasValue && IsNumericParameterName(paramName)))
+        if (isIntegerTarget || (!schema.HasValue && (allowRounding || IsNumericParameterName(paramName))))
         {
-            var intCandidate = isIntegerTarget && trimmed.StartsWith('#') ? trimmed[1..].Trim() : trimmed;
-            if (long.TryParse(intCandidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out var longVal))
+            if (ToolHelpers.TryCoerceIntegralValue(trimmed, allowHashPrefix: isIntegerTarget, out var boxedInt, allowRounding: allowRounding && !isNumberTarget))
             {
-                if (longVal >= int.MinValue && longVal <= int.MaxValue)
-                {
-                    return (int)longVal;
-                }
-                return longVal;
+                return boxedInt;
             }
-            if (isIntegerTarget && !allowsString)
+            if (isIntegerTarget && !isNumberTarget && !allowsString)
             {
-                var displayName = paramName.EndsWith("[]", StringComparison.Ordinal)
-                    ? $"Element '{strVal}' of parameter '{paramName.Substring(0, paramName.Length - 2)}'"
-                    : $"Parameter '{paramName}' with value '{strVal}'";
-                throw new ArgumentException($"{displayName} is not a valid integer.");
+                throw new ArgumentException($"{FormatParameterDisplayName(paramName, strVal)} is not a valid integer.");
             }
         }
 
@@ -1458,10 +1463,7 @@ public partial class LenientToolDispatcher
             }
             if (isNumberTarget && !allowsString)
             {
-                var displayName = paramName.EndsWith("[]", StringComparison.Ordinal)
-                    ? $"Element '{strVal}' of parameter '{paramName.Substring(0, paramName.Length - 2)}'"
-                    : $"Parameter '{paramName}' with value '{strVal}'";
-                throw new ArgumentException($"{displayName} is not a valid number.");
+                throw new ArgumentException($"{FormatParameterDisplayName(paramName, strVal)} is not a valid number.");
             }
         }
 
@@ -1470,6 +1472,8 @@ public partial class LenientToolDispatcher
 
         if (isArrayTarget || (!schema.HasValue && IsArrayParameterName(paramName) && trimmed.Contains(',')))
         {
+            var itemParamName = paramName.EndsWith("[]", StringComparison.Ordinal) ? paramName : paramName + "[]";
+
             if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
             {
                 try
@@ -1477,10 +1481,36 @@ public partial class LenientToolDispatcher
                     using var doc = JsonDocument.Parse(trimmed);
                     if (doc.RootElement.ValueKind == JsonValueKind.Array)
                     {
+                        if (schema.HasValue && schema.Value.TryGetProperty("items", out var jsonItemsSchema))
+                        {
+                            var resolvedJsonItemsSchema = rootSchema.HasValue ? ResolveSchema(jsonItemsSchema, rootSchema.Value) : jsonItemsSchema;
+                            bool keepJsonNumbers = SchemaTypeMatches(resolvedJsonItemsSchema, "integer") && !SchemaTypeMatches(resolvedJsonItemsSchema, "number");
+                            var coercedItems = new List<object?>();
+                            foreach (var el in doc.RootElement.EnumerateArray())
+                            {
+                                if (el.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                                {
+                                    coercedItems.Add(null);
+                                }
+                                else if (keepJsonNumbers && el.ValueKind == JsonValueKind.Number)
+                                {
+                                    coercedItems.Add(CoerceScalarArrayItem(itemParamName, el, resolvedJsonItemsSchema, mapping, rootSchema, paramPath));
+                                }
+                                else
+                                {
+                                    var unwrapped = ToolCallHealingTransform.UnwrapJsonElement(el);
+                                    coercedItems.Add(unwrapped != null
+                                        ? CoerceScalarArrayItem(itemParamName, unwrapped, resolvedJsonItemsSchema, mapping, rootSchema, paramPath)
+                                        : null);
+                                }
+                            }
+                            return coercedItems.ToArray();
+                        }
+
                         return doc.RootElement.EnumerateArray().Select(ToolCallHealingTransform.UnwrapJsonElement).ToArray();
                     }
                 }
-                catch
+                catch (JsonException)
                 {
                     // Fall back to comma splitting
                 }
@@ -1503,12 +1533,12 @@ public partial class LenientToolDispatcher
                      SchemaTypeMatches(resolvedItemsSchema, "number") ||
                      SchemaTypeMatches(resolvedItemsSchema, "boolean")))
                 {
-                    return parts.Select(p => CoerceParameterValue(paramName + "[]", p, resolvedItemsSchema, mapping, rootSchema)).ToArray();
+                    return parts.Select(p => CoerceParameterValue(itemParamName, p, resolvedItemsSchema, mapping, rootSchema, paramPath)).ToArray();
                 }
 
                 if (TryGetEnumOrConstMembers(resolvedItemsSchema, out _) || mapping != null)
                 {
-                    return parts.Select(p => CoerceParameterValue(paramName + "[]", p, resolvedItemsSchema, mapping, rootSchema) as string ?? p).ToArray();
+                    return parts.Select(p => CoerceParameterValue(itemParamName, p, resolvedItemsSchema, mapping, rootSchema, paramPath) as string ?? p).ToArray();
                 }
             }
 
@@ -1517,6 +1547,19 @@ public partial class LenientToolDispatcher
 
         return value;
     }
+
+    private static string FormatParameterDisplayName(string paramName, object value)
+    {
+        var formattedValue = FormatDisplayValue(value);
+        return paramName.EndsWith("[]", StringComparison.Ordinal)
+            ? $"Element '{formattedValue}' of parameter '{paramName[..^2]}'"
+            : $"Parameter '{paramName}' with value '{formattedValue}'";
+    }
+
+    private static string FormatDisplayValue(object value)
+        => value is JsonElement je
+            ? je.GetRawText()
+            : Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
 
     private static bool IsBooleanParameterName(string name)
     {
@@ -1553,11 +1596,48 @@ public partial class LenientToolDispatcher
             ? ResolveSchema(schema.Value, rootSchema.Value)
             : schema;
 
-        // 0. Unwrap JsonElement if present
+        // 0. Unwrap JsonElement if present (shallowly for containers so nested numbers preserve exact JSON precision)
         if (value is JsonElement je)
         {
-            value = ConvertJsonElementToClr(je);
-            if (value == null) return null;
+            if (je.ValueKind == JsonValueKind.Number &&
+                _options.EnableParameterCoercion &&
+                resolvedSchema.HasValue &&
+                SchemaTypeMatches(resolvedSchema.Value, "integer") &&
+                !SchemaTypeMatches(resolvedSchema.Value, "number"))
+            {
+                bool allowRounding = mapping != null && mapping.ShouldRoundIntegerParameter(string.Empty, paramPath);
+                if (ToolHelpers.TryCoerceIntegralValue(je, allowHashPrefix: false, out var boxedInt, allowRounding: allowRounding))
+                {
+                    return boxedInt;
+                }
+
+                throw new ArgumentException($"{FormatParameterDisplayName(paramPath, je)} is not a valid integer.");
+            }
+            else if (je.ValueKind == JsonValueKind.Object)
+            {
+                var shallowDict = new Dictionary<string, object?>(StringComparer.Ordinal);
+                foreach (var prop in je.EnumerateObject())
+                {
+                    shallowDict[prop.Name] = prop.Value;
+                }
+                value = shallowDict;
+            }
+            else if (je.ValueKind == JsonValueKind.Array)
+            {
+                var shallowList = new List<object?>();
+                foreach (var item in je.EnumerateArray())
+                {
+                    shallowList.Add(item.ValueKind is JsonValueKind.String or JsonValueKind.True or JsonValueKind.False or JsonValueKind.Null or JsonValueKind.Undefined
+                        ? ConvertJsonElementToClr(item)
+                        : item);
+                }
+                value = shallowList;
+            }
+            else
+            {
+                value = ConvertJsonElementToClr(je);
+                if (value == null) return null;
+            }
         }
 
         // 1. String value alias resolution & stringified JSON parsing
@@ -1595,14 +1675,20 @@ public partial class LenientToolDispatcher
 
             if (shapeAllowed)
             {
-                var parsed = TryParseStringifiedJson(trimmed, out bool wasRepaired);
-                if (parsed != null)
+                var parsedElement = TryParseStringifiedJsonElement(trimmed, out bool wasRepaired);
+                if (parsedElement.HasValue)
                 {
                     if (wasRepaired)
                     {
                         Telemetry?.Record(LenientDispatchEventType.StringifiedJsonRepaired, "<stringified_json>", paramPath, SessionId);
                     }
-                    value = parsed;
+
+                    if (parsedElement.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+                    {
+                        return NormalizeValueDeep(parsedElement.Value, resolvedSchema, mapping, paramPath, rootSchema);
+                    }
+
+                    value = ConvertJsonElementToClr(parsedElement.Value);
                 }
                 else if ((isArrayShape || isObjectShape) && expectsArray && resolvedSchema.HasValue)
                 {
@@ -1654,24 +1740,24 @@ public partial class LenientToolDispatcher
                     var trimmedItem = strItem.Trim();
                     if (expectsObjectItems && (trimmedItem.StartsWith('{') || trimmedItem.StartsWith('[')))
                     {
-                        var parsedItem = TryParseStringifiedJson(trimmedItem, out bool itemWasRepaired);
-                        if (parsedItem is IDictionary<string, object?> parsedItemDict)
+                        var parsedItemEl = TryParseStringifiedJsonElement(trimmedItem, out bool itemWasRepaired);
+                        if (parsedItemEl.HasValue && parsedItemEl.Value.ValueKind == JsonValueKind.Object)
                         {
                             if (itemWasRepaired)
                             {
                                 Telemetry?.Record(LenientDispatchEventType.StringifiedJsonRepaired, "<stringified_json>", paramPath + "[]", SessionId);
                             }
-                            normalizedList.Add(NormalizeValueDeep(parsedItemDict, itemsSchema, mapping, paramPath + "[]", rootSchema));
+                            normalizedList.Add(NormalizeValueDeep(parsedItemEl.Value, itemsSchema, mapping, paramPath + "[]", rootSchema));
                             continue;
                         }
 
-                        if (parsedItem is System.Collections.IEnumerable parsedSubList and not string and not System.Collections.IDictionary)
+                        if (parsedItemEl.HasValue && parsedItemEl.Value.ValueKind == JsonValueKind.Array)
                         {
                             if (itemWasRepaired)
                             {
                                 Telemetry?.Record(LenientDispatchEventType.StringifiedJsonRepaired, "<stringified_json>", paramPath + "[]", SessionId);
                             }
-                            foreach (var subItem in parsedSubList)
+                            foreach (var subItem in parsedItemEl.Value.EnumerateArray())
                             {
                                 normalizedList.Add(NormalizeValueDeep(subItem, itemsSchema, mapping, paramPath + "[]", rootSchema));
                             }
@@ -1852,10 +1938,10 @@ public partial class LenientToolDispatcher
                 }
 
                 var normalizedSubVal = NormalizeValueDeep(effectiveRawVal, propSchema, mapping, paramPath + "." + canonicalKey, rootSchema);
-                if (_options.EnableParameterCoercion && normalizedSubVal is string && propSchema.HasValue)
+                if (_options.EnableParameterCoercion && normalizedSubVal != null && propSchema.HasValue)
                 {
                     var resolvedPropSchema = rootSchema.HasValue ? ResolveSchema(propSchema.Value, rootSchema.Value) : propSchema.Value;
-                    normalizedSubVal = CoerceParameterValue(canonicalKey, normalizedSubVal, resolvedPropSchema, mapping, rootSchema);
+                    normalizedSubVal = CoerceParameterValue(canonicalKey, normalizedSubVal, resolvedPropSchema, mapping, rootSchema, paramPath);
                 }
                 normalizedDict[canonicalKey] = normalizedSubVal;
             }
@@ -2598,9 +2684,9 @@ public partial class LenientToolDispatcher
                         {
                             var mutableDict = new Dictionary<string, object?>(itemDict, StringComparer.OrdinalIgnoreCase);
                             object? effectiveVal = rootVal;
-                            if (_options.EnableParameterCoercion && rootVal is string && itemProps.TryGetProperty(targetItemPropName, out var targetPropSchema))
+                            if (_options.EnableParameterCoercion && rootVal != null && itemProps.TryGetProperty(targetItemPropName, out var targetPropSchema))
                             {
-                                effectiveVal = CoerceParameterValue(targetItemPropName, rootVal, targetPropSchema, mapping, rootSchema) ?? rootVal;
+                                effectiveVal = CoerceParameterValue(targetItemPropName, rootVal, targetPropSchema, mapping, rootSchema, canonicalParamName + "[]") ?? rootVal;
                             }
                             mutableDict[targetItemPropName] = effectiveVal;
                             effectiveItem = mutableDict;
@@ -2772,9 +2858,10 @@ public partial class LenientToolDispatcher
 
             foreach (var alias in rule.EndParameterAliases)
             {
+                bool roundEnd = mapping.ShouldRoundIntegerParameter(string.Empty, alias);
                 if (canonicalArgs.TryGetValue(alias, out var val) && !IsNullOrUndefined(val))
                 {
-                    if (ToolParameterComputationContext.TryParseInt(val, out var parsed))
+                    if (ToolParameterComputationContext.TryParseInt(val, roundEnd, out var parsed))
                     {
                         endLine = parsed;
                         matchedEndKey = alias;
@@ -2783,7 +2870,7 @@ public partial class LenientToolDispatcher
                 }
                 else if (TryGetValueCaseInsensitive(canonicalArgs, alias, out var ciVal, out var ciKey) && !IsNullOrUndefined(ciVal))
                 {
-                    if (ToolParameterComputationContext.TryParseInt(ciVal, out var parsed))
+                    if (ToolParameterComputationContext.TryParseInt(ciVal, roundEnd, out var parsed))
                     {
                         endLine = parsed;
                         matchedEndKey = ciKey ?? alias;
@@ -2792,7 +2879,7 @@ public partial class LenientToolDispatcher
                 }
                 else if (TryGetValueCaseInsensitive(rawArgs, alias, out var rawVal, out var rawKey) && !IsNullOrUndefined(rawVal))
                 {
-                    if (ToolParameterComputationContext.TryParseInt(rawVal, out var parsed))
+                    if (ToolParameterComputationContext.TryParseInt(rawVal, roundEnd, out var parsed))
                     {
                         endLine = parsed;
                         matchedEndKey = rawKey ?? alias;
@@ -2806,23 +2893,24 @@ public partial class LenientToolDispatcher
                 if (!hasLimit)
                 {
                     int startLine = rule.DefaultStart;
+                    bool roundStart = mapping.ShouldRoundIntegerParameter(string.Empty, rule.StartParameter);
                     if (canonicalArgs.TryGetValue(rule.StartParameter, out var startVal) && !IsNullOrUndefined(startVal))
                     {
-                        if (ToolParameterComputationContext.TryParseInt(startVal, out var parsedStart))
+                        if (ToolParameterComputationContext.TryParseInt(startVal, roundStart, out var parsedStart))
                         {
                             startLine = parsedStart;
                         }
                     }
                     else if (TryGetValueCaseInsensitive(canonicalArgs, rule.StartParameter, out var ciStart) && !IsNullOrUndefined(ciStart))
                     {
-                        if (ToolParameterComputationContext.TryParseInt(ciStart, out var parsedStart))
+                        if (ToolParameterComputationContext.TryParseInt(ciStart, roundStart, out var parsedStart))
                         {
                             startLine = parsedStart;
                         }
                     }
                     else if (TryGetValueCaseInsensitive(rawArgs, rule.StartParameter, out var rawStart) && !IsNullOrUndefined(rawStart))
                     {
-                        if (ToolParameterComputationContext.TryParseInt(rawStart, out var parsedStart))
+                        if (ToolParameterComputationContext.TryParseInt(rawStart, roundStart, out var parsedStart))
                         {
                             startLine = parsedStart;
                         }

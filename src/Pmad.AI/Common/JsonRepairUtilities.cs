@@ -64,11 +64,22 @@ public static class JsonRepairUtilities
     /// </summary>
     public static object? TryParseStringifiedJson(string trimmed, out bool wasRepaired)
     {
+        using var doc = TryParseStringifiedJsonDocument(trimmed, out wasRepaired);
+        return doc != null ? ConvertJsonElementToClr(doc.RootElement) : null;
+    }
+
+    internal static JsonElement? TryParseStringifiedJsonElement(string trimmed, out bool wasRepaired)
+    {
+        using var doc = TryParseStringifiedJsonDocument(trimmed, out wasRepaired);
+        return doc?.RootElement.Clone();
+    }
+
+    private static JsonDocument? TryParseStringifiedJsonDocument(string trimmed, out bool wasRepaired)
+    {
         wasRepaired = false;
         try
         {
-            using var doc = JsonDocument.Parse(trimmed);
-            return ConvertJsonElementToClr(doc.RootElement);
+            return JsonDocument.Parse(trimmed);
         }
         catch (JsonException)
         {
@@ -80,9 +91,9 @@ public static class JsonRepairUtilities
         {
             try
             {
-                using var lenientDoc = JsonDocument.Parse(trimmed, LenientDocumentOptions);
+                var lenientDoc = JsonDocument.Parse(trimmed, LenientDocumentOptions);
                 wasRepaired = true;
-                return ConvertJsonElementToClr(lenientDoc.RootElement);
+                return lenientDoc;
             }
             catch (JsonException)
             {
@@ -92,9 +103,9 @@ public static class JsonRepairUtilities
 
         try
         {
-            using var doc = JsonDocument.Parse(repaired, LenientDocumentOptions);
+            var doc = JsonDocument.Parse(repaired, LenientDocumentOptions);
             wasRepaired = true;
-            return ConvertJsonElementToClr(doc.RootElement);
+            return doc;
         }
         catch (JsonException)
         {

@@ -55,6 +55,8 @@ public class ToolMappingTests
         Assert.Empty(m.ParameterValueAliases);
         Assert.Empty(m.PropagatedParameters);
         Assert.Empty(m.PrimaryCollectionProperties);
+        Assert.Empty(m.NullAsEmptyStringParameters);
+        Assert.Empty(m.RoundedIntegerParameters);
     }
 
     [Fact]
@@ -89,7 +91,9 @@ public class ToolMappingTests
             primaryCollectionProperties: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["items"] = "name"
-            });
+            },
+            nullAsEmptyStringParameters: new[] { "new_text" },
+            roundedIntegerParameters: new[] { "command_request.max_timeout" });
 
         // Aliases remain a plain set of alternative names; the alias -> canonical flat map is an
         // internal convention owned by the dispatcher (canonical -> canonical + each alias -> canonical).
@@ -114,12 +118,15 @@ public class ToolMappingTests
         Assert.Equal("fast", m.ParameterValueAliases["type"]["turbo"]);
         Assert.Contains("tenantId", m.PropagatedParameters);
         Assert.Equal("name", m.PrimaryCollectionProperties["items"]);
+        Assert.Contains("new_text", m.NullAsEmptyStringParameters);
+        Assert.Contains("command_request.max_timeout", m.RoundedIntegerParameters);
+        Assert.True(m.ShouldRoundIntegerParameter("commandRequest", "MaxTimeout"));
     }
 
     [Fact]
     public void Ctor_NullInputs_CreatesEmptyInstance()
     {
-        var m = new ToolMapping(null, null, null, null, null, null, null);
+        var m = new ToolMapping(null, null, null, null, null, null, null, null, null, null, null);
         Assert.Empty(m.Aliases);
         Assert.Empty(m.ParameterAliases);
         Assert.Empty(m.ComputedParameters);
@@ -127,6 +134,8 @@ public class ToolMappingTests
         Assert.Empty(m.ParameterValueAliases);
         Assert.Empty(m.PropagatedParameters);
         Assert.Empty(m.PrimaryCollectionProperties);
+        Assert.Empty(m.NullAsEmptyStringParameters);
+        Assert.Empty(m.RoundedIntegerParameters);
     }
 
     [Fact]
@@ -561,7 +570,9 @@ public class ToolMappingTests
             primaryCollectionProperties: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["questions[]"] = "text"
-            });
+            },
+            nullAsEmptyStringParameters: new[] { "new_text" },
+            roundedIntegerParameters: new[] { "timeout" });
     }
 
     [Fact]
@@ -575,6 +586,8 @@ public class ToolMappingTests
         Assert.Equal(original.ParameterAliases, clone.ParameterAliases);
         Assert.Equal(original.PropagatedParameters, clone.PropagatedParameters);
         Assert.Equal(original.PrimaryCollectionProperties, clone.PrimaryCollectionProperties);
+        Assert.Equal(original.NullAsEmptyStringParameters, clone.NullAsEmptyStringParameters);
+        Assert.Equal(original.RoundedIntegerParameters, clone.RoundedIntegerParameters);
         Assert.Equal(original.ComputedParameters.Keys, clone.ComputedParameters.Keys);
         Assert.Same(original.ComputedParameters["count"], clone.ComputedParameters["count"]); // delegates are shared by reference
         Assert.Equal(original.NestedParameterAliases.Keys, clone.NestedParameterAliases.Keys);
@@ -596,6 +609,8 @@ public class ToolMappingTests
         Assert.Empty(clone.ParameterValueAliases);
         Assert.Empty(clone.PropagatedParameters);
         Assert.Empty(clone.PrimaryCollectionProperties);
+        Assert.Empty(clone.NullAsEmptyStringParameters);
+        Assert.Empty(clone.RoundedIntegerParameters);
     }
 
     [Fact]
@@ -610,6 +625,8 @@ public class ToolMappingTests
         clone.ParameterValueAliases["type"]["mutated"] = "fast";
         clone.PropagatedParameters.Add("mutated");
         clone.PrimaryCollectionProperties["mutated[]"] = "prop";
+        clone.NullAsEmptyStringParameters.Add("mutated");
+        clone.RoundedIntegerParameters.Add("mutated");
 
         Assert.DoesNotContain("mutated", original.Aliases);
         Assert.False(original.ParameterAliases.ContainsKey("newParam"));
@@ -617,6 +634,8 @@ public class ToolMappingTests
         Assert.False(original.ParameterValueAliases["type"].ContainsKey("mutated"));
         Assert.DoesNotContain("mutated", original.PropagatedParameters);
         Assert.False(original.PrimaryCollectionProperties.ContainsKey("mutated[]"));
+        Assert.DoesNotContain("mutated", original.NullAsEmptyStringParameters);
+        Assert.DoesNotContain("mutated", original.RoundedIntegerParameters);
     }
 
     [Fact]
@@ -627,8 +646,44 @@ public class ToolMappingTests
 
         original.Aliases.Add("mutated");
         original.NestedParameterAliases["items[]"]["mutated"] = "x";
+        original.NullAsEmptyStringParameters.Add("mutated");
+        original.RoundedIntegerParameters.Add("mutated");
 
         Assert.DoesNotContain("mutated", clone.Aliases);
         Assert.False(clone.NestedParameterAliases["items[]"].ContainsKey("mutated"));
+        Assert.DoesNotContain("mutated", clone.NullAsEmptyStringParameters);
+        Assert.DoesNotContain("mutated", clone.RoundedIntegerParameters);
+    }
+
+    [Fact]
+    public void ParameterTargetSets_NullArray_ThrowsArgumentNullException()
+    {
+        Assert.Throws<ArgumentNullException>(() => new ToolMapping().AllowIntegerRounding(null!));
+        Assert.Throws<ArgumentNullException>(() => new ToolMapping().AddNullAsEmptyStringParameter(null!));
+    }
+
+    [Fact]
+    public void ParameterTargetSets_DottedAndBracketedPaths_PreserveSegmentBoundariesAndMatchAcrossVariants()
+    {
+        var m = new ToolMapping()
+            .AllowIntegerRounding("command_request.max_timeout", "editList[].MaxTimeout", "batches.config.max_timeout", "jobs.timeouts", "matrix_values[]")
+            .AddNullAsEmptyStringParameter("edits[].NewText");
+
+        Assert.DoesNotContain(m.RoundedIntegerParameters, entry => entry.Contains("._", StringComparison.Ordinal));
+        Assert.DoesNotContain(m.NullAsEmptyStringParameters, entry => entry.Contains("._", StringComparison.Ordinal));
+
+        Assert.True(m.ShouldRoundIntegerParameter("commandRequest", "MaxTimeout"));
+        Assert.True(m.ShouldRoundIntegerParameter("edit_list[]", "max_timeout"));
+        Assert.True(m.ShouldRoundIntegerParameter("batches[].Config", "MaxTimeout"));
+        Assert.True(m.ShouldRoundIntegerParameter("jobs[]", "Timeouts[]"));
+        Assert.True(m.ShouldRoundIntegerParameter(string.Empty, "matrix_values[]"));
+        Assert.True(m.ShouldRoundIntegerParameter(string.Empty, "matrix_values[][]"));
+        Assert.False(m.ShouldRoundIntegerParameter(string.Empty, "matrix_values"));
+        Assert.False(m.ShouldRoundIntegerParameter(string.Empty, "max_timeout"));
+        Assert.False(m.ShouldRoundIntegerParameter("commandRequest", "Retries"));
+
+        Assert.True(m.ShouldCoerceNullToEmptyString("edits[]", "new_text"));
+        Assert.True(m.ShouldCoerceNullToEmptyString("edits", "NewText"));
+        Assert.False(m.ShouldCoerceNullToEmptyString(string.Empty, "NewText"));
     }
 }
