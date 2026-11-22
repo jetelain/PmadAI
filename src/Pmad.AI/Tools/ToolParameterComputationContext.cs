@@ -124,7 +124,8 @@ public sealed class ToolParameterComputationContext : IDictionary<string, object
 
     public int GetInt(string parameterName, int defaultValue = 0)
     {
-        if (TryGetValue(parameterName, out var val) && TryParseInt(val, out var parsed))
+        bool allowRounding = _mapping != null && _mapping.ShouldRoundIntegerParameter(string.Empty, parameterName);
+        if (TryGetValue(parameterName, out var val) && TryParseInt(val, allowRounding, out var parsed))
         {
             return parsed;
         }
@@ -133,7 +134,8 @@ public sealed class ToolParameterComputationContext : IDictionary<string, object
 
     public long GetLong(string parameterName, long defaultValue = 0)
     {
-        if (TryGetValue(parameterName, out var val) && TryParseLong(val, out var parsed))
+        bool allowRounding = _mapping != null && _mapping.ShouldRoundIntegerParameter(string.Empty, parameterName);
+        if (TryGetValue(parameterName, out var val) && TryParseLong(val, allowRounding, out var parsed))
         {
             return parsed;
         }
@@ -177,76 +179,49 @@ public sealed class ToolParameterComputationContext : IDictionary<string, object
     }
 
     public static bool TryParseInt(object? value, out int result)
+        => TryParseInt(value, allowRounding: false, out result);
+
+    internal static bool TryParseInt(object? value, bool allowRounding, out int result)
     {
         result = 0;
         if (value == null) return false;
-        if (value is int i) { result = i; return true; }
-        if (value is long l)
-        {
-            if (l < int.MinValue || l > int.MaxValue) return false;
-            result = (int)l;
-            return true;
-        }
-        if (value is short s) { result = s; return true; }
-        if (value is byte b) { result = b; return true; }
-        if (value is double d)
-        {
-            if (double.IsNaN(d) || double.IsInfinity(d) || d < int.MinValue || d > int.MaxValue) return false;
-            result = (int)d;
-            return true;
-        }
-        if (value is float f)
-        {
-            if (float.IsNaN(f) || float.IsInfinity(f) || f < int.MinValue || f > int.MaxValue) return false;
-            result = (int)f;
-            return true;
-        }
-        if (value is decimal dec)
-        {
-            if (dec < int.MinValue || dec > int.MaxValue) return false;
-            result = (int)dec;
-            return true;
-        }
         if (value is bool boolVal) { result = boolVal ? 1 : 0; return true; }
 
-        var str = value.ToString()?.Trim();
-        if (string.IsNullOrEmpty(str)) return false;
-        if (str.StartsWith('#')) str = str[1..].Trim();
-        return int.TryParse(str, NumberStyles.Integer, CultureInfo.InvariantCulture, out result);
+        if (!TryCoerceValueToInt64(value, allowRounding, out var longVal) ||
+            longVal < int.MinValue || longVal > int.MaxValue)
+        {
+            return false;
+        }
+
+        result = (int)longVal;
+        return true;
     }
 
     public static bool TryParseLong(object? value, out long result)
+        => TryParseLong(value, allowRounding: false, out result);
+
+    internal static bool TryParseLong(object? value, bool allowRounding, out long result)
     {
         result = 0;
         if (value == null) return false;
-        if (value is long l) { result = l; return true; }
-        if (value is int i) { result = i; return true; }
-        if (value is short s) { result = s; return true; }
-        if (value is byte b) { result = b; return true; }
-        if (value is double d)
-        {
-            if (double.IsNaN(d) || double.IsInfinity(d) || d < long.MinValue || d > long.MaxValue) return false;
-            result = (long)d;
-            return true;
-        }
-        if (value is float f)
-        {
-            if (float.IsNaN(f) || float.IsInfinity(f) || f < long.MinValue || f > long.MaxValue) return false;
-            result = (long)f;
-            return true;
-        }
-        if (value is decimal dec)
-        {
-            if (dec < long.MinValue || dec > long.MaxValue) return false;
-            result = (long)dec;
-            return true;
-        }
         if (value is bool boolVal) { result = boolVal ? 1 : 0; return true; }
 
-        var str = value.ToString()?.Trim();
-        if (string.IsNullOrEmpty(str)) return false;
-        if (str.StartsWith('#')) str = str[1..].Trim();
-        return long.TryParse(str, NumberStyles.Integer, CultureInfo.InvariantCulture, out result);
+        return TryCoerceValueToInt64(value, allowRounding, out result);
+    }
+
+    private static bool TryCoerceValueToInt64(object value, bool allowRounding, out long result)
+    {
+        if (ToolHelpers.TryCoerceToInt64(value, allowHashPrefix: true, out result, allowRounding: allowRounding))
+        {
+            return true;
+        }
+
+        if (value is not (int or long or short or byte or sbyte or ushort or uint or ulong or double or float or decimal or string or JsonElement))
+        {
+            return ToolHelpers.TryCoerceToInt64(value.ToString(), allowHashPrefix: true, out result, allowRounding: allowRounding);
+        }
+
+        return false;
     }
 
     public static bool TryParseDouble(object? value, out double result)

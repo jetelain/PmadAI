@@ -68,6 +68,13 @@ public class ToolMapping
     /// </summary>
     public HashSet<string> NullAsEmptyStringParameters { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Integer parameters or nested property paths whose fractional numeric values (e.g. "240.5", 240.5)
+    /// should be rounded to the nearest integer (midpoint away from zero) instead of rejected.
+    /// Supports top-level names (e.g. "timeout"), array item paths (e.g. "timeouts[]"), and nested paths (e.g. "request.timeout").
+    /// </summary>
+    public HashSet<string> RoundedIntegerParameters { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
     public ToolMapping() { }
 
     public ToolMapping(
@@ -80,7 +87,8 @@ public class ToolMapping
         IDictionary<string, string>? primaryCollectionProperties = null,
         IEnumerable<RangeToLimitRule>? rangeToLimitRules = null,
         IDictionary<string, IEnumerable<string>>? promotedCollectionParameters = null,
-        IEnumerable<string>? nullAsEmptyStringParameters = null)
+        IEnumerable<string>? nullAsEmptyStringParameters = null,
+        IEnumerable<string>? roundedIntegerParameters = null)
     {
         if (aliases != null)
         {
@@ -167,6 +175,17 @@ public class ToolMapping
                 }
             }
         }
+
+        if (roundedIntegerParameters != null)
+        {
+            foreach (var p in roundedIntegerParameters)
+            {
+                if (!string.IsNullOrWhiteSpace(p))
+                {
+                    RoundedIntegerParameters.Add(p.Trim());
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -196,7 +215,8 @@ public class ToolMapping
                 kvp => kvp.Key,
                 kvp => new HashSet<string>(kvp.Value, StringComparer.OrdinalIgnoreCase),
                 StringComparer.OrdinalIgnoreCase),
-            NullAsEmptyStringParameters = new HashSet<string>(NullAsEmptyStringParameters, StringComparer.OrdinalIgnoreCase)
+            NullAsEmptyStringParameters = new HashSet<string>(NullAsEmptyStringParameters, StringComparer.OrdinalIgnoreCase),
+            RoundedIntegerParameters = new HashSet<string>(RoundedIntegerParameters, StringComparer.OrdinalIgnoreCase)
         };
     }
 
@@ -267,17 +287,18 @@ public class ToolMapping
     /// </summary>
     public ToolMapping AddNullAsEmptyStringParameter(params string[] parameters)
     {
-        foreach (var p in parameters)
-        {
-            if (!string.IsNullOrWhiteSpace(p))
-            {
-                var trimmed = p.Trim();
-                NullAsEmptyStringParameters.Add(trimmed);
-                NullAsEmptyStringParameters.Add(StringCaseConverter.ToSnakeCase(trimmed));
-                NullAsEmptyStringParameters.Add(StringCaseConverter.ToCamelCase(trimmed));
-                NullAsEmptyStringParameters.Add(StringCaseConverter.ToPascalCase(trimmed));
-            }
-        }
+        AddParameterTargets(NullAsEmptyStringParameters, parameters);
+        return this;
+    }
+
+    /// <summary>
+    /// Configures integer parameters or nested property paths whose fractional numeric values
+    /// (e.g. "240.5", 240.5) should be rounded to the nearest integer (midpoint away from zero)
+    /// instead of rejected.
+    /// </summary>
+    public ToolMapping AllowIntegerRounding(params string[] parameters)
+    {
+        AddParameterTargets(RoundedIntegerParameters, parameters);
         return this;
     }
 
@@ -286,49 +307,113 @@ public class ToolMapping
     /// should be coerced to string.Empty ("").
     /// </summary>
     public bool ShouldCoerceNullToEmptyString(string paramPath, string propName)
+        => MatchesParameterSet(NullAsEmptyStringParameters, paramPath, propName);
+
+    /// <summary>
+    /// Determines whether fractional numeric values for the specified parameter path and property name
+    /// should be rounded to the nearest integer instead of rejected.
+    /// </summary>
+    public bool ShouldRoundIntegerParameter(string paramPath, string propName)
+        => MatchesParameterSet(RoundedIntegerParameters, paramPath, propName);
+
+    private static void AddParameterTargets(HashSet<string> targetSet, string[] parameters)
     {
-        if (NullAsEmptyStringParameters == null || NullAsEmptyStringParameters.Count == 0 || string.IsNullOrWhiteSpace(propName))
+        ArgumentNullException.ThrowIfNull(parameters);
+
+        foreach (var p in parameters)
+        {
+            if (!string.IsNullOrWhiteSpace(p))
+            {
+                AddPathCaseVariants(targetSet, p.Trim());
+            }
+        }
+    }
+
+    private static void AddPathCaseVariants(HashSet<string> targetSet, string path)
+    {
+        targetSet.Add(path);
+
+        if (!path.Contains('.', StringComparison.Ordinal) && !path.Contains('[', StringComparison.Ordinal))
+        {
+            targetSet.Add(StringCaseConverter.ToSnakeCase(path));
+            targetSet.Add(StringCaseConverter.ToCamelCase(path));
+            targetSet.Add(StringCaseConverter.ToPascalCase(path));
+            return;
+        }
+
+        var rawSegments = path.Split('.');
+        var snakeSegments = new string[rawSegments.Length];
+        var camelSegments = new string[rawSegments.Length];
+        var pascalSegments = new string[rawSegments.Length];
+
+        for (int i = 0; i < rawSegments.Length; i++)
+        {
+            var seg = rawSegments[i].Trim();
+            var bracketSuffix = string.Empty;
+            while (seg.EndsWith("[]", StringComparison.Ordinal))
+            {
+                bracketSuffix += "[]";
+                seg = seg[..^2];
+            }
+
+            snakeSegments[i] = StringCaseConverter.ToSnakeCase(seg) + bracketSuffix;
+            camelSegments[i] = StringCaseConverter.ToCamelCase(seg) + bracketSuffix;
+            pascalSegments[i] = StringCaseConverter.ToPascalCase(seg) + bracketSuffix;
+        }
+
+        targetSet.Add(string.Join('.', snakeSegments));
+        targetSet.Add(string.Join('.', camelSegments));
+        targetSet.Add(string.Join('.', pascalSegments));
+    }
+
+    private static bool MatchesParameterSet(HashSet<string>? targetSet, string paramPath, string propName)
+    {
+        if (targetSet == null || targetSet.Count == 0 || string.IsNullOrWhiteSpace(propName))
         {
             return false;
         }
 
-        var prop = propName.Trim();
-        var snakeProp = StringCaseConverter.ToSnakeCase(prop);
-        var camelProp = StringCaseConverter.ToCamelCase(prop);
-        var pascalProp = StringCaseConverter.ToPascalCase(prop);
+        var trimmedPath = string.IsNullOrWhiteSpace(paramPath) ? string.Empty : paramPath.Trim();
+        var trimmedProp = propName.Trim();
+        var fullQuery = trimmedPath.Length == 0 ? trimmedProp : $"{trimmedPath}.{trimmedProp}";
 
-        // Check bare property names
-        if (NullAsEmptyStringParameters.Contains(prop) ||
-            NullAsEmptyStringParameters.Contains(snakeProp) ||
-            NullAsEmptyStringParameters.Contains(camelProp) ||
-            NullAsEmptyStringParameters.Contains(pascalProp))
+        if (targetSet.Contains(fullQuery))
         {
             return true;
         }
 
-        // Check path + prop (e.g. "edits[].newText", "edits.newText")
-        if (!string.IsNullOrWhiteSpace(paramPath))
+        if (!TryParsePathSegments(fullQuery, out var querySegments))
         {
-            var p = paramPath.Trim();
-            var candidates = new[]
-            {
-                $"{p}.{prop}",
-                $"{p}.{snakeProp}",
-                $"{p}.{camelProp}",
-                $"{p}.{pascalProp}",
-                $"{p.TrimEnd('[', ']')}.{prop}",
-                $"{p.TrimEnd('[', ']')}.{snakeProp}",
-                $"{p.TrimEnd('[', ']')}.{camelProp}",
-                $"{p.TrimEnd('[', ']')}.{pascalProp}",
-                $"{p.TrimEnd('[', ']')}[].{prop}",
-                $"{p.TrimEnd('[', ']')}[].{snakeProp}",
-                $"{p.TrimEnd('[', ']')}[].{camelProp}",
-                $"{p.TrimEnd('[', ']')}[].{pascalProp}"
-            };
+            return false;
+        }
 
-            foreach (var cand in candidates)
+        foreach (var rawTarget in targetSet)
+        {
+            if (!TryParsePathSegments(rawTarget, out var targetSegments))
             {
-                if (NullAsEmptyStringParameters.Contains(cand))
+                continue;
+            }
+
+            if (targetSegments.Length == 1)
+            {
+                if (SegmentsMatch(targetSegments[0], querySegments[^1], isLeaf: true))
+                {
+                    return true;
+                }
+            }
+            else if (targetSegments.Length == querySegments.Length)
+            {
+                bool allMatch = true;
+                for (int i = 0; i < targetSegments.Length; i++)
+                {
+                    if (!SegmentsMatch(targetSegments[i], querySegments[i], isLeaf: i == targetSegments.Length - 1))
+                    {
+                        allMatch = false;
+                        break;
+                    }
+                }
+
+                if (allMatch)
                 {
                     return true;
                 }
@@ -336,6 +421,57 @@ public class ToolMapping
         }
 
         return false;
+    }
+
+    private readonly record struct PathSegment(string NormalizedId, bool HasBrackets);
+
+    private static bool TryParsePathSegments(string? path, out PathSegment[] segments)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            segments = [];
+            return false;
+        }
+
+        var rawSegments = path.Trim().Split('.');
+        var parsed = new PathSegment[rawSegments.Length];
+        for (int i = 0; i < rawSegments.Length; i++)
+        {
+            var seg = rawSegments[i].Trim();
+            bool hasBrackets = false;
+            while (seg.EndsWith("[]", StringComparison.Ordinal))
+            {
+                hasBrackets = true;
+                seg = seg[..^2];
+            }
+
+            var normalizedId = ToolHelpers.NormalizeToolIdentifier(seg);
+            if (string.IsNullOrEmpty(normalizedId))
+            {
+                segments = [];
+                return false;
+            }
+
+            parsed[i] = new PathSegment(normalizedId, hasBrackets);
+        }
+
+        segments = parsed;
+        return true;
+    }
+
+    private static bool SegmentsMatch(PathSegment target, PathSegment query, bool isLeaf)
+    {
+        if (!string.Equals(target.NormalizedId, query.NormalizedId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (isLeaf && target.HasBrackets && !query.HasBrackets)
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private static Dictionary<string, Dictionary<string, string>> CloneNestedDictionaries(
