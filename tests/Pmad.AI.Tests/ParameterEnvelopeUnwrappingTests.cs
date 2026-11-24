@@ -162,7 +162,7 @@ public class ParameterEnvelopeUnwrappingTests
     }
 
     [Fact]
-    public void StringifiedJsonEnvelope_WithJsonElementStringAndMarkdownFenceAndTruncation_RepairsAndUnwraps()
+    public void StringifiedJsonEnvelope_WithJsonElementStringAndTruncation_RepairsAndUnwraps()
     {
         var telemetry = new LenientDispatchTelemetry();
         var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions
@@ -173,7 +173,7 @@ public class ParameterEnvelopeUnwrappingTests
 
         using var doc = JsonDocument.Parse("""
             {
-              "parameters": "```json\n{\"path\": \"foo.cs\", \"limit\": 10\n```"
+              "parameters": "{\"path\": \"foo.cs\", \"limit\": 10"
             }
             """);
 
@@ -191,6 +191,32 @@ public class ParameterEnvelopeUnwrappingTests
         Assert.Equal(1, snapshot.ParameterEnvelopesUnwrapped);
         Assert.Equal(1, snapshot.StringifiedJsonRepaired);
         Assert.Equal(2, snapshot.TotalHits);
+    }
+
+    [Fact]
+    public void MarkdownFencedEnvelopeValue_IsLeftUntouchedWithoutTelemetry()
+    {
+        var telemetry = new LenientDispatchTelemetry();
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions
+        {
+            Telemetry = telemetry
+        });
+        dispatcher.RegisterTool(AIFunctionFactory.Create((string path) => path, "read_file"));
+
+        const string fenced = "```json\n{\"path\": \"foo.cs\"}\n```";
+        var dispatched = dispatcher.NormalizeCall("read_file", new Dictionary<string, object?>
+        {
+            ["parameters"] = fenced
+        });
+
+        Assert.True(dispatched.Arguments.ContainsKey("parameters"));
+        Assert.Equal(fenced, dispatched.Arguments["parameters"]);
+        Assert.False(dispatched.Arguments.ContainsKey("path"));
+
+        var snapshot = telemetry.CreateSnapshot();
+        Assert.Equal(0, snapshot.ParameterEnvelopesUnwrapped);
+        Assert.Equal(0, snapshot.StringifiedJsonRepaired);
+        Assert.Equal(0, snapshot.TotalHits);
     }
 
     [Theory]

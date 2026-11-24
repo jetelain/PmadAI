@@ -1114,11 +1114,6 @@ public partial class LenientToolDispatcher
         }
 
         var candidate = raw.Trim();
-        if (candidate.StartsWith("```", StringComparison.Ordinal))
-        {
-            candidate = ToolCallHealingTransform.StripMarkdownFences(candidate);
-        }
-
         if (!candidate.StartsWith('{'))
         {
             return false;
