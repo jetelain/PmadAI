@@ -435,7 +435,7 @@ public static partial class ToolCallHealingTransform
         return candidate;
     }
 
-    private static string StripMarkdownFences(string s)
+    internal static string StripMarkdownFences(string s)
     {
         var firstNewline = s.IndexOf('\n');
         if (firstNewline >= 0)
