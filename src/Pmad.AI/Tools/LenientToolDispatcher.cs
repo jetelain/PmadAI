@@ -81,6 +81,7 @@ public partial class LenientToolDispatcher
         var clone = new LenientToolDispatcher(_configuration, new LenientToolDispatcherOptions
         {
             StripNamespacePrefixes = _options.StripNamespacePrefixes,
+            UnwrapParameterEnvelopes = _options.UnwrapParameterEnvelopes,
             ValidateTranslationsWithReadOnlyValidator = _options.ValidateTranslationsWithReadOnlyValidator,
             CommandValidator = _options.CommandValidator,
             EnableParameterCoercion = _options.EnableParameterCoercion,
@@ -432,6 +433,17 @@ public partial class LenientToolDispatcher
 
         _registeredTools.TryGetSchema(canonicalTool, out var propDict, out var rootSchema);
 
+        if (_options.UnwrapParameterEnvelopes && rawArgs.Count > 0)
+        {
+            rawArgs = UnwrapTopLevelParameterEnvelopes(
+                rawArgs,
+                canonicalTool,
+                key => (propDict != null && propDict.ContainsKey(key)) ||
+                       (mapping != null && MappingDeclaresParameter(mapping, key, ToolHelpers.NormalizeToolIdentifier(key))) ||
+                       TryStripJsonSuffixAndMatch(key, propDict, mapping, out _),
+                hasDeclaredMetadata: (propDict != null && propDict.Count > 0) || MappingHasDeclaredParameters(mapping));
+        }
+
         // 3. Resolve parameter aliases via the flat alias -> canonical map (O(1) per argument).
         var canonicalArgs = new AIFunctionArguments();
         var aliased = new List<(string Key, object? Value, string Canonical, int AppearanceIndex)>();
@@ -732,6 +744,15 @@ public partial class LenientToolDispatcher
     private DispatchedToolCall RenderTranslationCall(ToolTranslation translation, IDictionary<string, object?> rawArgs, string originalName)
     {
         var template = translation.CommandTemplate;
+        if (_options.UnwrapParameterEnvelopes && rawArgs.Count > 0)
+        {
+            var declaredParams = CollectDeclaredTranslationParameters(translation, originalName);
+            rawArgs = UnwrapTopLevelParameterEnvelopes(
+                rawArgs,
+                translation.TargetTool,
+                declaredParams.Contains,
+                hasDeclaredMetadata: declaredParams.Count > 0);
+        }
 
         var rendered = TemplatePlaceholderRegex().Replace(template, match =>
         {
@@ -767,8 +788,7 @@ public partial class LenientToolDispatcher
             {
                 // 2. Resolve via the flat parameter alias map: find every alias whose target is
                 // the placeholder parameter and probe the raw arguments (case-insensitively).
-                if (_configuration.Tools.TryGetValue(translation.SourceTool, out var sourceMapping) ||
-                    _configuration.Tools.TryGetValue(originalName, out sourceMapping))
+                if (TryGetTranslationSourceMapping(translation, originalName, out var sourceMapping))
                 {
                     foreach (var (alias, target) in sourceMapping.ParameterAliases)
                     {
@@ -856,6 +876,317 @@ public partial class LenientToolDispatcher
         }
         value = null;
         matchedKey = null;
+        return false;
+    }
+
+    private const int MaxParameterEnvelopeUnwrapDepth = 2;
+
+    private static bool IsParameterEnvelopeKey(string key)
+        => string.Equals(key, "parameters", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(key, "arguments", StringComparison.OrdinalIgnoreCase);
+
+    private static bool MappingHasDeclaredParameters(ToolMapping? mapping)
+        => mapping != null &&
+           (mapping.ParameterAliases is { Count: > 0 } ||
+            mapping.ComputedParameters is { Count: > 0 } ||
+            mapping.PromotedCollectionParameters is { Count: > 0 } ||
+            mapping.PropagatedParameters is { Count: > 0 } ||
+            mapping.RangeToLimitRules is { Count: > 0 } ||
+            (mapping.NestedParameterAliases is { Count: > 0 } &&
+             mapping.NestedParameterAliases.Keys.Any(path =>
+             {
+                 var root = path.Split('.', '[')[0];
+                 return !string.IsNullOrEmpty(root) && root != "*";
+             })));
+
+    private bool TryGetTranslationSourceMapping(
+        ToolTranslation translation,
+        string originalName,
+        [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out ToolMapping sourceMapping)
+    {
+        var trimmedOriginal = originalName.Trim();
+        var strippedOriginal = _options.StripNamespacePrefixes ? StripNamespace(trimmedOriginal) : trimmedOriginal;
+        return _configuration.Tools.TryGetValue(translation.SourceTool, out sourceMapping) ||
+               _configuration.Tools.TryGetValue(trimmedOriginal, out sourceMapping) ||
+               _configuration.Tools.TryGetValue(strippedOriginal, out sourceMapping);
+    }
+
+    private HashSet<string> CollectDeclaredTranslationParameters(ToolTranslation translation, string originalName)
+    {
+        var declared = ExtractTemplatePlaceholders(translation.CommandTemplate);
+
+        if (translation.ParameterAliases != null)
+        {
+            foreach (var (alias, target) in translation.ParameterAliases)
+            {
+                if (!string.IsNullOrWhiteSpace(alias))
+                {
+                    declared.Add(alias);
+                }
+                if (!string.IsNullOrWhiteSpace(target))
+                {
+                    declared.Add(target);
+                }
+            }
+        }
+
+        if (TryGetTranslationSourceMapping(translation, originalName, out var sourceMapping))
+        {
+            foreach (var (alias, target) in sourceMapping.ParameterAliases)
+            {
+                if (!string.IsNullOrWhiteSpace(alias))
+                {
+                    declared.Add(alias);
+                }
+                if (!string.IsNullOrWhiteSpace(target))
+                {
+                    declared.Add(target);
+                }
+            }
+        }
+
+        return declared;
+    }
+
+    private IDictionary<string, object?> UnwrapTopLevelParameterEnvelopes(
+        IDictionary<string, object?> rawArgs,
+        string targetName,
+        Func<string, bool> isDeclaredParameter,
+        bool hasDeclaredMetadata)
+    {
+        var current = rawArgs;
+        for (int depth = 0; depth < MaxParameterEnvelopeUnwrapDepth; depth++)
+        {
+            if (current.Count == 0)
+            {
+                break;
+            }
+
+            bool hasCandidateEnvelope = false;
+            foreach (var (k, _) in current)
+            {
+                if (IsParameterEnvelopeKey(k) && !isDeclaredParameter(k))
+                {
+                    hasCandidateEnvelope = true;
+                    break;
+                }
+            }
+
+            if (!hasCandidateEnvelope)
+            {
+                break;
+            }
+
+            if (current.Count > 1)
+            {
+                if (!hasDeclaredMetadata)
+                {
+                    break;
+                }
+
+                bool hasDeclaredKey = false;
+                foreach (var (k, _) in current)
+                {
+                    if (isDeclaredParameter(k))
+                    {
+                        hasDeclaredKey = true;
+                        break;
+                    }
+                }
+
+                if (hasDeclaredKey)
+                {
+                    break;
+                }
+            }
+
+            string? envelopeKey = null;
+            List<KeyValuePair<string, object?>>? innerEntries = null;
+            bool envelopeWasRepaired = false;
+            foreach (var (k, v) in current)
+            {
+                if (IsParameterEnvelopeKey(k) && !isDeclaredParameter(k) &&
+                    TryExtractEnvelopeEntries(v, out var extracted, out var wasRepaired))
+                {
+                    if (extracted.Count > 0 && current.Count > 1 &&
+                        !HasUnshadowedInnerKey(current, k, extracted))
+                    {
+                        continue;
+                    }
+
+                    envelopeKey = k;
+                    innerEntries = extracted;
+                    envelopeWasRepaired = wasRepaired;
+                    break;
+                }
+            }
+
+            if (envelopeKey == null || innerEntries == null)
+            {
+                break;
+            }
+
+            var next = new Dictionary<string, object?>(StringComparer.Ordinal);
+            var preservedOuterKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (k, v) in current)
+            {
+                if (!string.Equals(k, envelopeKey, StringComparison.Ordinal))
+                {
+                    next[k] = v;
+                    preservedOuterKeys.Add(k);
+                }
+            }
+
+            var insertedInnerKeys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (innerKey, innerVal) in innerEntries)
+            {
+                if (!preservedOuterKeys.Contains(innerKey))
+                {
+                    if (insertedInnerKeys.TryGetValue(innerKey, out var prevKey))
+                    {
+                        if (!IsNullOrUndefined(next[prevKey]) && IsNullOrUndefined(innerVal))
+                        {
+                            continue;
+                        }
+                        if (!string.Equals(prevKey, innerKey, StringComparison.Ordinal))
+                        {
+                            next.Remove(prevKey);
+                        }
+                    }
+                    next[innerKey] = innerVal;
+                    insertedInnerKeys[innerKey] = innerKey;
+                }
+            }
+
+            if (envelopeWasRepaired)
+            {
+                Telemetry?.Record(LenientDispatchEventType.StringifiedJsonRepaired, "<stringified_json>", envelopeKey, SessionId);
+            }
+            Telemetry?.Record(LenientDispatchEventType.ParameterEnvelopeUnwrapped, envelopeKey, targetName, SessionId);
+            current = next;
+        }
+
+        return current;
+    }
+
+    private static bool HasUnshadowedInnerKey(
+        IDictionary<string, object?> current,
+        string envelopeKey,
+        List<KeyValuePair<string, object?>> extracted)
+    {
+        foreach (var (innerKey, _) in extracted)
+        {
+            bool shadowed = false;
+            foreach (var (outerKey, _) in current)
+            {
+                if (!string.Equals(outerKey, envelopeKey, StringComparison.Ordinal) &&
+                    string.Equals(outerKey, innerKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    shadowed = true;
+                    break;
+                }
+            }
+            if (!shadowed)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool TryExtractEnvelopeEntries(
+        object? value,
+        out List<KeyValuePair<string, object?>> entries,
+        out bool wasRepaired)
+    {
+        entries = [];
+        wasRepaired = false;
+        switch (value)
+        {
+            case IDictionary<string, object?> dict:
+                foreach (var kvp in dict)
+                {
+                    entries.Add(kvp);
+                }
+                return true;
+
+            case IReadOnlyDictionary<string, object?> roDict:
+                foreach (var kvp in roDict)
+                {
+                    entries.Add(kvp);
+                }
+                return true;
+
+            case System.Collections.IDictionary nonGenDict:
+                foreach (System.Collections.DictionaryEntry de in nonGenDict)
+                {
+                    if (de.Key is not string keyStr)
+                    {
+                        entries.Clear();
+                        return false;
+                    }
+                    entries.Add(new KeyValuePair<string, object?>(keyStr, de.Value));
+                }
+                return true;
+
+            case JsonElement je:
+                if (je.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var prop in je.EnumerateObject())
+                    {
+                        entries.Add(new KeyValuePair<string, object?>(prop.Name, ToolCallHealingTransform.UnwrapJsonElement(prop.Value)));
+                    }
+                    return true;
+                }
+                if (je.ValueKind == JsonValueKind.String)
+                {
+                    return TryExtractEnvelopeEntriesFromString(je.GetString(), out entries, out wasRepaired);
+                }
+                return false;
+
+            case string str:
+                return TryExtractEnvelopeEntriesFromString(str, out entries, out wasRepaired);
+
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryExtractEnvelopeEntriesFromString(
+        string? raw,
+        out List<KeyValuePair<string, object?>> entries,
+        out bool wasRepaired)
+    {
+        entries = [];
+        wasRepaired = false;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return false;
+        }
+
+        var candidate = raw.Trim();
+        if (!candidate.StartsWith('{'))
+        {
+            return false;
+        }
+
+        var parsed = TryParseStringifiedJson(candidate, out wasRepaired);
+        if (parsed is IDictionary<string, object?> parsedDict)
+        {
+            if (wasRepaired && parsedDict.Count == 0)
+            {
+                wasRepaired = false;
+                return false;
+            }
+
+            foreach (var kvp in parsedDict)
+            {
+                entries.Add(kvp);
+            }
+            return true;
+        }
+
+        wasRepaired = false;
         return false;
     }
 
@@ -1042,9 +1373,7 @@ public partial class LenientToolDispatcher
                 return true;
             }
 
-            if ((_configuration.Tools.TryGetValue(translation.SourceTool, out var sourceMapping) ||
-                 _configuration.Tools.TryGetValue(toolName, out sourceMapping) ||
-                 _configuration.Tools.TryGetValue(stripped, out sourceMapping)) &&
+            if (TryGetTranslationSourceMapping(translation, toolName, out var sourceMapping) &&
                 MappingDeclaresParameter(sourceMapping, parameterName, normParam))
             {
                 return true;
@@ -1116,6 +1445,23 @@ public partial class LenientToolDispatcher
                 r.EndParameterAliases.Any(a => string.Equals(ToolHelpers.NormalizeToolIdentifier(a), normParam, StringComparison.Ordinal))))
         {
             return true;
+        }
+
+        if (mapping.NestedParameterAliases != null)
+        {
+            foreach (var path in mapping.NestedParameterAliases.Keys)
+            {
+                var rootParam = path.Split('.', '[')[0];
+                if (string.IsNullOrEmpty(rootParam) || rootParam == "*")
+                {
+                    continue;
+                }
+                if (string.Equals(rootParam, parameterName, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(ToolHelpers.NormalizeToolIdentifier(rootParam), normParam, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
         }
 
         return false;

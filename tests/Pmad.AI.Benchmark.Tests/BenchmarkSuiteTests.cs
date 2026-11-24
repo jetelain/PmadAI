@@ -1415,5 +1415,80 @@ public class BenchmarkSuiteTests
         Assert.Single(checkpointCallbacks);
         Assert.Equal("bfcl-multiple", checkpointCallbacks[0]);
     }
+
+    [Fact]
+    public void MarkdownReportWriter_AggregatesAndRendersEnvelopeUnwrappingAndStringifiedJsonRepairStats()
+    {
+        var summary = new ModelBenchmarkSummary
+        {
+            ModelId = "qwen3.5-4b",
+            ModelName = "Qwen 3.5 4B",
+            OptimizationConfigId = "opt-lenient",
+            OptimizationConfigLabel = "Lenient Dispatch",
+            DispatchStats = null,
+            ScenarioResults =
+            [
+                new BenchmarkScenarioResult
+                {
+                    ScenarioId = "bfcl-1",
+                    ScenarioName = "BFCL Envelope",
+                    ModelId = "qwen3.5-4b",
+                    Suite = "BFCL",
+                    Weight = 10.0,
+                    TaskSuccess = true,
+                    StepAccuracy = 100.0,
+                    Score = 100.0,
+                    TotalTurns = 2,
+                    TurnsPassed = 2,
+                    DispatchStats = new LenientDispatchTelemetrySnapshot(
+                        TotalHits: 4,
+                        ToolAliasesResolved: 1,
+                        ParameterAliasesResolved: 0,
+                        NamespacesStripped: 0,
+                        CasingNormalized: 0,
+                        EnumValuesSnapped: 0,
+                        EnumValuesUnmatched: 0,
+                        StringifiedJsonRepaired: 1,
+                        ParameterEnvelopesUnwrapped: 2)
+                },
+                new BenchmarkScenarioResult
+                {
+                    ScenarioId = "bfcl-2",
+                    ScenarioName = "BFCL Envelope 2",
+                    ModelId = "qwen3.5-4b",
+                    Suite = "BFCL",
+                    Weight = 10.0,
+                    TaskSuccess = true,
+                    StepAccuracy = 100.0,
+                    Score = 100.0,
+                    TotalTurns = 2,
+                    TurnsPassed = 2,
+                    DispatchStats = new LenientDispatchTelemetrySnapshot(
+                        TotalHits: 3,
+                        ToolAliasesResolved: 0,
+                        ParameterAliasesResolved: 1,
+                        NamespacesStripped: 0,
+                        CasingNormalized: 0,
+                        EnumValuesSnapped: 0,
+                        EnumValuesUnmatched: 0,
+                        StringifiedJsonRepaired: 1,
+                        ParameterEnvelopesUnwrapped: 1)
+                }
+            ]
+        };
+
+        var md = MarkdownReportWriter.GenerateMarkdown([summary]);
+
+        // Aggregated Dispatch Total in Telemetry Matrix = 4 + 3 = 7
+        Assert.Contains("| `Qwen 3.5 4B` | **Lenient Dispatch** | 0 | 0 | 0 | 0 | 0 | 0 | 7 | 1 | 1 | 0 |", md);
+
+        // Per-scenario callout renders StringifiedJsonRepaired and ParameterEnvelopesUnwrapped
+        Assert.Contains(
+            "> 🔀 **Dispatch Normalization Details for BFCL Envelope:** 4 event(s) (1 tool alias hits, 0 param alias hits, 0 casing normalizations, 1 stringified JSON repaired, 2 parameter envelope(s) unwrapped).",
+            md);
+        Assert.Contains(
+            "> 🔀 **Dispatch Normalization Details for BFCL Envelope 2:** 3 event(s) (0 tool alias hits, 1 param alias hits, 0 casing normalizations, 1 stringified JSON repaired, 1 parameter envelope(s) unwrapped).",
+            md);
+    }
 }
 

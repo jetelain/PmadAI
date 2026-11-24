@@ -466,7 +466,7 @@ public static class MarkdownReportWriter
                 if (sc.DispatchStats != null && sc.DispatchStats.TotalHits > 0)
                 {
                     var d = sc.DispatchStats;
-                    sb.AppendLine($"> 🔀 **Dispatch Normalization Details for {sc.ScenarioName}:** {d.TotalHits} event(s) ({d.ToolAliasesResolved} tool alias hits, {d.ParameterAliasesResolved} param alias hits, {d.CasingNormalized} casing normalizations{(d.EnumValuesSnapped > 0 ? $", {d.EnumValuesSnapped} enum value(s) snapped" : "")}).");
+                    sb.AppendLine($"> 🔀 **Dispatch Normalization Details for {sc.ScenarioName}:** {d.TotalHits} event(s) ({d.ToolAliasesResolved} tool alias hits, {d.ParameterAliasesResolved} param alias hits, {d.CasingNormalized} casing normalizations{(d.EnumValuesSnapped > 0 ? $", {d.EnumValuesSnapped} enum value(s) snapped" : "")}{(d.StringifiedJsonRepaired > 0 ? $", {d.StringifiedJsonRepaired} stringified JSON repaired" : "")}{(d.ParameterEnvelopesUnwrapped > 0 ? $", {d.ParameterEnvelopesUnwrapped} parameter envelope(s) unwrapped" : "")}).");
                     sb.AppendLine();
                 }
 
@@ -577,7 +577,9 @@ public static class MarkdownReportWriter
             NamespacesStripped: list.Sum(s => s.NamespacesStripped),
             CasingNormalized: list.Sum(s => s.CasingNormalized),
             EnumValuesSnapped: list.Sum(s => s.EnumValuesSnapped),
-            EnumValuesUnmatched: list.Sum(s => s.EnumValuesUnmatched)
+            EnumValuesUnmatched: list.Sum(s => s.EnumValuesUnmatched),
+            StringifiedJsonRepaired: list.Sum(s => s.StringifiedJsonRepaired),
+            ParameterEnvelopesUnwrapped: list.Sum(s => s.ParameterEnvelopesUnwrapped)
         );
     }
 

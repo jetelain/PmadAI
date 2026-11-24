@@ -26,7 +26,10 @@ public enum LenientDispatchEventType
     EnumValueUnmatched,
 
     /// <summary>A stringified JSON parameter value was repaired (e.g. truncated payload with a missing closing bracket) before parsing.</summary>
-    StringifiedJsonRepaired
+    StringifiedJsonRepaired,
+
+    /// <summary>A redundant top-level parameter envelope (e.g. "parameters" or "arguments") was unwrapped.</summary>
+    ParameterEnvelopeUnwrapped
 }
 
 /// <summary>
@@ -51,7 +54,8 @@ public sealed record LenientDispatchTelemetrySnapshot(
     int CasingNormalized,
     int EnumValuesSnapped = 0,
     int EnumValuesUnmatched = 0,
-    int StringifiedJsonRepaired = 0
+    int StringifiedJsonRepaired = 0,
+    int ParameterEnvelopesUnwrapped = 0
 );
 
 /// <summary>
@@ -90,7 +94,7 @@ public sealed class LenientDispatchTelemetry
             ? _events
             : _events.Where(e => string.Equals(e.SessionId, sessionId, StringComparison.OrdinalIgnoreCase));
 
-        int toolAliases = 0, paramAliases = 0, namespaces = 0, casing = 0, enumSnapped = 0, enumUnmatched = 0, stringifiedRepaired = 0;
+        int toolAliases = 0, paramAliases = 0, namespaces = 0, casing = 0, enumSnapped = 0, enumUnmatched = 0, stringifiedRepaired = 0, envelopesUnwrapped = 0;
         foreach (var e in filtered)
         {
             switch (e.Type)
@@ -102,10 +106,11 @@ public sealed class LenientDispatchTelemetry
                 case LenientDispatchEventType.EnumValueSnapped: enumSnapped++; break;
                 case LenientDispatchEventType.EnumValueUnmatched: enumUnmatched++; break;
                 case LenientDispatchEventType.StringifiedJsonRepaired: stringifiedRepaired++; break;
+                case LenientDispatchEventType.ParameterEnvelopeUnwrapped: envelopesUnwrapped++; break;
             }
         }
 
-        var total = toolAliases + paramAliases + namespaces + casing + enumSnapped + stringifiedRepaired;
-        return new LenientDispatchTelemetrySnapshot(total, toolAliases, paramAliases, namespaces, casing, enumSnapped, enumUnmatched, stringifiedRepaired);
+        var total = toolAliases + paramAliases + namespaces + casing + enumSnapped + stringifiedRepaired + envelopesUnwrapped;
+        return new LenientDispatchTelemetrySnapshot(total, toolAliases, paramAliases, namespaces, casing, enumSnapped, enumUnmatched, stringifiedRepaired, envelopesUnwrapped);
     }
 }

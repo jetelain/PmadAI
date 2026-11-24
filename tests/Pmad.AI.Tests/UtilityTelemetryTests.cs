@@ -66,22 +66,25 @@ public class UtilityTelemetryTests
         telemetry.Record(LenientDispatchEventType.CasingNormalized, "GET_WEATHER", "get_weather", "s2");
         telemetry.Record(LenientDispatchEventType.EnumValueSnapped, "staging", "Staging", "s1");
         telemetry.Record(LenientDispatchEventType.EnumValueUnmatched, "unknown_cluster", "unknown_cluster", "s2");
+        telemetry.Record(LenientDispatchEventType.ParameterEnvelopeUnwrapped, "parameters", "ask_questions", "s1");
 
         var globalSnapshot = telemetry.CreateSnapshot();
-        Assert.Equal(5, globalSnapshot.TotalHits);
+        Assert.Equal(6, globalSnapshot.TotalHits);
         Assert.Equal(1, globalSnapshot.ToolAliasesResolved);
         Assert.Equal(1, globalSnapshot.ParameterAliasesResolved);
         Assert.Equal(1, globalSnapshot.NamespacesStripped);
         Assert.Equal(1, globalSnapshot.CasingNormalized);
         Assert.Equal(1, globalSnapshot.EnumValuesSnapped);
         Assert.Equal(1, globalSnapshot.EnumValuesUnmatched);
+        Assert.Equal(1, globalSnapshot.ParameterEnvelopesUnwrapped);
 
         var s1Snapshot = telemetry.CreateSnapshot("s1");
-        Assert.Equal(3, s1Snapshot.TotalHits);
+        Assert.Equal(4, s1Snapshot.TotalHits);
         Assert.Equal(1, s1Snapshot.ToolAliasesResolved);
         Assert.Equal(1, s1Snapshot.ParameterAliasesResolved);
         Assert.Equal(1, s1Snapshot.EnumValuesSnapped);
         Assert.Equal(0, s1Snapshot.EnumValuesUnmatched);
+        Assert.Equal(1, s1Snapshot.ParameterEnvelopesUnwrapped);
     }
 
     [Fact]

@@ -10,6 +10,13 @@ public class LenientToolDispatcherOptions
     /// <summary>Whether to strip namespace prefixes like "workspace__" or "default:". Default: true.</summary>
     public bool StripNamespacePrefixes { get; set; } = true;
 
+    /// <summary>
+    /// Whether to unwrap redundant top-level parameter envelopes (e.g. <c>{"parameters": {...}}</c>
+    /// or <c>{"arguments": {...}}</c>) when the target tool does not declare a parameter with that name.
+    /// Default: true.
+    /// </summary>
+    public bool UnwrapParameterEnvelopes { get; set; } = true;
+
     /// <summary>Whether to validate rendered shell translations with <see cref="ReadOnlyCommandValidator"/>. Default: true.</summary>
     public bool ValidateTranslationsWithReadOnlyValidator { get; set; } = true;
 
