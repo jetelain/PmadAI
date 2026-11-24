@@ -682,6 +682,16 @@ public class ParameterEnvelopeUnwrappingTests
         // Exact duplicate key inside raw JSON envelope: standard JSON last-wins
         var duplicate = dispatcher.NormalizeCall("read_file", """{"parameters": {"path": "first.cs", "path": "second.cs"}}""");
         Assert.Equal("second.cs", duplicate.Arguments["path"]);
+
+        // Trailing null case-variant inside envelope must NOT overwrite an earlier non-null value
+        var trailingNullVariant = dispatcher.NormalizeCall("read_file", """{"parameters": {"path": "foo.cs", "PATH": null}}""");
+        Assert.Equal("foo.cs", trailingNullVariant.Arguments["path"]);
+        Assert.Single(trailingNullVariant.Arguments.Keys, k => string.Equals(k, "path", StringComparison.Ordinal));
+        Assert.DoesNotContain("PATH", trailingNullVariant.Arguments.Keys, StringComparer.Ordinal);
+
+        // Trailing exact-duplicate null inside envelope must NOT overwrite an earlier non-null value
+        var trailingNullDuplicate = dispatcher.NormalizeCall("read_file", """{"parameters": {"path": "first.cs", "path": null}}""");
+        Assert.Equal("first.cs", trailingNullDuplicate.Arguments["path"]);
     }
 
     [Fact]
@@ -702,7 +712,11 @@ public class ParameterEnvelopeUnwrappingTests
                 ["propagated_tool"] = new ToolMapping()
                     .AddPropagatedParameter("parameters"),
                 ["range_tool"] = new ToolMapping()
-                    .MapEndLineToLimit("offset", "limit", ["end_line"])
+                    .MapEndLineToLimit("offset", "limit", ["end_line"]),
+                ["nested_envelope_tool"] = new ToolMapping()
+                    .AddNestedParameterAlias("parameters", "inner_key", "inner"),
+                ["nested_config_tool"] = new ToolMapping()
+                    .AddNestedParameterAlias("config.nested", "field", "fld")
             }
         };
 
@@ -762,7 +776,33 @@ public class ParameterEnvelopeUnwrappingTests
         });
         Assert.True(jsonSuffixBlocked.Arguments.ContainsKey("parameters"));
 
-        Assert.Equal(1, telemetry.CreateSnapshot().ParameterEnvelopesUnwrapped);
+        // 6. NestedParameterAliases targeting root "parameters" blocks unwrapping "parameters"
+        var nestedEnvelopeBlocked = dispatcher.NormalizeCall("nested_envelope_tool", new Dictionary<string, object?>
+        {
+            ["parameters"] = new Dictionary<string, object?> { ["inner"] = "val" }
+        });
+        Assert.True(nestedEnvelopeBlocked.Arguments.ContainsKey("parameters"));
+        Assert.False(nestedEnvelopeBlocked.Arguments.ContainsKey("inner"));
+        Assert.False(nestedEnvelopeBlocked.Arguments.ContainsKey("inner_key"));
+
+        // 7. NestedParameterAliases targeting root "config" blocks unwrapping when "config" is at top level,
+        //    and counts as declared metadata so an undeclared sibling "extra" allows unwrapping "parameters".
+        var nestedConfigBlocked = dispatcher.NormalizeCall("nested_config_tool", new Dictionary<string, object?>
+        {
+            ["config"] = new Dictionary<string, object?> { ["fld"] = "a" },
+            ["parameters"] = new Dictionary<string, object?> { ["other"] = "val" }
+        });
+        Assert.True(nestedConfigBlocked.Arguments.ContainsKey("parameters"));
+
+        var nestedConfigAllowed = dispatcher.NormalizeCall("nested_config_tool", new Dictionary<string, object?>
+        {
+            ["extra"] = "keep",
+            ["parameters"] = new Dictionary<string, object?> { ["other"] = "val" }
+        });
+        Assert.False(nestedConfigAllowed.Arguments.ContainsKey("parameters"));
+        Assert.Equal("val", nestedConfigAllowed.Arguments["other"]);
+
+        Assert.Equal(2, telemetry.CreateSnapshot().ParameterEnvelopesUnwrapped);
     }
 
     [Fact]
@@ -805,14 +845,14 @@ public class ParameterEnvelopeUnwrappingTests
                     SourceTool = "run_tpl",
                     TargetTool = "run_shell",
                     CommandTemplate = "cat {parameters}",
-                    EscapeMethod = ParameterEscapeMethod.None
+                    EscapeMethod = ParameterEscapeMethod.Bash
                 },
                 new ToolTranslation
                 {
                     SourceTool = "run_alias_tpl",
                     TargetTool = "run_shell",
                     CommandTemplate = "cat {payload}",
-                    EscapeMethod = ParameterEscapeMethod.None,
+                    EscapeMethod = ParameterEscapeMethod.Bash,
                     ParameterAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                     {
                         ["arguments"] = "payload"
@@ -824,7 +864,7 @@ public class ParameterEnvelopeUnwrappingTests
                     TargetTool = "run_shell",
                     CommandTemplate = "ls {target}",
                     Aliases = ["list_dir"],
-                    EscapeMethod = ParameterEscapeMethod.None
+                    EscapeMethod = ParameterEscapeMethod.Bash
                 }
             ],
             Tools =
@@ -843,26 +883,27 @@ public class ParameterEnvelopeUnwrappingTests
         });
         dispatcher.RegisterTool(AIFunctionFactory.Create((string command) => command, "run_shell"));
 
-        // 1. Template placeholder {parameters}
+        // 1. Template placeholder {parameters} with JSON-object payload (would unwrap if guard failed)
+        const string jsonPayload = """{"nested":"val"}""";
         var tplDispatched = dispatcher.NormalizeCall("run_tpl", new Dictionary<string, object?>
         {
-            ["parameters"] = "hello.txt"
+            ["parameters"] = jsonPayload
         });
-        Assert.Equal("cat hello.txt", tplDispatched.RenderedCommand);
+        Assert.Equal($"cat '{jsonPayload}'", tplDispatched.RenderedCommand);
 
-        // 2. translation.ParameterAliases maps "arguments" -> "payload"
+        // 2. translation.ParameterAliases maps "arguments" -> "payload" with JSON-object payload
         var aliasDispatched = dispatcher.NormalizeCall("run_alias_tpl", new Dictionary<string, object?>
         {
-            ["arguments"] = "world.txt"
+            ["arguments"] = jsonPayload
         });
-        Assert.Equal("cat world.txt", aliasDispatched.RenderedCommand);
+        Assert.Equal($"cat '{jsonPayload}'", aliasDispatched.RenderedCommand);
 
         // 3. Namespaced originalName matching mapping registered under stripped alias ("list_dir")
         var namespacedDispatched = dispatcher.NormalizeCall(" workspace__list_dir ", new Dictionary<string, object?>
         {
-            ["parameters"] = "src"
+            ["parameters"] = jsonPayload
         });
-        Assert.Equal("ls src", namespacedDispatched.RenderedCommand);
+        Assert.Equal($"ls '{jsonPayload}'", namespacedDispatched.RenderedCommand);
 
         // 4. Multi-key guard runs before TryExtractEnvelopeEntries (no StringifiedJsonRepaired recorded)
         var multiKeyBlocked = dispatcher.NormalizeCall("ls_dir", new Dictionary<string, object?>
@@ -870,11 +911,69 @@ public class ParameterEnvelopeUnwrappingTests
             ["target"] = "src",
             ["parameters"] = "{\"extra\": 1"
         });
-        Assert.Equal("ls src", multiKeyBlocked.RenderedCommand);
+        Assert.Equal("ls 'src'", multiKeyBlocked.RenderedCommand);
 
         var snapshot = telemetry.CreateSnapshot();
         Assert.Equal(0, snapshot.ParameterEnvelopesUnwrapped);
         Assert.Equal(0, snapshot.StringifiedJsonRepaired);
+    }
+
+    [Fact]
+    public void ShadowedInnerEnvelopeKeys_AreNotDroppedOrFalselyUnwrapped()
+    {
+        var telemetry = new LenientDispatchTelemetry();
+        var dispatcher = new LenientToolDispatcher(new LenientToolDispatcherOptions
+        {
+            Telemetry = telemetry
+        });
+        dispatcher.RegisterTool(AIFunctionFactory.Create((string path) => path, "read_file"));
+
+        // Non-object "parameters" alongside "arguments" wrapping another "parameters":
+        // unwrapping "arguments" would silently drop the inner "parameters" payload.
+        var objectShadowed = dispatcher.NormalizeCall("read_file", new Dictionary<string, object?>
+        {
+            ["parameters"] = "plain note",
+            ["arguments"] = new Dictionary<string, object?>
+            {
+                ["parameters"] = new Dictionary<string, object?> { ["path"] = "foo.cs" }
+            }
+        });
+
+        Assert.Equal("plain note", objectShadowed.Arguments["parameters"]);
+        Assert.True(objectShadowed.Arguments.ContainsKey("arguments"));
+        Assert.False(objectShadowed.Arguments.ContainsKey("path"));
+        Assert.Equal(0, telemetry.CreateSnapshot().ParameterEnvelopesUnwrapped);
+
+        // Translation path bypasses NormalizeValueDeep, proving UnwrapTopLevelParameterEnvelopes
+        // itself does not unwrap or emit StringifiedJsonRepaired for a truncated shadowed envelope.
+        var translationTelemetry = new LenientDispatchTelemetry();
+        var translationDispatcher = new LenientToolDispatcher(new ToolDispatcherConfiguration
+        {
+            Translations =
+            [
+                new ToolTranslation
+                {
+                    SourceTool = "list_dir",
+                    TargetTool = "run_shell",
+                    CommandTemplate = "ls {target:.}",
+                    EscapeMethod = ParameterEscapeMethod.Bash
+                }
+            ]
+        }, new LenientToolDispatcherOptions { Telemetry = translationTelemetry });
+        translationDispatcher.RegisterTool(AIFunctionFactory.Create((string command) => command, "run_shell"));
+
+        var stringifiedShadowed = translationDispatcher.NormalizeCall("list_dir", new Dictionary<string, object?>
+        {
+            ["parameters"] = "plain note",
+            ["arguments"] = "{\"parameters\": {\"target\": \"src\""
+        });
+
+        Assert.Equal("ls '.'", stringifiedShadowed.RenderedCommand);
+
+        var snapshot = translationTelemetry.CreateSnapshot();
+        Assert.Equal(0, snapshot.ParameterEnvelopesUnwrapped);
+        Assert.Equal(0, snapshot.StringifiedJsonRepaired);
+        Assert.Equal(0, snapshot.TotalHits);
     }
 
     private sealed class ReadOnlyOnlyDictionary(IReadOnlyDictionary<string, object?> inner)

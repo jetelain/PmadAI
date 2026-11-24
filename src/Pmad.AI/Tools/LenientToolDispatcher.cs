@@ -891,7 +891,13 @@ public partial class LenientToolDispatcher
             mapping.ComputedParameters is { Count: > 0 } ||
             mapping.PromotedCollectionParameters is { Count: > 0 } ||
             mapping.PropagatedParameters is { Count: > 0 } ||
-            mapping.RangeToLimitRules is { Count: > 0 });
+            mapping.RangeToLimitRules is { Count: > 0 } ||
+            (mapping.NestedParameterAliases is { Count: > 0 } &&
+             mapping.NestedParameterAliases.Keys.Any(path =>
+             {
+                 var root = path.Split('.', '[')[0];
+                 return !string.IsNullOrEmpty(root) && root != "*";
+             })));
 
     private bool TryGetTranslationSourceMapping(
         ToolTranslation translation,
@@ -996,13 +1002,21 @@ public partial class LenientToolDispatcher
 
             string? envelopeKey = null;
             List<KeyValuePair<string, object?>>? innerEntries = null;
+            bool envelopeWasRepaired = false;
             foreach (var (k, v) in current)
             {
                 if (IsParameterEnvelopeKey(k) && !isDeclaredParameter(k) &&
-                    TryExtractEnvelopeEntries(v, k, out var extracted))
+                    TryExtractEnvelopeEntries(v, out var extracted, out var wasRepaired))
                 {
+                    if (extracted.Count > 0 && current.Count > 1 &&
+                        !HasUnshadowedInnerKey(current, k, extracted))
+                    {
+                        continue;
+                    }
+
                     envelopeKey = k;
                     innerEntries = extracted;
+                    envelopeWasRepaired = wasRepaired;
                     break;
                 }
             }
@@ -1028,16 +1042,26 @@ public partial class LenientToolDispatcher
             {
                 if (!preservedOuterKeys.Contains(innerKey))
                 {
-                    if (insertedInnerKeys.TryGetValue(innerKey, out var prevKey) &&
-                        !string.Equals(prevKey, innerKey, StringComparison.Ordinal))
+                    if (insertedInnerKeys.TryGetValue(innerKey, out var prevKey))
                     {
-                        next.Remove(prevKey);
+                        if (!IsNullOrUndefined(next[prevKey]) && IsNullOrUndefined(innerVal))
+                        {
+                            continue;
+                        }
+                        if (!string.Equals(prevKey, innerKey, StringComparison.Ordinal))
+                        {
+                            next.Remove(prevKey);
+                        }
                     }
                     next[innerKey] = innerVal;
                     insertedInnerKeys[innerKey] = innerKey;
                 }
             }
 
+            if (envelopeWasRepaired)
+            {
+                Telemetry?.Record(LenientDispatchEventType.StringifiedJsonRepaired, "<stringified_json>", envelopeKey, SessionId);
+            }
             Telemetry?.Record(LenientDispatchEventType.ParameterEnvelopeUnwrapped, envelopeKey, targetName, SessionId);
             current = next;
         }
@@ -1045,12 +1069,38 @@ public partial class LenientToolDispatcher
         return current;
     }
 
-    private bool TryExtractEnvelopeEntries(
-        object? value,
+    private static bool HasUnshadowedInnerKey(
+        IDictionary<string, object?> current,
         string envelopeKey,
-        out List<KeyValuePair<string, object?>> entries)
+        List<KeyValuePair<string, object?>> extracted)
+    {
+        foreach (var (innerKey, _) in extracted)
+        {
+            bool shadowed = false;
+            foreach (var (outerKey, _) in current)
+            {
+                if (!string.Equals(outerKey, envelopeKey, StringComparison.Ordinal) &&
+                    string.Equals(outerKey, innerKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    shadowed = true;
+                    break;
+                }
+            }
+            if (!shadowed)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool TryExtractEnvelopeEntries(
+        object? value,
+        out List<KeyValuePair<string, object?>> entries,
+        out bool wasRepaired)
     {
         entries = [];
+        wasRepaired = false;
         switch (value)
         {
             case IDictionary<string, object?> dict:
@@ -1090,24 +1140,25 @@ public partial class LenientToolDispatcher
                 }
                 if (je.ValueKind == JsonValueKind.String)
                 {
-                    return TryExtractEnvelopeEntriesFromString(je.GetString(), envelopeKey, out entries);
+                    return TryExtractEnvelopeEntriesFromString(je.GetString(), out entries, out wasRepaired);
                 }
                 return false;
 
             case string str:
-                return TryExtractEnvelopeEntriesFromString(str, envelopeKey, out entries);
+                return TryExtractEnvelopeEntriesFromString(str, out entries, out wasRepaired);
 
             default:
                 return false;
         }
     }
 
-    private bool TryExtractEnvelopeEntriesFromString(
+    private static bool TryExtractEnvelopeEntriesFromString(
         string? raw,
-        string envelopeKey,
-        out List<KeyValuePair<string, object?>> entries)
+        out List<KeyValuePair<string, object?>> entries,
+        out bool wasRepaired)
     {
         entries = [];
+        wasRepaired = false;
         if (string.IsNullOrWhiteSpace(raw))
         {
             return false;
@@ -1119,17 +1170,13 @@ public partial class LenientToolDispatcher
             return false;
         }
 
-        var parsed = TryParseStringifiedJson(candidate, out bool wasRepaired);
+        var parsed = TryParseStringifiedJson(candidate, out wasRepaired);
         if (parsed is IDictionary<string, object?> parsedDict)
         {
             if (wasRepaired && parsedDict.Count == 0)
             {
+                wasRepaired = false;
                 return false;
-            }
-
-            if (wasRepaired)
-            {
-                Telemetry?.Record(LenientDispatchEventType.StringifiedJsonRepaired, "<stringified_json>", envelopeKey, SessionId);
             }
 
             foreach (var kvp in parsedDict)
@@ -1139,6 +1186,7 @@ public partial class LenientToolDispatcher
             return true;
         }
 
+        wasRepaired = false;
         return false;
     }
 
@@ -1325,9 +1373,7 @@ public partial class LenientToolDispatcher
                 return true;
             }
 
-            if ((_configuration.Tools.TryGetValue(translation.SourceTool, out var sourceMapping) ||
-                 _configuration.Tools.TryGetValue(toolName, out sourceMapping) ||
-                 _configuration.Tools.TryGetValue(stripped, out sourceMapping)) &&
+            if (TryGetTranslationSourceMapping(translation, toolName, out var sourceMapping) &&
                 MappingDeclaresParameter(sourceMapping, parameterName, normParam))
             {
                 return true;
@@ -1399,6 +1445,23 @@ public partial class LenientToolDispatcher
                 r.EndParameterAliases.Any(a => string.Equals(ToolHelpers.NormalizeToolIdentifier(a), normParam, StringComparison.Ordinal))))
         {
             return true;
+        }
+
+        if (mapping.NestedParameterAliases != null)
+        {
+            foreach (var path in mapping.NestedParameterAliases.Keys)
+            {
+                var rootParam = path.Split('.', '[')[0];
+                if (string.IsNullOrEmpty(rootParam) || rootParam == "*")
+                {
+                    continue;
+                }
+                if (string.Equals(rootParam, parameterName, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(ToolHelpers.NormalizeToolIdentifier(rootParam), normParam, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
         }
 
         return false;
